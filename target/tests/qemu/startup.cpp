@@ -17,8 +17,10 @@ void SysTick_Handler();
 
 /// GCC calls memcpy and memset whenever it likes, and a freestanding program
 /// has to provide them; these images link no C library. Built without loop
-/// pattern recognition, so they do not turn into calls to themselves.
-extern "C" [[gnu::optimize("no-tree-loop-distribute-patterns")]]
+/// pattern recognition, so they do not turn into calls to themselves; kept
+/// whether referenced or not, since with -flto the calls appear only after
+/// the link has dropped what nothing referenced.
+extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
 void* memcpy(void* destination, void const* source, std::size_t size)
 {
 	auto* to = static_cast<unsigned char*>(destination);
@@ -28,7 +30,7 @@ void* memcpy(void* destination, void const* source, std::size_t size)
 	return destination;
 }
 
-extern "C" [[gnu::optimize("no-tree-loop-distribute-patterns")]]
+extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
 void* memset(void* destination, int value, std::size_t size)
 {
 	auto* to = static_cast<unsigned char*>(destination);

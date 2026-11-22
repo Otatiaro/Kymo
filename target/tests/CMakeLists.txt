@@ -69,10 +69,16 @@ set(script_cortex-m33 ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv8m.ld)
 set(machine_cortex-m4 mps2-an386)
 set(script_cortex-m4 ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv7m.ld)
 
-# An image for QEMU:
+# An image for QEMU, at an optimisation level, with link-time optimisation
+# when it ends in -lto (Os-lto):
 #   kymo_qemu_image(<name> <cpu> <level> SOURCES <files> [DEFINITIONS <defs>])
 function(kymo_qemu_image name cpu level)
 	cmake_parse_arguments(PARSE_ARGV 3 arg "" "" "SOURCES;DEFINITIONS")
+	set(lto "")
+	if(level MATCHES "-lto$")
+		string(REPLACE "-lto" "" level ${level})
+		set(lto -${level} -flto)
+	endif()
 	set(script ${script_${cpu}})
 	add_executable(${name} ${arg_SOURCES} qemu/startup.cpp)
 	set_target_properties(${name} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
@@ -83,8 +89,8 @@ function(kymo_qemu_image name cpu level)
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections
-		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
-	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb
+		-fno-exceptions -fno-rtti -fno-threadsafe-statics ${lto})
+	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb ${lto}
 		-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
 endfunction()
 
@@ -122,6 +128,29 @@ foreach(cpu cortex-m33 cortex-m4)
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES control/control.cpp qemu/preempt.cpp
 			DEFINITIONS KYMO_CONTROL_DEFAULT=0xffffffbfu)
+	endforeach()
+endforeach()
+
+# What the host reads from an image, checked against the image itself. Needs
+# the host, built from host/ (cargo build --release):
+# - layout: the event layouts from the DWARF (kymo events) against what the
+#   compiler laid out;
+# - decode: a copy of the ring (kymo decode) against the events written to it.
+find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
+foreach(test layout decode)
+	foreach(cpu cortex-m33 cortex-m4)
+		foreach(level O0 Os Os-lto)
+			set(name ${test}-${cpu}-${level})
+			kymo_qemu_image(${name} ${cpu} ${level} SOURCES ${test}/${test}.cpp)
+			if(KYMO_HOST)
+				kymo_qemu_command(${name}
+					${CMAKE_CURRENT_SOURCE_DIR}/${test}/${test}.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+					--image $<TARGET_FILE:${name}> --host ${KYMO_HOST})
+			else()
+				add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
+				set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+			endif()
+		endforeach()
 	endforeach()
 endforeach()
 
