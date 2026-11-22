@@ -41,7 +41,7 @@ foreach(board IN LISTS boards)
 		-ffunction-sections -fdata-sections
 		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
 	target_link_options(${target} PRIVATE ${arch}
-		-nostdlib -Wl,--gc-sections -Wl,--build-id
+		-nostdlib -Wl,--gc-sections
 		-L${CMAKE_CURRENT_SOURCE_DIR}/boards
 		-T${CMAKE_CURRENT_SOURCE_DIR}/boards/${board}.ld
 		-Wl,-Map=${target}.map)

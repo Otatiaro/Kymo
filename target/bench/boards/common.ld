@@ -9,10 +9,6 @@ SECTIONS
 {
   .isr_vector : { KEEP(*(.isr_vector)) } > FLASH
 
-  /* Placed explicitly: as an orphan section the linker would put it ahead of
-     the vector table. The host matches it against the ELF it decodes with. */
-  .note.gnu.build-id : { KEEP(*(.note.gnu.build-id)) } > FLASH
-
   .text :
   {
     *(.text*)
@@ -42,6 +38,4 @@ SECTIONS
   } > RAM
 
   _estack = ORIGIN(RAM) + LENGTH(RAM);
-
-  /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.init_array*) *(.fini_array*) }
 }
