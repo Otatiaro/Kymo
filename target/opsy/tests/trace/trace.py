@@ -81,11 +81,17 @@ UNKNOWN = object()
 
 
 def parse(output: str) -> list:
-    """The events and losses, in order: (line, name, fields) or (line, None, None)."""
+    """The events and losses, in order: (line, name, fields) or (line, None, None).
+
+    A recording that starts after the target's first event starts with a loss:
+    what happened before it is unknown.
+    """
     items = []
     for line in output.splitlines():
         words = line.split(" ", 5)
-        if words[0] == "lost":
+        if words[0] == "record" and int(words[1]) != 0:
+            items.append((line, None, None))
+        elif words[0] == "lost":
             items.append((line, None, None))
         elif words[0] == "event":
             # A name may hold a space, "(anonymous namespace)": a field

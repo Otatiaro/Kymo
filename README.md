@@ -42,6 +42,10 @@ Cortex-M33 and Cortex-M4 first, then M3 and M7. Probes: SEGGER J-Link and
 ST-Link (V2-1, V3), through probe-rs and through the vendors' own libraries
 where they bring speed or features. Host: Windows and Linux.
 
+On an STM32H5, record through probe-rs, not through the ST-Link library:
+STM32CubeProgrammer, attaching to an H5 even in hot-plug mode, halts the core
+and disables every interrupt, so the program being recorded stops.
+
 ## License
 
 [MIT](LICENSE).
