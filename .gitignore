@@ -1,0 +1,5 @@
+/host/target/
+/build/
+*.elf
+*.bin
+*.map
