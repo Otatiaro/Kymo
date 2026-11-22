@@ -29,7 +29,10 @@ impl Layout {
         if slots < 2 || !slots.is_power_of_two() || 4 + slots * SLOT_BYTES != symbol.size {
             return Err(format!("kymo_ring has an unexpected size of {} bytes", symbol.size).into());
         }
-        Ok(Self { address: symbol.address, slots })
+        Ok(Self {
+            address: symbol.address,
+            slots,
+        })
     }
 
     pub fn bytes(&self) -> u32 {

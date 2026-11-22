@@ -10,9 +10,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
-const DEFAULT_PATHS: &[&str] = &[
-    r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\api\lib\CubeProgrammer_API.dll",
-];
+const DEFAULT_PATHS: &[&str] =
+    &[r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\api\lib\CubeProgrammer_API.dll"];
 #[cfg(not(windows))]
 const DEFAULT_PATHS: &[&str] = &[
     "/usr/local/STMicroelectronics/STM32Cube/STM32CubeProgrammer/lib/libCubeProgrammer_API.so",
@@ -67,7 +66,9 @@ const MESSAGE_WARNING: c_int = 4;
 
 /// Passes the library's errors and warnings on, drops the rest.
 unsafe extern "C" fn report_message(kind: c_int, text: *const u16) {
-    if text.is_null() || std::env::var_os("KYMO_STLINK_LOG").is_none() && kind != MESSAGE_ERROR && kind != MESSAGE_WARNING {
+    if text.is_null()
+        || std::env::var_os("KYMO_STLINK_LOG").is_none() && kind != MESSAGE_ERROR && kind != MESSAGE_WARNING
+    {
         return;
     }
     // SAFETY: the library passes a NUL-terminated wide string.
@@ -75,7 +76,10 @@ unsafe extern "C" fn report_message(kind: c_int, text: *const u16) {
         let length = (0..).take_while(|&i| *text.add(i) != 0).count();
         std::slice::from_raw_parts(text, length)
     };
-    eprintln!("CubeProgrammer [{kind}]: {}", String::from_utf16_lossy(units).trim_end());
+    eprintln!(
+        "CubeProgrammer [{kind}]: {}",
+        String::from_utf16_lossy(units).trim_end()
+    );
 }
 unsafe extern "C" fn ignore_load(_: c_int, _: c_int) {}
 
@@ -147,7 +151,9 @@ impl StLinkTarget {
                 Vec::new()
             };
             let serial_of = |probe: &ConnectParameters| {
-                CStr::from_ptr(probe.serial_number.as_ptr()).to_string_lossy().into_owned()
+                CStr::from_ptr(probe.serial_number.as_ptr())
+                    .to_string_lossy()
+                    .into_owned()
             };
             let mut parameters = match &connection.probe {
                 Some(serial) => *probes
@@ -202,7 +208,11 @@ fn load_library() -> Result<(Library, PathBuf)> {
             Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
     }
-    Err(format!("CubeProgrammer library not found ({}); set {PATH_VARIABLE}", errors.join("; ")).into())
+    Err(format!(
+        "CubeProgrammer library not found ({}); set {PATH_VARIABLE}",
+        errors.join("; ")
+    )
+    .into())
 }
 
 #[cfg(windows)]
