@@ -135,9 +135,11 @@ endforeach()
 # the host, built from host/ (cargo build --release):
 # - layout: the event layouts from the DWARF (kymo events) against what the
 #   compiler laid out;
-# - decode: a copy of the ring (kymo decode) against the events written to it.
+# - decode: a copy of the ring (kymo decode) against the events written to it;
+# - record: what the host records of a running image through QEMU's monitor
+#   (kymo record), against the values each event carries.
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
-foreach(test layout decode)
+foreach(test layout decode record)
 	foreach(cpu cortex-m33 cortex-m4)
 		foreach(level O0 Os Os-lto)
 			set(name ${test}-${cpu}-${level})

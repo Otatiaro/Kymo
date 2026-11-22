@@ -1,9 +1,11 @@
 //! Kymo host.
 
 mod bench;
+mod capture;
 mod decode;
 mod elf;
 mod events;
+mod record;
 mod ring;
 mod swo;
 mod target;
@@ -15,7 +17,8 @@ use target::{Backend, Connection, Result};
 
 const USAGE: &str = "\
 usage: kymo events <elf>
-       kymo decode <elf> <ring>
+       kymo decode <elf> <ring or capture>
+       kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
 
 events: lists the event types of an image, read from its ELF: each type id,
@@ -23,7 +26,18 @@ the type it stands for, its size, and each field's offset, size and type.
 
 decode: lists the events a copy of the trace ring holds, oldest first; the
 copy is the bytes of kymo::trace_ring, dumped from a stopped target running
-the image.
+the image. Given a capture made by kymo record --out, prints what kymo
+record printed while making it.
+
+record: prints the events of a running target as it writes them, drained
+from its trace ring through the probe, and the indexes lost when the ring
+overtook the probe; stops on Enter, or after --duration.
+
+record options:
+  --probe-id, --chip, --speed as for bench; qemu: --probe-id <host>:<port>,
+                     QEMU's monitor started with -qmp tcp:<host>:<port>,server=on,wait=off
+  --duration <seconds>  stop after this long
+  --out <file>       also keep the recording in this capture file
 
 bench: measures how fast a probe drains the trace ring of the bench image,
 and how fast SWO carries the same events with --swo-baud, and whether the
@@ -51,8 +65,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
-    match arguments.next().as_deref() {
-        Some("bench") => {}
+    let command = arguments.next();
+    match command.as_deref() {
+        Some("bench" | "record") => {}
         Some("events") => {
             let elf = match (arguments.next(), arguments.next()) {
                 (Some(elf), None) => PathBuf::from(elf),
@@ -68,6 +83,9 @@ fn run() -> Result<()> {
             };
             let catalogue = events::read(&elf)?;
             let bytes = std::fs::read(&ring).map_err(|error| format!("{}: {error}", ring.display()))?;
+            if capture::is_capture(&bytes) {
+                return record::print_capture(&catalogue, &bytes);
+            }
             let (write_index, decoded) = decode::decode(&catalogue, &bytes)?;
             decode::print(write_index, &decoded);
             return Ok(());
@@ -82,6 +100,8 @@ fn run() -> Result<()> {
     let mut step = 2.0;
     let mut max_events_per_tick = 1024;
     let mut swo_baud = None;
+    let mut duration = None;
+    let mut out = None;
     while let Some(option) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{option} needs a value"));
         match option.as_str() {
@@ -96,6 +116,8 @@ fn run() -> Result<()> {
             "--step" => step = value()?.parse()?,
             "--max-rate" => max_events_per_tick = value()?.parse()?,
             "--swo-baud" => swo_baud = Some(value()?.parse()?),
+            "--duration" => duration = Some(Duration::from_secs_f64(value()?.parse()?)),
+            "--out" => out = Some(PathBuf::from(value()?)),
             _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
         }
     }
@@ -105,7 +127,22 @@ fn run() -> Result<()> {
         chip,
         speed_khz,
     };
-    let elf = elf::Elf::read(&elf.ok_or(USAGE)?)?;
+    let elf_path = elf.ok_or(USAGE)?;
+    if command.as_deref() == Some("record") {
+        let catalogue = events::read(&elf_path)?;
+        let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
+        let symbol = elf::Elf::read(&elf_path)?.symbol("_ZN4kymo10trace_ringE")?;
+        if u64::from(symbol.size) != ring.size {
+            return Err(format!(
+                "kymo::trace_ring: {} bytes in the symbol table, {} in DWARF",
+                symbol.size, ring.size
+            )
+            .into());
+        }
+        let mut target = target::open(&connection)?;
+        return record::run(target.as_mut(), &catalogue, symbol.address, duration, out.as_deref());
+    }
+    let elf = elf::Elf::read(&elf_path)?;
     let settings = bench::Settings {
         step: Duration::from_secs_f64(step),
         max_events_per_tick,

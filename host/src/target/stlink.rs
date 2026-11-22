@@ -242,8 +242,8 @@ impl Target for StLinkTarget {
                 return Err(format!("ST-Link read at {address:#010x} failed ({result})").into());
             }
             let bytes = std::slice::from_raw_parts(data, size as usize);
-            for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
-                *word = u32::from_le_bytes(chunk.try_into().unwrap());
+            for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                *word = u32::from_le_bytes(*chunk);
             }
             (self.api.free)(data.cast());
         }
