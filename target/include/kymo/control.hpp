@@ -23,7 +23,9 @@
  * ring.
  *
  * The word holds KYMO_CONTROL_DEFAULT from reset, constant-initialised with
- * no startup code: a board with no host attached records with it.
+ * no startup code: a board with no host attached records with it. By default
+ * every family but kernel: the RTOS's own machinery matters to whoever works
+ * on the RTOS, and costs every path that crosses it.
  *
  * A writer that loads the word just before a freeze still writes its event
  * after it. That event is timestamped like any other.
@@ -35,7 +37,7 @@
 #include <type_traits>
 
 #ifndef KYMO_CONTROL_DEFAULT
-#define KYMO_CONTROL_DEFAULT 0xffffffffu
+#define KYMO_CONTROL_DEFAULT 0xffffff7fu
 #endif
 
 namespace kymo
@@ -46,11 +48,12 @@ enum class family : std::uint8_t
 {
 	scheduling,   ///< a task takes or leaves the core, idle, creation, end, priority
 	causality,    ///< a task becomes ready and why, starts waiting, is notified
-	interrupts,   ///< entry and exit of each handler, SVC and its service
+	interrupts,   ///< entry and exit of the application's interrupt handlers
 	exclusion,    ///< mutexes, priority inheritance, masked sections
 	faults,       ///< traps, asserts, hardware faults
 	application,  ///< marks, intervals, values, text
 	meta,         ///< losses, active configuration, freeze, build id
+	kernel,       ///< the RTOS's own machinery: its tick, service calls, context switch interrupt
 };
 
 /**

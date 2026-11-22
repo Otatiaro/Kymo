@@ -3,19 +3,22 @@ name: Target
 on:
   push:
     branches: [master]
-    paths: ['target/**', '.github/workflows/target.yml']
+    paths: ['target/**', '.github/workflows/target.yml', '.github/actions/**']
   pull_request:
     branches: [master]
-    paths: ['target/**', '.github/workflows/target.yml']
+    paths: ['target/**', '.github/workflows/target.yml', '.github/actions/**']
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   TOOLCHAIN_VERSION: '16.2.0-1'
+  # The OpSy the adapter is tested against. A change on OpSy's side reaches
+  # Kymo when this moves.
+  OPSY_COMMIT: 194934fea11a657d545cc5268755f17497ae0f00
 
 # The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
 # writes and the control word under preemption, and the cost of an emit
-# against its threshold. One compiler, GCC 16, from
-# Otatiaro/arm-none-eabi-toolchain.
+# against its threshold; then the OpSy adapter on OpSy's own suite and bench.
+# One compiler, GCC 16, from Otatiaro/arm-none-eabi-toolchain.
 jobs:
   tests:
     name: Tests
@@ -24,18 +27,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install the arm-none-eabi toolchain
-        run: |
-          set -euo pipefail
-          base="https://github.com/Otatiaro/arm-none-eabi-toolchain/releases/download/v${TOOLCHAIN_VERSION}"
-          archive="arm-none-eabi-toolchain-${TOOLCHAIN_VERSION}-linux-x86_64.tar.xz"
-          cd "$RUNNER_TEMP"
-          curl --fail --silent --show-error --location --retry 3 -o "$archive" "$base/$archive"
-          curl --fail --silent --show-error --location --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
-          sha256sum --check --ignore-missing SHA256SUMS
-          mkdir -p "$HOME/arm-none-eabi-toolchain"
-          tar -xJf "$archive" -C "$HOME/arm-none-eabi-toolchain" --strip-components=1
-          "$HOME/arm-none-eabi-toolchain/bin/arm-none-eabi-g++" --version | head -1
-          echo "$HOME/arm-none-eabi-toolchain/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/arm-none-eabi-toolchain
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
 
       - name: Install Ninja and QEMU
         run: |
@@ -54,3 +48,100 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
+
+  # OpSy's on-target suite with the adapter's hooks, and the adapter's events
+  # read back from the ring (target/opsy/tests). -Os is what ships, -Og the
+  # debug build. Not -O0: an event costs about 110 instructions there, and two
+  # of OpSy's cases assume hooks cheaper than that.
+  opsy:
+    name: OpSy adapter (cortex-${{ matrix.target }}, ${{ matrix.optimisation }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [m33, m4]
+        optimisation: ['-Os;-DNDEBUG', '-Og']
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/checkout@v5
+        with:
+          repository: Otatiaro/OpSy
+          ref: ${{ env.OPSY_COMMIT }}
+          path: opsy
+
+      - name: Install the arm-none-eabi toolchain
+        uses: ./.github/actions/arm-none-eabi-toolchain
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Install Ninja and QEMU
+        run: sudo apt-get update && sudo apt-get install -y ninja-build qemu-system-arm
+
+      - name: Configure
+        run: >
+          cmake -S target/opsy/tests -B build
+          -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/target/cmake/arm-none-eabi.cmake
+          -DKYMO_OPSY_DIR=${{ github.workspace }}/opsy
+          -DOPSY_TARGET=${{ matrix.target }}
+          "-DOPSY_OPTIMISATION=${{ matrix.optimisation }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # What tracing adds to each path of OpSy's bench: the bench built with and
+  # without the adapter, in the configuration of OpSy's baseline, and the
+  # difference held against target/opsy/tests/bench/overhead-<target>.json.
+  opsy-overhead:
+    name: OpSy adapter cost per path (cortex-${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: m33
+            machine: mps2-an505
+          - target: m4
+            machine: mps2-an386
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/checkout@v5
+        with:
+          repository: Otatiaro/OpSy
+          ref: ${{ env.OPSY_COMMIT }}
+          path: opsy
+
+      - name: Install the arm-none-eabi toolchain
+        uses: ./.github/actions/arm-none-eabi-toolchain
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Install Ninja and QEMU
+        run: sudo apt-get update && sudo apt-get install -y ninja-build qemu-system-arm
+
+      - name: Build the bench, plain and traced
+        run: |
+          set -euo pipefail
+          for variant in plain traced; do
+            if [ "$variant" = plain ]; then source=opsy/tests/qemu; else source=target/opsy/tests; fi
+            cmake -S "$source" -B "build-$variant" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/target/cmake/arm-none-eabi.cmake" \
+              -DKYMO_OPSY_DIR="$GITHUB_WORKSPACE/opsy" \
+              -DOPSY_TARGET=${{ matrix.target }} \
+              "-DOPSY_OPTIMISATION=-Os;-DNDEBUG"
+            cmake --build "build-$variant" --target opsy_qemu_bench
+          done
+
+      - name: Cost per path against the record
+        run: >
+          python3 target/opsy/tests/bench/overhead.py
+          --profile opsy/tests/qemu/bench/profile.py
+          --machine ${{ matrix.machine }}
+          --plain build-plain/opsy_qemu_bench.elf
+          --traced build-traced/opsy/opsy_qemu_bench.elf
+          --expected target/opsy/tests/bench/overhead-${{ matrix.target }}.json
