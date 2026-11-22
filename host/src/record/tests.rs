@@ -170,6 +170,7 @@ fn catalogue() -> Catalogue {
             write_index_offset: u64::from(WRITE_INDEX_OFFSET),
             slots_offset: u64::from(SLOTS_OFFSET),
         }),
+        symbols: Default::default(),
     }
 }
 
