@@ -8,11 +8,12 @@
 //! the anchor, so the type is found by name: the symbol is demangled, and the
 //! structure of the same qualified name is looked up in the debug info.
 
+use crate::symbols::Symbols;
 use crate::target::Result;
-use gimli::{AttributeValue, DwAte, EndianSlice, RunTimeEndian, UnitOffset};
+use gimli::{AttributeValue, DebugInfoOffset, DwAte, EndianSlice, Operation, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 const ID_SUFFIX: &str = ".kymo_id";
@@ -35,13 +36,22 @@ pub enum Kind {
     Base(DwAte),
     /// An enumeration: its enumerators, by value.
     Enum(Vec<(i64, String)>),
-    Pointer,
+    Pointer(Pointee),
     /// An array, by the length of each dimension.
     Array(Box<Type>, Vec<u64>),
     /// A structure, a class or a union: its data members.
     Record(Vec<Field>),
     /// No value to read: void, a function, or the structure behind a pointer.
     Opaque,
+}
+
+/// What a pointer points at, qualifiers and typedefs set aside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pointee {
+    Function,
+    /// A structure, a class or a union, by qualified name.
+    Record(String),
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +84,8 @@ pub struct Catalogue {
     pub events: BTreeMap<u16, Event>,
     /// The trace ring, when the image has one.
     pub ring: Option<Ring>,
+    /// The functions and static objects pointer fields are named by.
+    pub symbols: Symbols,
 }
 
 /// The catalogue of the image at `path`.
@@ -101,6 +113,7 @@ pub fn read(path: &Path) -> Result<Catalogue> {
     Ok(Catalogue {
         events,
         ring: debug.ring,
+        symbols: Symbols::read(&file, &debug.bases),
     })
 }
 
@@ -137,13 +150,18 @@ fn type_ids(file: &object::File) -> Result<BTreeMap<u16, String>> {
 type Slice<'a> = EndianSlice<'a, RunTimeEndian>;
 type Layout = (u64, Vec<Field>);
 
+type Unit<'a> = gimli::Unit<Slice<'a>>;
+type Names = HashMap<DebugInfoOffset, String>;
+
 struct DebugInfo {
     layouts: BTreeMap<String, Layout>,
     ring: Option<Ring>,
+    /// The base class subobjects of each static object, by address.
+    bases: BTreeMap<u64, Vec<(u64, String)>>,
 }
 
 /// The layout of each structure named in `wanted`, the same in every unit
-/// that defines it, and the ring.
+/// that defines it, the ring, and the base classes of static objects.
 fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     let endian = if file.is_little_endian() {
         RunTimeEndian::Little
@@ -158,11 +176,19 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     })?;
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
 
-    let mut layouts: BTreeMap<String, Layout> = BTreeMap::new();
-    let mut ring = None;
+    let mut units = Vec::new();
     let mut headers = dwarf.units();
     while let Some(header) = headers.next()? {
-        let unit = dwarf.unit(header)?;
+        units.push(dwarf.unit(header)?);
+    }
+
+    // Every structure, class and union by qualified name, the units that
+    // define each, and every static variable by address.
+    let mut names = Names::new();
+    let mut definitions: BTreeMap<String, Vec<DebugInfoOffset>> = BTreeMap::new();
+    let mut variables = Vec::new();
+    let mut ring = None;
+    for unit in &units {
         let mut scope: Vec<(isize, String)> = Vec::new();
         let mut entries = unit.entries();
         while let Some(entry) = entries.next_dfs()? {
@@ -173,49 +199,221 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
             let tag = entry.tag();
             let scoping = matches!(
                 tag,
-                gimli::DW_TAG_namespace | gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type
+                gimli::DW_TAG_namespace
+                    | gimli::DW_TAG_structure_type
+                    | gimli::DW_TAG_class_type
+                    | gimli::DW_TAG_union_type
             );
             if !scoping && tag != gimli::DW_TAG_variable {
                 continue;
             }
+            let global = global(unit, entry.offset())?;
             let name = match entry.attr_value(gimli::DW_AT_name) {
-                Some(value) => dwarf.attr_string(&unit, value)?.to_string_lossy().into_owned(),
-                None if tag == gimli::DW_TAG_namespace => "(anonymous namespace)".to_owned(),
-                None => continue,
+                Some(value) => Some(dwarf.attr_string(unit, value)?.to_string_lossy().into_owned()),
+                None if tag == gimli::DW_TAG_namespace => Some("(anonymous namespace)".to_owned()),
+                None => None,
             };
-            let qualified = scope
-                .iter()
-                .map(|(_, part)| part.as_str())
-                .chain([name.as_str()])
-                .collect::<Vec<_>>()
-                .join("::");
+            let qualified = name.as_ref().map(|name| {
+                scope
+                    .iter()
+                    .map(|(_, part)| part.as_str())
+                    .chain([name.as_str()])
+                    .collect::<Vec<_>>()
+                    .join("::")
+            });
             if tag == gimli::DW_TAG_variable {
-                if ring.is_none() && qualified == RING {
+                if let Some(address) = static_address(&dwarf, unit, entry)? {
+                    variables.push((address, global));
+                }
+                if ring.is_none() && qualified.as_deref() == Some(RING) {
                     let ty = type_of(entry)?.ok_or("kymo::trace_ring has no type")?;
-                    ring = Some(ring_layout(&dwarf, &unit, ty)?);
+                    ring = Some(ring_layout(&dwarf, unit, ty)?);
                 }
                 continue;
             }
+            let (Some(name), Some(qualified)) = (name, qualified) else {
+                continue;
+            };
             scope.push((depth, name));
-            if tag == gimli::DW_TAG_namespace
-                || entry.attr(gimli::DW_AT_declaration).is_some()
-                || !wanted.contains(&qualified.as_str())
-            {
+            if tag == gimli::DW_TAG_namespace {
                 continue;
             }
-            let layout = record(&dwarf, &unit, entry.offset())?;
-            match layouts.get(&qualified) {
+            if entry.attr(gimli::DW_AT_declaration).is_none() {
+                definitions.entry(qualified.clone()).or_default().push(global);
+            }
+            names.insert(global, qualified);
+        }
+    }
+
+    let mut layouts: BTreeMap<String, Layout> = BTreeMap::new();
+    for name in wanted {
+        for &die in definitions.get(name).into_iter().flatten() {
+            let (unit, offset) = locate(&units, die)?;
+            if !matches!(
+                unit.entry(offset)?.tag(),
+                gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type
+            ) {
+                continue;
+            }
+            let layout = record(&dwarf, unit, &names, offset)?;
+            match layouts.get(name) {
                 Some(previous) if *previous != layout => {
-                    return Err(format!("{qualified} has two layouts in the DWARF").into());
+                    return Err(format!("{name} has two layouts in the DWARF").into());
                 }
                 Some(_) => {}
                 None => {
-                    layouts.insert(qualified, layout);
+                    layouts.insert(name.to_owned(), layout);
                 }
             }
         }
     }
-    Ok(DebugInfo { layouts, ring })
+
+    let mut bases = BTreeMap::new();
+    for (address, variable) in variables {
+        let Some(ty) = variable_type(&units, variable)? else {
+            continue;
+        };
+        let Some(name) = names.get(&strip(&units, ty)?) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        base_classes(&units, &names, &definitions, name, 0, &mut found)?;
+        if !found.is_empty() {
+            bases.insert(address, found);
+        }
+    }
+    Ok(DebugInfo { layouts, ring, bases })
+}
+
+fn global(unit: &Unit, offset: UnitOffset) -> Result<DebugInfoOffset> {
+    offset
+        .to_debug_info_offset(&unit.header)
+        .ok_or_else(|| "a DWARF entry outside .debug_info".into())
+}
+
+/// The unit that holds the entry at `offset`, and its offset in that unit.
+fn locate<'a, 'b>(units: &'b [Unit<'a>], offset: DebugInfoOffset) -> Result<(&'b Unit<'a>, UnitOffset)> {
+    units
+        .iter()
+        .find_map(|unit| offset.to_unit_offset(&unit.header).map(|local| (unit, local)))
+        .ok_or_else(|| format!("no DWARF unit holds the entry at {:#x}", offset.0).into())
+}
+
+/// The entry an attribute refers to, in its own unit or in another.
+fn reference(unit: &Unit, value: AttributeValue<Slice>) -> Result<Option<DebugInfoOffset>> {
+    Ok(match value {
+        AttributeValue::UnitRef(offset) => Some(global(unit, offset)?),
+        AttributeValue::DebugInfoRef(offset) => Some(offset),
+        _ => None,
+    })
+}
+
+/// The address of a variable that has one fixed address: a static object.
+fn static_address(
+    dwarf: &gimli::Dwarf<Slice>,
+    unit: &Unit,
+    entry: &gimli::DebuggingInformationEntry<Slice>,
+) -> Result<Option<u64>> {
+    let Some(AttributeValue::Exprloc(expression)) = entry.attr_value(gimli::DW_AT_location) else {
+        return Ok(None);
+    };
+    let mut operations = expression.operations(unit.encoding());
+    Ok(match (operations.next()?, operations.next()?) {
+        (Some(Operation::Address { address }), None) => Some(address),
+        (Some(Operation::AddressIndex { index }), None) => Some(dwarf.address(unit, index)?),
+        _ => None,
+    })
+}
+
+/// The type of the variable at `offset`. A variable defined apart from its
+/// declaration, or emitted again by link-time optimisation, carries no type
+/// but refers to the entry that has it.
+fn variable_type(units: &[Unit], mut offset: DebugInfoOffset) -> Result<Option<DebugInfoOffset>> {
+    for _ in 0..8 {
+        let (unit, local) = locate(units, offset)?;
+        let entry = unit.entry(local)?;
+        if let Some(value) = entry.attr_value(gimli::DW_AT_type) {
+            return reference(unit, value);
+        }
+        let origin = entry
+            .attr_value(gimli::DW_AT_abstract_origin)
+            .or_else(|| entry.attr_value(gimli::DW_AT_specification));
+        match origin {
+            Some(value) => match reference(unit, value)? {
+                Some(next) => offset = next,
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// The type at `offset` with its qualifiers and typedefs removed.
+fn strip(units: &[Unit], mut offset: DebugInfoOffset) -> Result<DebugInfoOffset> {
+    loop {
+        let (unit, local) = locate(units, offset)?;
+        let entry = unit.entry(local)?;
+        if !matches!(
+            entry.tag(),
+            gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type
+        ) {
+            return Ok(offset);
+        }
+        match entry.attr_value(gimli::DW_AT_type) {
+            Some(value) => match reference(unit, value)? {
+                Some(next) => offset = next,
+                None => return Ok(offset),
+            },
+            None => return Ok(offset),
+        }
+    }
+}
+
+/// The base classes of the class `name`, by offset from `at` and qualified
+/// name, bases of bases included, as one definition of the class gives them.
+fn base_classes(
+    units: &[Unit],
+    names: &Names,
+    definitions: &BTreeMap<String, Vec<DebugInfoOffset>>,
+    name: &str,
+    at: u64,
+    found: &mut Vec<(u64, String)>,
+) -> Result<()> {
+    let Some(&definition) = definitions.get(name).and_then(|list| list.first()) else {
+        return Ok(());
+    };
+    let (unit, local) = locate(units, definition)?;
+    let mut tree = unit.entries_tree(Some(local))?;
+    let mut children = tree.root()?.children();
+    let mut direct = Vec::new();
+    while let Some(child) = children.next()? {
+        let entry = child.entry();
+        if entry.tag() != gimli::DW_TAG_inheritance {
+            continue;
+        }
+        // A virtual base has no fixed offset.
+        let Some(offset) = entry
+            .attr_value(gimli::DW_AT_data_member_location)
+            .map_or(Some(0), |value| value.udata_value())
+        else {
+            continue;
+        };
+        let Some(base) = entry.attr_value(gimli::DW_AT_type) else {
+            continue;
+        };
+        if let Some(base) = reference(unit, base)? {
+            direct.push((at + offset, base));
+        }
+    }
+    for (offset, base) in direct {
+        let Some(base) = names.get(&strip(units, base)?) else {
+            continue;
+        };
+        found.push((offset, base.clone()));
+        base_classes(units, names, definitions, base, offset, found)?;
+    }
+    Ok(())
 }
 
 /// The geometry of `kymo::ring<Slots, MaxEventSlots>` at `offset`.
@@ -274,7 +472,7 @@ fn ring_layout(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: U
 }
 
 /// The size and the data members of the structure at `offset`.
-fn record(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: UnitOffset) -> Result<Layout> {
+fn record(dwarf: &gimli::Dwarf<Slice>, unit: &Unit, names: &Names, offset: UnitOffset) -> Result<Layout> {
     let entry = unit.entry(offset)?;
     let size = entry
         .attr_value(gimli::DW_AT_byte_size)
@@ -302,7 +500,7 @@ fn record(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: UnitOf
             None => 0,
         };
         let type_offset = type_of(member)?.ok_or_else(|| format!("{name}: no type"))?;
-        let ty = describe(dwarf, unit, type_offset, false)?;
+        let ty = describe(dwarf, unit, names, type_offset, false)?;
         if ty.size.is_none() {
             return Err(format!("{name}: {} has no size", ty.name).into());
         }
@@ -329,7 +527,13 @@ fn void() -> Type {
 
 /// The type at `offset`. Behind a pointer (`shallow`), a structure is named
 /// but not opened: it may point back to itself.
-fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: UnitOffset, shallow: bool) -> Result<Type> {
+fn describe(
+    dwarf: &gimli::Dwarf<Slice>,
+    unit: &Unit,
+    names: &Names,
+    offset: UnitOffset,
+    shallow: bool,
+) -> Result<Type> {
     let entry = unit.entry(offset)?;
     let name = match entry.attr_value(gimli::DW_AT_name) {
         Some(value) => Some(dwarf.attr_string(unit, value)?.to_string_lossy().into_owned()),
@@ -349,7 +553,7 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
                 "volatile"
             };
             let inner = match inner {
-                Some(inner) => describe(dwarf, unit, inner, shallow)?,
+                Some(inner) => describe(dwarf, unit, names, inner, shallow)?,
                 None => void(),
             };
             Type {
@@ -358,16 +562,19 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
             }
         }
         gimli::DW_TAG_typedef => {
-            let inner = describe(dwarf, unit, inner.ok_or("a typedef of nothing")?, shallow)?;
+            let inner = describe(dwarf, unit, names, inner.ok_or("a typedef of nothing")?, shallow)?;
             Type {
                 name: name.unwrap_or_default(),
                 ..inner
             }
         }
         gimli::DW_TAG_pointer_type | gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => {
-            let pointee = match inner {
-                Some(inner) => describe(dwarf, unit, inner, true)?.name,
-                None => "void".to_owned(),
+            let (pointee, target) = match inner {
+                Some(inner) => (
+                    describe(dwarf, unit, names, inner, true)?.name,
+                    pointee(unit, names, inner)?,
+                ),
+                None => ("void".to_owned(), Pointee::Other),
             };
             let sigil = match entry.tag() {
                 gimli::DW_TAG_pointer_type => "*",
@@ -377,7 +584,7 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
             Type {
                 name: format!("{pointee}{sigil}"),
                 size: Some(own_size.unwrap_or(address_size)),
-                kind: Kind::Pointer,
+                kind: Kind::Pointer(target),
             }
         }
         gimli::DW_TAG_subroutine_type => Type {
@@ -386,7 +593,7 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
             kind: Kind::Opaque,
         },
         gimli::DW_TAG_array_type => {
-            let element = describe(dwarf, unit, inner.ok_or("an array of nothing")?, shallow)?;
+            let element = describe(dwarf, unit, names, inner.ok_or("an array of nothing")?, shallow)?;
             let mut lengths = Vec::new();
             let mut known = true;
             let mut tree = unit.entries_tree(Some(offset))?;
@@ -474,7 +681,7 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
                     kind: Kind::Opaque,
                 }
             } else {
-                let (size, fields) = record(dwarf, unit, offset)?;
+                let (size, fields) = record(dwarf, unit, names, offset)?;
                 Type {
                     name: unnamed(),
                     size: Some(size),
@@ -488,6 +695,26 @@ fn describe(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: Unit
             kind: Kind::Opaque,
         },
     })
+}
+
+/// What the type at `offset`, the target of a pointer, is.
+fn pointee(unit: &Unit, names: &Names, mut offset: UnitOffset) -> Result<Pointee> {
+    loop {
+        let entry = unit.entry(offset)?;
+        match entry.tag() {
+            gimli::DW_TAG_typedef | gimli::DW_TAG_const_type | gimli::DW_TAG_volatile_type => match type_of(&entry)? {
+                Some(inner) => offset = inner,
+                None => return Ok(Pointee::Other),
+            },
+            gimli::DW_TAG_subroutine_type => return Ok(Pointee::Function),
+            gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type | gimli::DW_TAG_union_type => {
+                return Ok(names
+                    .get(&global(unit, offset)?)
+                    .map_or(Pointee::Other, |name| Pointee::Record(name.clone())));
+            }
+            _ => return Ok(Pointee::Other),
+        }
+    }
 }
 
 /// The catalogue as `kymo events` prints it: one line per event, then one

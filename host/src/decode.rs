@@ -9,6 +9,7 @@
 //! published, are left out.
 
 use crate::events::{Catalogue, Event, Kind, Ring, Type};
+use crate::symbols::Symbols;
 use crate::target::Result;
 use gimli::DwAte;
 use std::fmt::Write;
@@ -140,27 +141,28 @@ pub fn decode<'a>(catalogue: &'a Catalogue, bytes: &[u8]) -> Result<(u32, Vec<De
 
 /// `kymo decode`'s output: the write index, then one line per event, oldest
 /// first: its index, its timestamp, its type and each field's value.
-pub fn print(write_index: u32, events: &[Decoded]) {
+pub fn print(catalogue: &Catalogue, write_index: u32, events: &[Decoded]) {
     println!("write_index {write_index}");
     for decoded in events {
-        println!("{}", line(decoded));
+        println!("{}", line(&catalogue.symbols, decoded));
     }
 }
 
 /// One event's line: its index, its timestamp, its type and each field's value.
-pub fn line(decoded: &Decoded) -> String {
+pub fn line(symbols: &Symbols, decoded: &Decoded) -> String {
     let mut line = format!("event {} {} {}", decoded.index, decoded.timestamp, decoded.event.name);
     for field in &decoded.event.fields {
         let _ = write!(line, " {}=", field.name);
-        value(&mut line, &field.ty, &decoded.payload[field.offset as usize..]);
+        value(&mut line, symbols, &field.ty, &decoded.payload[field.offset as usize..]);
     }
     line
 }
 
 /// The value of `ty` at the start of `bytes`: integers in decimal, booleans
-/// as true or false, enumerations by enumerator, pointers in hexadecimal,
-/// arrays in brackets, structures in braces.
-fn value(out: &mut String, ty: &Type, bytes: &[u8]) {
+/// as true or false, enumerations by enumerator, pointers by what they point
+/// at in the image (symbols.rs) or else in hexadecimal, arrays in brackets,
+/// structures in braces.
+fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
     let size = ty.size.unwrap_or_default() as usize;
     let bytes = &bytes[..size];
     let unsigned = || {
@@ -195,10 +197,13 @@ fn value(out: &mut String, ty: &Type, bytes: &[u8]) {
                 }
             }
         }
-        Kind::Pointer if size <= 8 => {
-            let _ = write!(out, "0x{:0width$x}", unsigned(), width = 2 * size);
-        }
-        Kind::Array(element, lengths) => array(out, element, lengths, bytes),
+        Kind::Pointer(pointee) if size <= 8 => match symbols.name(pointee, unsigned()) {
+            Some(name) => out.push_str(&name),
+            None => {
+                let _ = write!(out, "0x{:0width$x}", unsigned(), width = 2 * size);
+            }
+        },
+        Kind::Array(element, lengths) => array(out, symbols, element, lengths, bytes),
         Kind::Record(fields) => {
             out.push('{');
             for (n, field) in fields.iter().enumerate() {
@@ -206,7 +211,7 @@ fn value(out: &mut String, ty: &Type, bytes: &[u8]) {
                     out.push(' ');
                 }
                 let _ = write!(out, "{}=", field.name);
-                value(out, &field.ty, &bytes[field.offset as usize..]);
+                value(out, symbols, &field.ty, &bytes[field.offset as usize..]);
             }
             out.push('}');
         }
@@ -214,9 +219,9 @@ fn value(out: &mut String, ty: &Type, bytes: &[u8]) {
     }
 }
 
-fn array(out: &mut String, element: &Type, lengths: &[u64], bytes: &[u8]) {
+fn array(out: &mut String, symbols: &Symbols, element: &Type, lengths: &[u64], bytes: &[u8]) {
     let Some((length, inner)) = lengths.split_first() else {
-        return value(out, element, bytes);
+        return value(out, symbols, element, bytes);
     };
     let stride = element.size.unwrap_or_default() as usize * inner.iter().product::<u64>() as usize;
     out.push('[');
@@ -224,7 +229,7 @@ fn array(out: &mut String, element: &Type, lengths: &[u64], bytes: &[u8]) {
         if n > 0 {
             out.push(',');
         }
-        array(out, element, inner, &bytes[n * stride..]);
+        array(out, symbols, element, inner, &bytes[n * stride..]);
     }
     out.push(']');
 }

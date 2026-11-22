@@ -250,7 +250,7 @@ pub fn run(
             let record = match &item {
                 Item::Event(event, slots) => {
                     counts.0 += 1;
-                    println!("{}", decode::line(event));
+                    println!("{}", decode::line(&catalogue.symbols, event));
                     Record::Event {
                         index: event.index,
                         slots,
@@ -289,7 +289,7 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8]) -> Result<()> {
             Record::Event { index, slots } => {
                 let event = decode::event(catalogue, ring, index, slots)?
                     .ok_or_else(|| format!("event {index}: its slots in the capture do not hold it whole"))?;
-                println!("{}", decode::line(&event));
+                println!("{}", decode::line(&catalogue.symbols, &event));
             }
             Record::Lost { from, to } => println!("lost {from} {to}"),
             Record::End { next } => println!("end {next}"),

@@ -8,6 +8,7 @@ mod events;
 mod record;
 mod ring;
 mod swo;
+mod symbols;
 mod target;
 
 use std::path::PathBuf;
@@ -87,7 +88,7 @@ fn run() -> Result<()> {
                 return record::print_capture(&catalogue, &bytes);
             }
             let (write_index, decoded) = decode::decode(&catalogue, &bytes)?;
-            decode::print(write_index, &decoded);
+            decode::print(&catalogue, write_index, &decoded);
             return Ok(());
         }
         _ => return Err(USAGE.into()),

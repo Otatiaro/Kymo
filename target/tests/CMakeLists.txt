@@ -137,9 +137,11 @@ endforeach()
 #   compiler laid out;
 # - decode: a copy of the ring (kymo decode) against the events written to it;
 # - record: what the host records of a running image through QEMU's monitor
-#   (kymo record), against the values each event carries.
+#   (kymo record), against the values each event carries;
+# - symbols: pointer fields named from the ELF by kymo record, against the
+#   functions and objects the image points at.
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
-foreach(test layout decode record)
+foreach(test layout decode record symbols)
 	foreach(cpu cortex-m33 cortex-m4)
 		foreach(level O0 Os Os-lto)
 			set(name ${test}-${cpu}-${level})

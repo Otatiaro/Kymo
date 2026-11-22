@@ -84,15 +84,6 @@ void write_signed(std::int32_t value)
 	qemu::write_unsigned(value < 0 ? 0u - static_cast<std::uint32_t>(value) : static_cast<std::uint32_t>(value));
 }
 
-void write_hex(std::uint32_t value)
-{
-	char digits[11] = "0x";
-	for (int n = 0; n < 8; ++n)
-		digits[2 + n] = "0123456789abcdef"[(value >> (28 - 4 * n)) & 0xf];
-	digits[10] = '\0';
-	qemu::write(digits);
-}
-
 void write_list(std::uint32_t const* words, std::size_t count)
 {
 	qemu::write("[");
@@ -184,8 +175,7 @@ void emit_number(std::uint32_t n)
 					        qemu::write(",");
 				        write_signed(event.values[k]);
 			        }
-			        qemu::write("] from=");
-			        write_hex(reinterpret_cast<std::uintptr_t>(event.from));
+			        qemu::write("] from=(anonymous_namespace)::origin");
 			        qemu::write(" id=");
 			        qemu::write_unsigned(event.id);
 		        });
