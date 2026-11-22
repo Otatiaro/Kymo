@@ -107,16 +107,15 @@ pub fn run(connection: &Connection, elf: &Elf, settings: &Settings) -> Result<()
         swo_events_per_tick: elf.symbol("kymo_bench_swo_events_per_tick")?.address,
         swo_events: elf.symbol("kymo_bench_swo_events")?.address,
     };
+    let mut target = target::open(connection)?;
     println!(
-        "probe {} at {} kHz; ring of {} slots ({} bytes) at {:#010x}",
+        "probe {}{}; ring of {} slots ({} bytes) at {:#010x}",
         connection.backend.name(),
-        connection.speed_khz,
+        target::speed_text(target.as_ref()),
         symbols.ring.slots,
         symbols.ring.bytes(),
         symbols.ring.address
     );
-
-    let mut target = target::open(connection)?;
     target.write_word(symbols.events_per_tick, 0)?;
     target.write_word(symbols.swo_events_per_tick, 0)?;
     check_running(target.as_mut(), &symbols)?;

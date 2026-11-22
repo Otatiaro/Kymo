@@ -13,7 +13,7 @@
 use crate::capture::{self, Record, Writer};
 use crate::decode::{self, Decoded, Header};
 use crate::events::{Catalogue, Ring};
-use crate::target::{Result, Target};
+use crate::target::{self, Result, Target};
 use crate::time::Timeline;
 use std::io::BufRead;
 use std::path::Path;
@@ -284,10 +284,11 @@ pub fn run(
                 capture.finish()?;
             }
             eprintln!(
-                "{} events, {} slots lost, {} passes{}",
+                "{} events, {} slots lost, {} passes{}{}",
                 counts.0,
                 counts.1,
                 counts.2,
+                target::speed_text(target),
                 measured(&timeline)
             );
             return Ok(());

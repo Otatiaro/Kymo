@@ -123,6 +123,7 @@ pub struct StLinkTarget {
     api: Api,
     /// Keeps the entry points of `api` loaded; dropped last.
     _library: Library,
+    speed_khz: u32,
 }
 
 impl StLinkTarget {
@@ -133,7 +134,11 @@ impl StLinkTarget {
         let directory = CString::new(directory.to_string_lossy().into_owned())?;
         // SAFETY: load_library only loads the CubeProgrammer library.
         let api = unsafe { Api::resolve(&library)? };
-        let target = Self { api, _library: library };
+        let mut target = Self {
+            api,
+            _library: library,
+            speed_khz: connection.speed_khz,
+        };
         // SAFETY: the list returned by the library holds `count` entries and
         // stays valid until delete_list; the chosen entry is copied first.
         unsafe {
@@ -171,7 +176,8 @@ impl StLinkTarget {
             };
             parameters.debug_port = PORT_SWD;
             parameters.connection_mode = MODE_HOTPLUG;
-            parameters.frequency = supported_frequency(&parameters, connection.speed_khz) as c_int;
+            target.speed_khz = supported_frequency(&parameters, connection.speed_khz);
+            parameters.frequency = target.speed_khz as c_int;
             parameters.shared = 0;
             let result = (target.api.connect)(parameters);
             (target.api.delete_list)();
@@ -231,6 +237,10 @@ fn load(path: &Path) -> std::result::Result<Library, libloading::Error> {
 }
 
 impl Target for StLinkTarget {
+    fn speed_khz(&self) -> Option<u32> {
+        Some(self.speed_khz)
+    }
+
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
         let size = (words.len() * 4) as c_uint;
         let mut data: *mut u8 = std::ptr::null_mut();
