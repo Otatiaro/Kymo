@@ -3,10 +3,10 @@ name: Target
 on:
   push:
     branches: [master]
-    paths: ['target/**', 'host/**', '.github/workflows/target.yml', '.github/actions/**']
+    paths: ['target/**', 'host/**', '.github/workflows/target.yml']
   pull_request:
     branches: [master]
-    paths: ['target/**', 'host/**', '.github/workflows/target.yml', '.github/actions/**']
+    paths: ['target/**', 'host/**', '.github/workflows/target.yml']
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install the arm-none-eabi toolchain
-        uses: ./.github/actions/arm-none-eabi-toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
         with:
           version: ${{ env.TOOLCHAIN_VERSION }}
 
@@ -83,7 +83,7 @@ jobs:
           path: opsy
 
       - name: Install the arm-none-eabi toolchain
-        uses: ./.github/actions/arm-none-eabi-toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
         with:
           version: ${{ env.TOOLCHAIN_VERSION }}
 
@@ -135,7 +135,7 @@ jobs:
           path: opsy
 
       - name: Install the arm-none-eabi toolchain
-        uses: ./.github/actions/arm-none-eabi-toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
         with:
           version: ${{ env.TOOLCHAIN_VERSION }}
 
