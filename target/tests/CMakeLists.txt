@@ -16,6 +16,7 @@ enable_testing()
 get_filename_component(bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
 find_program(KYMO_READELF arm-none-eabi-readelf HINTS "${bin}" REQUIRED)
 find_program(KYMO_NM arm-none-eabi-nm HINTS "${bin}" REQUIRED)
+find_program(KYMO_SIZE arm-none-eabi-size HINTS "${bin}" REQUIRED)
 
 # Type ids, at each optimisation level and with link-time optimisation: two
 # translation units sharing a type, linked with --gc-sections and no linker
@@ -62,17 +63,17 @@ endforeach()
 # miss the first instruction of the called function; 7 is the lowest that holds.
 set(KYMO_ICOUNT_SHIFT 7 CACHE STRING "QEMU -icount shift for the preemption tests")
 
-# An image run under QEMU, on the machine of its core:
-#   kymo_qemu_test(<name> <cpu> <level> SOURCES <files> [DEFINITIONS <defs>] [ICOUNT])
-function(kymo_qemu_test name cpu level)
-	cmake_parse_arguments(PARSE_ARGV 3 arg "ICOUNT" "" "SOURCES;DEFINITIONS")
-	if(cpu STREQUAL cortex-m33)
-		set(machine mps2-an505)
-		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv8m.ld)
-	else()
-		set(machine mps2-an386)
-		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv7m.ld)
-	endif()
+# The QEMU machine and linker script of each core.
+set(machine_cortex-m33 mps2-an505)
+set(script_cortex-m33 ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv8m.ld)
+set(machine_cortex-m4 mps2-an386)
+set(script_cortex-m4 ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv7m.ld)
+
+# An image for QEMU:
+#   kymo_qemu_image(<name> <cpu> <level> SOURCES <files> [DEFINITIONS <defs>])
+function(kymo_qemu_image name cpu level)
+	cmake_parse_arguments(PARSE_ARGV 3 arg "" "" "SOURCES;DEFINITIONS")
+	set(script ${script_${cpu}})
 	add_executable(${name} ${arg_SOURCES} qemu/startup.cpp)
 	set_target_properties(${name} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
 	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
@@ -85,18 +86,30 @@ function(kymo_qemu_test name cpu level)
 		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
 	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb
 		-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
+endfunction()
+
+# A test that runs a Python script, or fails saying what is missing:
+#   kymo_qemu_command(<name> <script> <arguments>...)
+function(kymo_qemu_command name)
 	if(missing)
 		add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
 		set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
-		return()
+	else()
+		add_test(NAME ${name} COMMAND ${Python3_EXECUTABLE} ${ARGN})
 	endif()
+endfunction()
+
+# An image that reports its own verdict, run under QEMU:
+#   kymo_qemu_test(<name> <cpu> <level> SOURCES <files> [DEFINITIONS <defs>] [ICOUNT])
+function(kymo_qemu_test name cpu level)
+	cmake_parse_arguments(PARSE_ARGV 3 arg "ICOUNT" "" "SOURCES;DEFINITIONS")
+	kymo_qemu_image(${name} ${cpu} ${level} SOURCES ${arg_SOURCES} DEFINITIONS ${arg_DEFINITIONS})
 	set(icount "")
 	if(arg_ICOUNT)
 		set(icount --icount-shift ${KYMO_ICOUNT_SHIFT})
 	endif()
-	add_test(NAME ${name}
-		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_qemu.py
-			--qemu ${KYMO_QEMU} --machine ${machine} --image $<TARGET_FILE:${name}> ${icount})
+	kymo_qemu_command(${name} ${CMAKE_CURRENT_SOURCE_DIR}/run_qemu.py
+		--qemu ${KYMO_QEMU} --machine ${machine_${cpu}} --image $<TARGET_FILE:${name}> ${icount})
 endfunction()
 
 foreach(cpu cortex-m33 cortex-m4)
@@ -109,5 +122,25 @@ foreach(cpu cortex-m33 cortex-m4)
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES control/control.cpp qemu/preempt.cpp
 			DEFINITIONS KYMO_CONTROL_DEFAULT=0xffffffbfu)
+	endforeach()
+endforeach()
+
+# What an emit costs, in instructions executed under QEMU, against the
+# threshold: 50 for a one-slot event, 15 for each slot more. QEMU counts
+# instructions; cycles are measured on hardware. Optimised builds only: -O0
+# is not what ships.
+set(KYMO_COST_EVENT 50 CACHE STRING "Most instructions a one-slot event may cost")
+set(KYMO_COST_SLOT 15 CACHE STRING "Most instructions each slot more may cost")
+foreach(cpu cortex-m33 cortex-m4)
+	foreach(level Os O2)
+		kymo_qemu_image(cost-${cpu}-${level} ${cpu} ${level} SOURCES cost/cost.cpp)
+		kymo_qemu_image(cost-baseline-${cpu}-${level} ${cpu} ${level} SOURCES cost/cost.cpp
+			DEFINITIONS KYMO_COST_BASELINE)
+		kymo_qemu_command(cost-${cpu}-${level}
+			${CMAKE_CURRENT_SOURCE_DIR}/cost.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+			--nm ${KYMO_NM} --size ${KYMO_SIZE}
+			--image $<TARGET_FILE:cost-${cpu}-${level}>
+			--baseline $<TARGET_FILE:cost-baseline-${cpu}-${level}>
+			--max-event ${KYMO_COST_EVENT} --max-slot ${KYMO_COST_SLOT})
 	endforeach()
 endforeach()

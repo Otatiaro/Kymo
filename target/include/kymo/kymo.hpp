@@ -57,7 +57,7 @@ template<typename Event>
 {
 	if ((control.load(std::memory_order_relaxed) & bit(family_of<Event>)) == 0)
 		return;
-	trace_ring.write(type_id<Event>(), timestamp(), event);
+	trace_ring.write(type_id_word<Event>(), timestamp(), event);
 }
 
 } // namespace kymo

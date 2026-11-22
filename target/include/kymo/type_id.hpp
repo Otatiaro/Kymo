@@ -36,9 +36,13 @@ struct anchor
 	static char const name;
 };
 
-/** @brief The id of @p Event, a link-time constant. */
+/**
+ * @brief The id of @p Event, a link-time constant, zero-extended to a word:
+ *        MOVW clears the upper half, which the compiler cannot see through
+ *        the asm, so the word form spares a zero-extension.
+ */
 template<typename Event>
-[[gnu::always_inline]] inline std::uint16_t type_id()
+[[gnu::always_inline]] inline std::uint32_t type_id_word()
 {
 	std::uint32_t id;
 	asm(".ifndef %c1.kymo_id\n\t"
@@ -51,7 +55,14 @@ template<typename Event>
 	    "movw %0, #:lower16:%c1.kymo_id"
 	    : "=r"(id)
 	    : "i"(&anchor<Event>::name));
-	return static_cast<std::uint16_t>(id);
+	return id;
+}
+
+/** @brief The id of @p Event, a link-time constant. */
+template<typename Event>
+[[gnu::always_inline]] inline std::uint16_t type_id()
+{
+	return static_cast<std::uint16_t>(type_id_word<Event>());
 }
 
 } // namespace kymo
