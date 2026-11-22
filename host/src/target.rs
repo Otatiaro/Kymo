@@ -17,6 +17,18 @@ pub trait Target {
         self.read_words(address, &mut word)?;
         Ok(word[0])
     }
+
+    /// Starts capturing SWO in UART mode at `baud`, the target's TPIU being
+    /// clocked at `tpiu_clock_hz`: sets up the probe, the TPIU and the trace
+    /// pin. ITM itself is left to the caller.
+    fn swo_start(&mut self, _tpiu_clock_hz: u32, _baud: u32) -> Result<()> {
+        Err("this backend does not capture SWO".into())
+    }
+
+    /// Appends the SWO bytes captured since the last call.
+    fn swo_read(&mut self, _bytes: &mut Vec<u8>) -> Result<()> {
+        Err("this backend does not capture SWO".into())
+    }
 }
 
 /// The ways the host reaches a probe.

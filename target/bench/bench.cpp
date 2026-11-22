@@ -8,6 +8,14 @@
  * The host writes that variable to step the rate; it is configuration of the
  * instrument, not of an application. Each event carries its slot index in a
  * form the host checks, so a torn read shows up as a corrupt payload.
+ *
+ * The same events can go out on SWO, through ITM stimulus port 1, at a rate
+ * of their own: kymo_bench_swo_events_per_tick. The image does not configure
+ * ITM, TPIU or the SWO pin: the host does it through the debug port, and the
+ * image writes to the port only while the host keeps it enabled. Each write
+ * waits for the stimulus FIFO, so SWO never drops an event: past its
+ * bandwidth, the tick handler overruns and the host sees fewer events than
+ * it asked for.
  */
 
 #include <kymo/ring.hpp>
@@ -39,6 +47,30 @@ constexpr std::uintptr_t dwt_cyccnt = 0xE0001004;
 constexpr std::uintptr_t syst_csr = 0xE000E010;
 constexpr std::uintptr_t syst_rvr = 0xE000E014;
 constexpr std::uintptr_t syst_cvr = 0xE000E018;
+constexpr std::uintptr_t itm_ter = 0xE0000E00;
+constexpr std::uintptr_t itm_tcr = 0xE0000E80;
+
+constexpr std::uint32_t swo_port = 1;
+constexpr std::uintptr_t swo_stimulus = 0xE0000000 + 4 * swo_port;
+
+bool swo_enabled()
+{
+	return (reg(itm_tcr) & 1u) != 0           // ITMENA
+		&& (reg(itm_ter) & (1u << swo_port)) != 0;
+}
+
+// A disabled port never reads FIFOREADY: the wait ends when the probe turns
+// ITM off, or the target would hang once it leaves.
+bool swo_write(std::uint32_t word)
+{
+	while ((reg(swo_stimulus) & 1u) == 0)    // FIFOREADY
+	{
+		if (!swo_enabled())
+			return false;
+	}
+	reg(swo_stimulus) = word;
+	return true;
+}
 
 } // namespace
 
@@ -54,6 +86,12 @@ volatile std::uint32_t kymo_bench_events_per_tick;
 /// Milliseconds since reset, so the host can tell the image runs.
 volatile std::uint32_t kymo_bench_ticks;
 
+/// Events written to SWO per 1 ms tick; written by the host.
+volatile std::uint32_t kymo_bench_swo_events_per_tick;
+
+/// Events written to SWO since reset: the index each SWO event carries.
+volatile std::uint32_t kymo_bench_swo_events;
+
 void SysTick_Handler()
 {
 	kymo_bench_ticks = kymo_bench_ticks + 1;
@@ -64,6 +102,18 @@ void SysTick_Handler()
 		// the ring hands out; the host checks the payload against it.
 		std::uint32_t const index = kymo_ring.write_index.load(std::memory_order_relaxed);
 		kymo_ring.write(bench_event_type, reg(dwt_cyccnt), index, ~index);
+	}
+	std::uint32_t const swo_count = kymo_bench_swo_events_per_tick;
+	if (swo_count != 0 && swo_enabled())
+	{
+		std::uint32_t index = kymo_bench_swo_events;
+		for (std::uint32_t i = 0; i < swo_count; ++i, ++index)
+		{
+			if (!(swo_write(bench_event_type) && swo_write(reg(dwt_cyccnt))
+				&& swo_write(index) && swo_write(~index)))
+				break;
+		}
+		kymo_bench_swo_events = index;
 	}
 }
 
