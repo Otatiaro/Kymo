@@ -156,7 +156,7 @@ impl Drain {
     /// Settles the slots of the previous pass against the write index read
     /// after them.
     fn settle(&mut self, write_index: u32) {
-        for (offset, slot) in self.pending.chunks_exact(SLOT_WORDS).enumerate() {
+        for (offset, slot) in self.pending.as_chunks::<SLOT_WORDS>().0.iter().enumerate() {
             let index = self.pending_first.wrapping_add(offset as u32);
             if write_index.wrapping_sub(index) > self.layout.slots {
                 // Reserved again before the read ended: may be torn.
