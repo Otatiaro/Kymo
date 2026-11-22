@@ -43,8 +43,8 @@ def check(output: str) -> list[str]:
         fields = line.split()
         if fields[0] != "event":
             continue
-        name = fields[3]
-        values = dict(field.split("=", 1) for field in fields[4:])
+        name = fields[4]
+        values = dict(field.split("=", 1) for field in fields[5:])
         if values not in EXPECTED.get(name, []):
             errors.append(f"{line}: expected one of {EXPECTED.get(name)}")
             continue
