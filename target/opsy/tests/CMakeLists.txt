@@ -60,3 +60,31 @@ else()
 			--qemu ${KYMO_QEMU} --machine ${machine}
 			--image $<TARGET_FILE:opsy_qemu_tests> --host ${KYMO_HOST})
 endif()
+
+# An OpSy program on a NUCLEO-H563ZI (board/board.cpp), recorded through its
+# ST-Link and checked (board/board.py): with -DKYMO_OPSY_BOARD=<ST-Link serial
+# number>, on an M33 build without NDEBUG. Needs probe-rs to flash it.
+set(KYMO_OPSY_BOARD "" CACHE STRING "The serial number of the NUCLEO-H563ZI's ST-Link, to build and record board/")
+if(KYMO_OPSY_BOARD)
+	if(NOT OPSY_TARGET STREQUAL "m33")
+		message(FATAL_ERROR "board/ runs on the STM32H563, a Cortex-M33: OPSY_TARGET must be m33")
+	endif()
+	add_executable(opsy_board
+		${KYMO_OPSY_DIR}/scheduler.cpp
+		${KYMO_OPSY_DIR}/tests/qemu/startup.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/board/board.cpp)
+	get_directory_property(OPSY_CPU_FLAGS DIRECTORY ${KYMO_OPSY_DIR}/tests/qemu DEFINITION OPSY_CPU_FLAGS)
+	get_directory_property(OPSY_ROOT DIRECTORY ${KYMO_OPSY_DIR}/tests/qemu DEFINITION OPSY_ROOT)
+	set(OPSY_LINKER_SCRIPT_PATH ${KYMO_OPSY_DIR}/tests/qemu/bench/stm32h563zi.ld)
+	opsy_qemu_image(opsy_board)
+	# What OpSy's directory adds to its own images: debug information and the
+	# optimisation level.
+	target_compile_options(opsy_board PRIVATE -g ${OPSY_OPTIMISATION})
+	target_include_directories(opsy_board PRIVATE ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+	find_program(KYMO_PROBE_RS probe-rs)
+	add_test(NAME opsy_board_h563
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/board.py
+			--image $<TARGET_FILE:opsy_board> --host ${KYMO_HOST}
+			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
+	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 120)
+endif()
