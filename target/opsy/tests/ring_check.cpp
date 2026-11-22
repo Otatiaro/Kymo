@@ -123,7 +123,7 @@ OPSY_QEMU_TEST(the_adapter_records_an_interrupt_waking_a_task)
 			}
 			++g_woken;
 		}
-	}, "worker"));
+	}));
 	g_worker.priority(opsy::task_priority::highest);
 	opsy::sleep_for(2ms);
 
