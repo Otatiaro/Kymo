@@ -1,0 +1,7 @@
+/* STM32H523xE: 512 KB flash, 272 KB SRAM (SRAM1-3 contiguous). */
+MEMORY
+{
+  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512K
+  RAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 272K
+}
+INCLUDE common.ld

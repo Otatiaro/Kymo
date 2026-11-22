@@ -1,0 +1,7 @@
+/* STM32F469NI (32F469IDISCOVERY): 2 MB flash, 320 KB SRAM (SRAM1-3 contiguous; CCM unused). */
+MEMORY
+{
+  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 2M
+  RAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 320K
+}
+INCLUDE common.ld
