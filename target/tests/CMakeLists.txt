@@ -62,8 +62,10 @@ endforeach()
 # miss the first instruction of the called function; 7 is the lowest that holds.
 set(KYMO_ICOUNT_SHIFT 7 CACHE STRING "QEMU -icount shift for the preemption tests")
 
-# Lock-free writes: an interrupt that emits, at every instruction of an emit.
-foreach(cpu cortex-m33 cortex-m4)
+# An image run under QEMU, on the machine of its core:
+#   kymo_qemu_test(<name> <cpu> <level> SOURCES <files> [DEFINITIONS <defs>] [ICOUNT])
+function(kymo_qemu_test name cpu level)
+	cmake_parse_arguments(PARSE_ARGV 3 arg "ICOUNT" "" "SOURCES;DEFINITIONS")
 	if(cpu STREQUAL cortex-m33)
 		set(machine mps2-an505)
 		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv8m.ld)
@@ -71,29 +73,41 @@ foreach(cpu cortex-m33 cortex-m4)
 		set(machine mps2-an386)
 		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv7m.ld)
 	endif()
+	add_executable(${name} ${arg_SOURCES} qemu/startup.cpp)
+	set_target_properties(${name} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
+	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+	# libstdc++ 16 asserts at -O0, and its assertion handler needs the
+	# unwinder: a bare-metal image turns the assertions off.
+	target_compile_definitions(${name} PRIVATE KYMO_RING_SLOTS=16 _GLIBCXX_NO_ASSERTIONS ${arg_DEFINITIONS})
+	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
+		-g -Wall -Wextra -Werror
+		-ffunction-sections -fdata-sections
+		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
+	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb
+		-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
+	if(missing)
+		add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
+		set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+		return()
+	endif()
+	set(icount "")
+	if(arg_ICOUNT)
+		set(icount --icount-shift ${KYMO_ICOUNT_SHIFT})
+	endif()
+	add_test(NAME ${name}
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_qemu.py
+			--qemu ${KYMO_QEMU} --machine ${machine} --image $<TARGET_FILE:${name}> ${icount})
+endfunction()
+
+foreach(cpu cortex-m33 cortex-m4)
 	foreach(level O0 Os O2)
-		set(target emit-preemption-${cpu}-${level})
-		add_executable(${target} emit/preemption.cpp qemu/preempt.cpp qemu/startup.cpp)
-		set_target_properties(${target} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
-		target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-		# libstdc++ 16 asserts at -O0, and its assertion handler needs the
-		# unwinder: a bare-metal image turns the assertions off.
-		target_compile_definitions(${target} PRIVATE KYMO_RING_SLOTS=16 _GLIBCXX_NO_ASSERTIONS)
-		target_compile_options(${target} PRIVATE -mcpu=${cpu} -mthumb -${level}
-			-g -Wall -Wextra -Werror
-			-ffunction-sections -fdata-sections
-			-fno-exceptions -fno-rtti -fno-threadsafe-statics)
-		target_link_options(${target} PRIVATE -mcpu=${cpu} -mthumb
-			-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
-		if(missing)
-			add_test(NAME ${target} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
-			set_tests_properties(${target} PROPERTIES WILL_FAIL ON)
-		else()
-			add_test(NAME ${target}
-				COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_qemu.py
-					--qemu ${KYMO_QEMU} --machine ${machine} --image $<TARGET_FILE:${target}>
-					--icount-shift ${KYMO_ICOUNT_SHIFT})
-		endif()
+		# Lock-free writes: an interrupt that emits, at every instruction of an emit.
+		kymo_qemu_test(emit-preemption-${cpu}-${level} ${cpu} ${level} ICOUNT
+			SOURCES emit/preemption.cpp qemu/preempt.cpp)
+		# The control word: value from reset, filter by family, freeze, and
+		# enable() and disable() interrupted at every instruction.
+		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
+			SOURCES control/control.cpp qemu/preempt.cpp
+			DEFINITIONS KYMO_CONTROL_DEFAULT=0xffffffbfu)
 	endforeach()
 endforeach()
-
