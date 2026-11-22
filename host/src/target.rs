@@ -2,6 +2,7 @@
 
 pub mod jlink;
 pub mod probe_rs;
+pub mod qemu;
 pub mod stlink;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -40,6 +41,8 @@ pub enum Backend {
     JLink,
     /// ST's STM32CubeProgrammer library, for ST-Link probes.
     StLink,
+    /// QEMU's monitor, for tests without a probe.
+    Qemu,
 }
 
 impl Backend {
@@ -48,6 +51,7 @@ impl Backend {
             "probe-rs" => Some(Self::ProbeRs),
             "jlink" => Some(Self::JLink),
             "stlink" => Some(Self::StLink),
+            "qemu" => Some(Self::Qemu),
             _ => None,
         }
     }
@@ -57,6 +61,7 @@ impl Backend {
             Self::ProbeRs => "probe-rs",
             Self::JLink => "jlink",
             Self::StLink => "stlink",
+            Self::Qemu => "qemu",
         }
     }
 }
@@ -66,7 +71,8 @@ impl Backend {
 pub struct Connection {
     pub backend: Backend,
     /// probe-rs: a selector (`VID:PID[:SERIAL]`); J-Link and ST-Link: the
-    /// probe serial number. Optional when a single probe is attached.
+    /// probe serial number, optional when a single probe is attached;
+    /// QEMU: the monitor's `<host>:<port>`.
     pub probe: Option<String>,
     /// The chip name, as probe-rs or J-Link knows it. Unused by ST-Link.
     pub chip: Option<String>,
@@ -80,5 +86,6 @@ pub fn open(connection: &Connection) -> Result<Box<dyn Target>> {
         Backend::ProbeRs => Ok(Box::new(probe_rs::ProbeRsTarget::open(connection)?)),
         Backend::JLink => Ok(Box::new(jlink::JLinkTarget::open(connection)?)),
         Backend::StLink => Ok(Box::new(stlink::StLinkTarget::open(connection)?)),
+        Backend::Qemu => Ok(Box::new(qemu::QemuTarget::open(connection)?)),
     }
 }
