@@ -11,6 +11,7 @@
 use crate::events::{Catalogue, Event, Kind, Ring, Type};
 use crate::symbols::Symbols;
 use crate::target::Result;
+use crate::time::Timeline;
 use gimli::DwAte;
 use std::fmt::Write;
 
@@ -139,18 +140,30 @@ pub fn decode<'a>(catalogue: &'a Catalogue, bytes: &[u8]) -> Result<(u32, Vec<De
     Ok((write_index, decoded))
 }
 
-/// `kymo decode`'s output: the write index, then one line per event, oldest
-/// first: its index, its timestamp, its type and each field's value.
-pub fn print(catalogue: &Catalogue, write_index: u32, events: &[Decoded]) {
+/// `kymo decode`'s output for a copy of the ring: the write index, then one
+/// line per event, oldest first, timed at `clock` hertz if given.
+pub fn print(catalogue: &Catalogue, write_index: u32, events: &[Decoded], clock: Option<u64>) {
     println!("write_index {write_index}");
+    let mut timeline = Timeline::new(clock);
     for decoded in events {
-        println!("{}", line(&catalogue.symbols, decoded));
+        let cycles = timeline.event(decoded.index, decoded.timestamp);
+        let seconds = timeline.seconds(cycles, timeline.frequency());
+        println!("{}", line(&catalogue.symbols, decoded, cycles, seconds));
     }
 }
 
-/// One event's line: its index, its timestamp, its type and each field's value.
-pub fn line(symbols: &Symbols, decoded: &Decoded) -> String {
-    let mut line = format!("event {} {} {}", decoded.index, decoded.timestamp, decoded.event.name);
+/// One event's line: its index, its cycles (its timestamp extended to 64
+/// bits), the seconds since the first event or `-` without a frequency, its
+/// type and each field's value.
+pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f64>) -> String {
+    let mut line = format!("event {} {cycles} ", decoded.index);
+    match seconds {
+        Some(seconds) => {
+            let _ = write!(line, "{seconds:.9}");
+        }
+        None => line.push('-'),
+    }
+    let _ = write!(line, " {}", decoded.event.name);
     for field in &decoded.event.fields {
         let _ = write!(line, " {}=", field.name);
         value(&mut line, symbols, &field.ty, &decoded.payload[field.offset as usize..]);

@@ -14,6 +14,7 @@ use crate::capture::{self, Record, Writer};
 use crate::decode::{self, Decoded, Header};
 use crate::events::{Catalogue, Ring};
 use crate::target::{Result, Target};
+use crate::time::Timeline;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::Arc;
@@ -208,13 +209,15 @@ impl<'a> Recorder<'a> {
 
 /// `kymo record`: prints the events as they come, until Enter is pressed on
 /// the standard input or `duration` has passed, and keeps them in the
-/// capture file `out`.
+/// capture file `out`. Their seconds are at `clock` hertz, or else at the
+/// frequency measured so far (time.rs).
 pub fn run(
     target: &mut dyn Target,
     catalogue: &Catalogue,
     address: u32,
     duration: Option<Duration>,
     out: Option<&Path>,
+    clock: Option<u64>,
 ) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -229,7 +232,12 @@ pub fn run(
     let started = Instant::now();
     let mut recorder = Recorder::start(target, catalogue, address)?;
     println!("record {}", recorder.next());
-    let mut capture = out.map(|out| Writer::create(out, recorder.next())).transpose()?;
+    let header = capture::Header {
+        first: recorder.next(),
+        clock,
+    };
+    let mut capture = out.map(|out| Writer::create(out, &header)).transpose()?;
+    let mut timeline = Timeline::new(clock);
     let mut items = Vec::new();
     let mut counts = (0u64, 0u64, 0u64);
     loop {
@@ -243,6 +251,7 @@ pub fn run(
             recorder.pass(target, &mut items)?
         };
         counts.2 += 1;
+        timeline.pass(host_ns, write_index);
         if let Some(capture) = &mut capture {
             capture.write(&Record::Pass { host_ns, write_index })?;
         }
@@ -250,7 +259,9 @@ pub fn run(
             let record = match &item {
                 Item::Event(event, slots) => {
                     counts.0 += 1;
-                    println!("{}", decode::line(&catalogue.symbols, event));
+                    let cycles = timeline.event(event.index, event.timestamp);
+                    let seconds = timeline.seconds(cycles, timeline.frequency());
+                    println!("{}", decode::line(&catalogue.symbols, event, cycles, seconds));
                     Record::Event {
                         index: event.index,
                         slots,
@@ -272,29 +283,69 @@ pub fn run(
                 capture.write(&Record::End { next: recorder.next() })?;
                 capture.finish()?;
             }
-            eprintln!("{} events, {} slots lost, {} passes", counts.0, counts.1, counts.2);
+            eprintln!(
+                "{} events, {} slots lost, {} passes{}",
+                counts.0,
+                counts.1,
+                counts.2,
+                measured(&timeline)
+            );
             return Ok(());
         }
     }
 }
 
-/// `kymo decode` of a capture: the lines `kymo record` printed while making it.
-pub fn print_capture(catalogue: &Catalogue, bytes: &[u8]) -> Result<()> {
+/// The frequency measured over a recording, for its summary.
+fn measured(timeline: &Timeline) -> String {
+    match timeline.measured() {
+        Some((hz, span)) => format!(", cycle counter measured at {hz:.0} Hz over {span:.1} s"),
+        None => String::new(),
+    }
+}
+
+/// `kymo decode` of a capture: the lines `kymo record` printed while making
+/// it, but for the seconds: they are at `clock` hertz, or the capture's, or
+/// else at the frequency measured over the whole capture.
+pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) -> Result<()> {
     let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
-    let (first, records) = capture::read(bytes)?;
-    println!("record {first}");
-    for record in records {
-        match record {
-            Record::Pass { .. } => {}
+    let (header, records) = capture::read(bytes)?;
+    let mut timeline = Timeline::new(clock.or(header.clock));
+    let mut events = Vec::new();
+    for record in &records {
+        match *record {
+            Record::Pass { host_ns, write_index } => timeline.pass(host_ns, write_index),
             Record::Event { index, slots } => {
                 let event = decode::event(catalogue, ring, index, slots)?
                     .ok_or_else(|| format!("event {index}: its slots in the capture do not hold it whole"))?;
-                println!("{}", decode::line(&catalogue.symbols, &event));
+                let cycles = timeline.event(index, event.timestamp);
+                events.push((event, cycles));
+            }
+            Record::Lost { .. } | Record::End { .. } => {}
+        }
+    }
+    let frequency = timeline.frequency();
+    let mut events = events.iter();
+    println!("record {}", header.first);
+    for record in &records {
+        match *record {
+            Record::Pass { .. } => {}
+            Record::Event { .. } => {
+                let (event, cycles) = events.next().expect("one event per event record");
+                let seconds = timeline.seconds(*cycles, frequency);
+                println!("{}", decode::line(&catalogue.symbols, event, *cycles, seconds));
             }
             Record::Lost { from, to } => println!("lost {from} {to}"),
             Record::End { next } => println!("end {next}"),
         }
     }
+    eprintln!(
+        "{} events{}",
+        records
+            .iter()
+            .filter(|record| matches!(record, Record::Event { .. }))
+            .count(),
+        measured(&timeline)
+    );
     Ok(())
 }
 

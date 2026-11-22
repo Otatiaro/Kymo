@@ -4,7 +4,8 @@
 //! Little-endian throughout. A header, then records, each led by a tag byte:
 //!
 //! ```text
-//! header  "KYMOCAP\0", u32 version (1), u32 first index recorded
+//! header  "KYMOCAP\0", u32 version (1), u32 first index recorded,
+//!         u64 cycle counter frequency in hertz given to the recording (0: none)
 //! 1 pass  u64 host time (ns since the Unix epoch), u32 write index read
 //! 2 event u32 index, u8 slot count, the event's slots as read (16 bytes each)
 //! 3 lost  u32 first index lost, u32 index after the last one
@@ -23,6 +24,11 @@ const MAGIC: &[u8; 8] = b"KYMOCAP\0";
 const VERSION: u32 = 1;
 const SLOT_BYTES: usize = 16;
 
+pub struct Header {
+    pub first: u32,
+    pub clock: Option<u64>,
+}
+
 pub enum Record<'a> {
     Pass { host_ns: u64, write_index: u32 },
     Event { index: u32, slots: &'a [u8] },
@@ -35,14 +41,15 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn create(path: &Path, first: u32) -> Result<Self> {
+    pub fn create(path: &Path, header: &Header) -> Result<Self> {
         let file = File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let mut writer = Self {
             file: BufWriter::new(file),
         };
         writer.file.write_all(MAGIC)?;
         writer.file.write_all(&VERSION.to_le_bytes())?;
-        writer.file.write_all(&first.to_le_bytes())?;
+        writer.file.write_all(&header.first.to_le_bytes())?;
+        writer.file.write_all(&header.clock.unwrap_or(0).to_le_bytes())?;
         Ok(writer)
     }
 
@@ -84,8 +91,8 @@ pub fn is_capture(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// The first index of a capture, and its records in order.
-pub fn read(bytes: &[u8]) -> Result<(u32, Vec<Record<'_>>)> {
+/// The header of a capture, and its records in order.
+pub fn read(bytes: &[u8]) -> Result<(Header, Vec<Record<'_>>)> {
     let mut cursor = Cursor { bytes };
     if cursor.take(8)? != MAGIC {
         return Err("not a Kymo capture".into());
@@ -95,11 +102,16 @@ pub fn read(bytes: &[u8]) -> Result<(u32, Vec<Record<'_>>)> {
         return Err(format!("capture version {version}, this kymo reads {VERSION}").into());
     }
     let first = cursor.u32()?;
+    let clock = cursor.u64()?;
+    let header = Header {
+        first,
+        clock: (clock != 0).then_some(clock),
+    };
     let mut records = Vec::new();
     while !cursor.bytes.is_empty() {
         let record = match cursor.take(1)?[0] {
             1 => Record::Pass {
-                host_ns: u64::from_le_bytes(cursor.take(8)?.try_into().expect("eight bytes")),
+                host_ns: cursor.u64()?,
                 write_index: cursor.u32()?,
             },
             2 => {
@@ -119,7 +131,7 @@ pub fn read(bytes: &[u8]) -> Result<(u32, Vec<Record<'_>>)> {
         };
         records.push(record);
     }
-    Ok((first, records))
+    Ok((header, records))
 }
 
 /// The bytes of a capture not read yet.
@@ -139,5 +151,9 @@ impl<'a> Cursor<'a> {
 
     fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
     }
 }

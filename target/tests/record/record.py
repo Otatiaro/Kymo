@@ -13,7 +13,9 @@ checks the output (record.cpp):
 - every event holds the values its image wrote for its index;
 - the recording went through losses, every type, and events whose slots run
   into the guard zone;
-- `kymo decode` of the capture prints exactly what `kymo record` printed.
+- `kymo decode` of the capture prints exactly what `kymo record` printed:
+  they may differ only by the seconds, which are all 0 here (QEMU's
+  timestamps all read 0) at the frequency given and kept in the capture.
 
 Which indexes are lost depends on how QEMU and the host interleave, so the
 check does not predict them: it checks that the output accounts for each.
@@ -28,6 +30,7 @@ import tempfile
 import time
 
 RECORD_SECONDS = "2"
+CLOCK_HZ = "64000000"  # given, so that the capture carries it to kymo decode
 TIMEOUT_SECONDS = 60
 SLOTS = 16  # KYMO_RING_SLOTS of the test images
 TYPES = {"one": 1, "two": 2, "four": 4}  # slots each type takes
@@ -82,11 +85,14 @@ def check(output: str) -> list[str]:
             expected = end
             continue
         previous = "event"
-        index, name = int(fields[1]), fields[3]
+        index, name = int(fields[1]), fields[4]
         if fields[0] != "event" or name not in TYPES:
             errors.append(f"{line}: not an event of the image")
             continue
-        values = dict(field.split("=", 1) for field in fields[4:])
+        # QEMU has no cycle counter: no cycles, so 0 s at the frequency given.
+        if fields[2:4] != ["0", "0.000000000"]:
+            errors.append(f"{line}: expected 0 cycles at 0 s")
+        values = dict(field.split("=", 1) for field in fields[5:])
         if index != expected:
             errors.append(f"{line}: expected index {expected}")
         if values != expected_fields(name, index):
@@ -123,7 +129,8 @@ def main() -> int:
             wait_for(port)
             record = subprocess.run(
                 [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{port}",
-                 "--elf", args.image, "--duration", RECORD_SECONDS, "--out", capture],
+                 "--elf", args.image, "--duration", RECORD_SECONDS, "--out", capture,
+                 "--clock", CLOCK_HZ],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
         finally:
             target.kill()

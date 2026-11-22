@@ -10,6 +10,7 @@ mod ring;
 mod swo;
 mod symbols;
 mod target;
+mod time;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,7 +19,7 @@ use target::{Backend, Connection, Result};
 
 const USAGE: &str = "\
 usage: kymo events <elf>
-       kymo decode <elf> <ring or capture>
+       kymo decode <elf> <ring or capture> [--clock <Hz>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
 
@@ -28,7 +29,13 @@ the type it stands for, its size, and each field's offset, size and type.
 decode: lists the events a copy of the trace ring holds, oldest first; the
 copy is the bytes of kymo::trace_ring, dumped from a stopped target running
 the image. Given a capture made by kymo record --out, prints what kymo
-record printed while making it.
+record printed while making it, but for the seconds: they are recomputed
+over the whole capture.
+
+Each event line reads: index, cycles (the cycle counter timestamp extended
+to 64 bits), seconds since the first event (- without a frequency), type,
+fields. The frequency is --clock's, or the one recorded, or else measured
+from the host time of the probe's passes once the events span a second.
 
 record: prints the events of a running target as it writes them, drained
 from its trace ring through the probe, and the indexes lost when the ring
@@ -39,6 +46,8 @@ record options:
                      QEMU's monitor started with -qmp tcp:<host>:<port>,server=on,wait=off
   --duration <seconds>  stop after this long
   --out <file>       also keep the recording in this capture file
+  --clock <Hz>       the cycle counter's frequency, kept in the capture;
+                     without it, measured
 
 bench: measures how fast a probe drains the trace ring of the bench image,
 and how fast SWO carries the same events with --swo-baud, and whether the
@@ -78,17 +87,19 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("decode") => {
-            let (elf, ring) = match (arguments.next(), arguments.next(), arguments.next()) {
-                (Some(elf), Some(ring), None) => (PathBuf::from(elf), PathBuf::from(ring)),
+            let arguments: Vec<String> = arguments.collect();
+            let (elf, ring, clock) = match arguments.as_slice() {
+                [elf, ring] => (elf, ring, None),
+                [elf, ring, option, hz] if option == "--clock" => (elf, ring, Some(hz.parse()?)),
                 _ => return Err(USAGE.into()),
             };
-            let catalogue = events::read(&elf)?;
-            let bytes = std::fs::read(&ring).map_err(|error| format!("{}: {error}", ring.display()))?;
+            let catalogue = events::read(&PathBuf::from(elf))?;
+            let bytes = std::fs::read(ring).map_err(|error| format!("{ring}: {error}"))?;
             if capture::is_capture(&bytes) {
-                return record::print_capture(&catalogue, &bytes);
+                return record::print_capture(&catalogue, &bytes, clock);
             }
             let (write_index, decoded) = decode::decode(&catalogue, &bytes)?;
-            decode::print(&catalogue, write_index, &decoded);
+            decode::print(&catalogue, write_index, &decoded, clock);
             return Ok(());
         }
         _ => return Err(USAGE.into()),
@@ -103,6 +114,7 @@ fn run() -> Result<()> {
     let mut swo_baud = None;
     let mut duration = None;
     let mut out = None;
+    let mut clock = None;
     while let Some(option) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{option} needs a value"));
         match option.as_str() {
@@ -119,6 +131,7 @@ fn run() -> Result<()> {
             "--swo-baud" => swo_baud = Some(value()?.parse()?),
             "--duration" => duration = Some(Duration::from_secs_f64(value()?.parse()?)),
             "--out" => out = Some(PathBuf::from(value()?)),
+            "--clock" => clock = Some(value()?.parse()?),
             _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
         }
     }
@@ -141,7 +154,14 @@ fn run() -> Result<()> {
             .into());
         }
         let mut target = target::open(&connection)?;
-        return record::run(target.as_mut(), &catalogue, symbol.address, duration, out.as_deref());
+        return record::run(
+            target.as_mut(),
+            &catalogue,
+            symbol.address,
+            duration,
+            out.as_deref(),
+            clock,
+        );
     }
     let elf = elf::Elf::read(&elf_path)?;
     let settings = bench::Settings {

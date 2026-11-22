@@ -6,9 +6,10 @@
  * The image emits events of one to four slots, enough to run around the
  * ring several times and through its guard zone, and reports each through
  * semihosting:
- *   emitted <index> <slots> event <index> <timestamp> <type> <field>=<value>...
+ *   emitted <index> <slots> event <index> <cycles> - <type> <field>=<value>...
  * The index comes from the ring; the values are written here, as the host is
- * expected to print them. Then it reports two copies of the ring:
+ * expected to print them. The timestamps only grow, by less than a turn, so
+ * their cycles are the timestamps themselves; with no frequency, no seconds. Then it reports two copies of the ring:
  *   ring <hexadecimal bytes of kymo::trace_ring>
  * taken with nothing writing, as from a stopped target; and
  *   copy
@@ -131,7 +132,7 @@ void emitted(char const* type, Event const& event, Fields fields)
 	qemu::write_unsigned(index);
 	qemu::write(" ");
 	qemu::write_unsigned(timestamp);
-	qemu::write(" ");
+	qemu::write(" - ");
 	qemu::write(type);
 	fields(event);
 	qemu::write("\n");
