@@ -43,3 +43,57 @@ foreach(cpu cortex-m33 cortex-m4)
 				-P ${CMAKE_CURRENT_SOURCE_DIR}/type_id/check.cmake)
 	endforeach()
 endforeach()
+
+# Images run under QEMU. Without QEMU or Python the tests are still
+# registered, and fail saying what is missing.
+find_program(KYMO_QEMU qemu-system-arm HINTS "C:/Program Files/qemu")
+find_package(Python3 COMPONENTS Interpreter)
+
+set(missing "")
+foreach(tool KYMO_QEMU Python3_EXECUTABLE)
+	if(NOT ${tool})
+		list(APPEND missing ${tool})
+	endif()
+endforeach()
+
+# Each instruction takes 2^shift ns of virtual time. An instruction must last
+# longer than a SysTick tick for an interrupt to land on every instruction
+# (qemu/preempt.hpp). The images check it: at shift 6, four of the six already
+# miss the first instruction of the called function; 7 is the lowest that holds.
+set(KYMO_ICOUNT_SHIFT 7 CACHE STRING "QEMU -icount shift for the preemption tests")
+
+# Lock-free writes: an interrupt that emits, at every instruction of an emit.
+foreach(cpu cortex-m33 cortex-m4)
+	if(cpu STREQUAL cortex-m33)
+		set(machine mps2-an505)
+		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv8m.ld)
+	else()
+		set(machine mps2-an386)
+		set(script ${CMAKE_CURRENT_SOURCE_DIR}/qemu/armv7m.ld)
+	endif()
+	foreach(level O0 Os O2)
+		set(target emit-preemption-${cpu}-${level})
+		add_executable(${target} emit/preemption.cpp qemu/preempt.cpp qemu/startup.cpp)
+		set_target_properties(${target} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
+		target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+		# libstdc++ 16 asserts at -O0, and its assertion handler needs the
+		# unwinder: a bare-metal image turns the assertions off.
+		target_compile_definitions(${target} PRIVATE KYMO_RING_SLOTS=16 _GLIBCXX_NO_ASSERTIONS)
+		target_compile_options(${target} PRIVATE -mcpu=${cpu} -mthumb -${level}
+			-g -Wall -Wextra -Werror
+			-ffunction-sections -fdata-sections
+			-fno-exceptions -fno-rtti -fno-threadsafe-statics)
+		target_link_options(${target} PRIVATE -mcpu=${cpu} -mthumb
+			-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
+		if(missing)
+			add_test(NAME ${target} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
+			set_tests_properties(${target} PROPERTIES WILL_FAIL ON)
+		else()
+			add_test(NAME ${target}
+				COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_qemu.py
+					--qemu ${KYMO_QEMU} --machine ${machine} --image $<TARGET_FILE:${target}>
+					--icount-shift ${KYMO_ICOUNT_SHIFT})
+		endif()
+	endforeach()
+endforeach()
+

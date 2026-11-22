@@ -34,6 +34,13 @@ namespace
 {
 
 constexpr std::uint16_t bench_event_type = 1;
+
+/// The bench event: its slot index, and its complement.
+struct bench_event
+{
+	std::uint32_t index;
+	std::uint32_t complement;
+};
 constexpr std::uint32_t tick_hz = 1000;
 
 volatile std::uint32_t& reg(std::uintptr_t address)
@@ -101,7 +108,7 @@ void SysTick_Handler()
 		// This handler is the only writer, so the index read here is the one
 		// the ring hands out; the host checks the payload against it.
 		std::uint32_t const index = kymo_ring.write_index.load(std::memory_order_relaxed);
-		kymo_ring.write(bench_event_type, reg(dwt_cyccnt), index, ~index);
+		kymo_ring.write(bench_event_type, reg(dwt_cyccnt), bench_event{index, ~index});
 	}
 	std::uint32_t const swo_count = kymo_bench_swo_events_per_tick;
 	if (swo_count != 0 && swo_enabled())
