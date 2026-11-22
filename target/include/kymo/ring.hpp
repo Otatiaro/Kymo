@@ -10,8 +10,8 @@
  *     Cortex-M, retried on contention, interrupts never masked);
  *  2. fill the timestamp and the payload;
  *  3. publish the headers, each after a release barrier, the first slot's
- *     last. A header carries the lap of its slot index, so a slot whose
- *     header shows the expected lap is complete.
+ *     last. Every header of an event carries the lap of its first slot's
+ *     index, so a slot whose header shows the expected lap is complete.
  *
  * Every slot starts with a header, so every slot boundary is a point where
  * the host can pick up the stream: the head bit marks an event's first slot.
@@ -22,7 +22,8 @@
  * past its last slot, one slot short of the largest event, and an event that
  * starts near the end runs on into it. The slots it would have wrapped onto
  * are left as they were, with an older lap; the host reads the guard zone
- * instead. The writer never tests for the end.
+ * instead, where the slots carry the lap of the event's first slot, not the
+ * lap their own index would have. The writer never tests for the end.
  *
  * The host knows a slot it read is intact when the write index read after the
  * slot has not gone past it by a full ring: no writer could have reserved the
@@ -36,6 +37,7 @@
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
+#include <utility>
 
 namespace kymo
 {
@@ -44,8 +46,8 @@ namespace kymo
 struct slot
 {
 	/// Bits 0-15: event type. Bit 16: head (first slot of an event).
-	/// Bits 17-31: lap of the slot index plus one, modulo 2^15, so that a
-	/// zeroed slot never passes for a written one.
+	/// Bits 17-31: lap of the index of the event's first slot plus one,
+	/// modulo 2^15, so that a zeroed slot never passes for a written one.
 	std::atomic<std::uint32_t> header;
 	/// In an event's first slot: the timestamp, then 8 bytes of payload.
 	/// In the slots that follow: 12 bytes of payload.
@@ -84,8 +86,8 @@ struct ring
 	std::atomic<std::uint32_t> write_index;   ///< next index to reserve
 	slot slots[Slots + guard_slots];
 
-	/** @brief The header of the slot at @p index. */
-	static constexpr std::uint32_t header(std::uint16_t type, std::uint32_t index, bool head)
+	/** @brief The header of a slot of the event whose first slot is at @p index. */
+	static constexpr std::uint32_t header(std::uint32_t type, std::uint32_t index, bool head)
 	{
 		std::uint32_t const lap = ((index >> log2_slots) + 1) & 0x7fffu;
 		return type | (head ? head_bit : 0) | (lap << lap_shift);
@@ -93,7 +95,7 @@ struct ring
 
 	/** @brief Writes @p event. Safe from any priority, any context. */
 	template<typename Event>
-	void write(std::uint16_t type, std::uint32_t timestamp, Event const& event)
+	[[gnu::always_inline]] void write(std::uint32_t type, std::uint32_t timestamp, Event const& event)
 	{
 		static_assert(std::is_trivially_copyable<Event>::value, "an event is copied byte for byte");
 		constexpr std::size_t count = slots_for<Event>;
@@ -105,14 +107,29 @@ struct ring
 
 		first->words[0] = timestamp;
 		std::memcpy(&first->words[1], bytes, sizeof(Event) < head_payload ? sizeof(Event) : head_payload);
-		for (std::size_t i = 1; i < count; ++i)
-		{
-			std::size_t const offset = head_payload + (i - 1) * tail_payload;
-			std::size_t const left = sizeof(Event) - offset;
-			std::memcpy(first[i].words, bytes + offset, left < tail_payload ? left : tail_payload);
-			first[i].header.store(header(type, index + i, false), std::memory_order_release);
-		}
+		write_tails<Event>(first, header(type, index, false), bytes, std::make_index_sequence<count - 1>{});
 		first->header.store(header(type, index, true), std::memory_order_release);
+	}
+
+private:
+	/** @brief Fills and publishes the slots after the first, one per @p Tails
+	 *         (none for a one-slot event), each with the header @p tail. */
+	template<typename Event, std::size_t... Tails>
+	[[gnu::always_inline]] static void write_tails([[maybe_unused]] slot* first, [[maybe_unused]] std::uint32_t tail,
+	                                               [[maybe_unused]] unsigned char const* bytes,
+	                                               std::index_sequence<Tails...>)
+	{
+		(write_tail<Event, Tails + 1>(first, tail, bytes), ...);
+	}
+
+	/** @brief Fills and publishes slot @p I of an event, I > 0. */
+	template<typename Event, std::size_t I>
+	[[gnu::always_inline]] static void write_tail(slot* first, std::uint32_t tail, unsigned char const* bytes)
+	{
+		constexpr std::size_t offset = head_payload + (I - 1) * tail_payload;
+		constexpr std::size_t left = sizeof(Event) - offset;
+		std::memcpy(first[I].words, bytes + offset, left < tail_payload ? left : tail_payload);
+		first[I].header.store(tail, std::memory_order_release);
 	}
 };
 

@@ -101,7 +101,7 @@ std::uint32_t read_event(std::uint32_t index, std::uint16_t& type, unsigned char
 	std::memcpy(out, &first->words[1], size < kymo::head_payload ? size : kymo::head_payload);
 	for (std::uint32_t i = 1; i < count; ++i)
 	{
-		if (first[i].header.load(std::memory_order_acquire) != ring_type::header(type, index + i, false))
+		if (first[i].header.load(std::memory_order_acquire) != ring_type::header(type, index, false))
 			fail("no complete continuation slot", index + i);
 		std::size_t const offset = kymo::head_payload + (i - 1) * kymo::tail_payload;
 		std::size_t const left = size - offset;

@@ -1,0 +1,56 @@
+name: Target
+
+on:
+  push:
+    branches: [master]
+    paths: ['target/**', '.github/workflows/target.yml']
+  pull_request:
+    branches: [master]
+    paths: ['target/**', '.github/workflows/target.yml']
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  TOOLCHAIN_VERSION: '16.2.0-1'
+
+# The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
+# writes and the control word under preemption, and the cost of an emit
+# against its threshold. One compiler, GCC 16, from
+# Otatiaro/arm-none-eabi-toolchain.
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the arm-none-eabi toolchain
+        run: |
+          set -euo pipefail
+          base="https://github.com/Otatiaro/arm-none-eabi-toolchain/releases/download/v${TOOLCHAIN_VERSION}"
+          archive="arm-none-eabi-toolchain-${TOOLCHAIN_VERSION}-linux-x86_64.tar.xz"
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 -o "$archive" "$base/$archive"
+          curl --fail --silent --show-error --location --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+          sha256sum --check --ignore-missing SHA256SUMS
+          mkdir -p "$HOME/arm-none-eabi-toolchain"
+          tar -xJf "$archive" -C "$HOME/arm-none-eabi-toolchain" --strip-components=1
+          "$HOME/arm-none-eabi-toolchain/bin/arm-none-eabi-g++" --version | head -1
+          echo "$HOME/arm-none-eabi-toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Install Ninja and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build qemu-system-arm
+          qemu-system-arm --version | head -1
+
+      - name: Configure
+        run: >
+          cmake -S target/tests -B build
+          -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/target/cmake/arm-none-eabi.cmake
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --verbose
