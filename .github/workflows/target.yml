@@ -60,8 +60,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
 
-  # OpSy's on-target suite with the adapter's hooks, and the adapter's events
-  # read back from the ring (target/opsy/tests). -Os is what ships, -Og the
+  # OpSy's on-target suite with the adapter's hooks, the adapter's events
+  # read back from the ring, and the suite recorded by the host with its trace
+  # checked (target/opsy/tests). -Os is what ships, -Og the
   # debug build, -O0 the costliest hooks OpSy's cases must bear (an event is
   # about 110 instructions there).
   opsy:
@@ -88,6 +89,12 @@ jobs:
 
       - name: Install Ninja and QEMU
         run: sudo apt-get update && sudo apt-get install -y ninja-build qemu-system-arm
+
+      # kymo record, for the suite's trace (target/opsy/tests/trace).
+      - name: Build the host
+        run: |
+          sudo apt-get install -y libudev-dev
+          cargo build --release --manifest-path host/Cargo.toml
 
       - name: Configure
         run: >
