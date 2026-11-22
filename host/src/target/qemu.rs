@@ -22,6 +22,8 @@ impl QemuTarget {
             .as_deref()
             .ok_or("qemu needs --probe-id <host>:<port>")?;
         let writer = TcpStream::connect(address).map_err(|error| format!("{address}: {error}"))?;
+        // One command, one reply: waiting to coalesce small writes only delays it.
+        writer.set_nodelay(true)?;
         let mut target = Self {
             reader: BufReader::new(writer.try_clone()?),
             writer,
@@ -37,7 +39,7 @@ impl QemuTarget {
 
     /// Sends one command and returns its reply, skipping asynchronous events.
     fn execute(&mut self, command: &str) -> Result<String> {
-        writeln!(self.writer, "{command}")?;
+        self.writer.write_all(format!("{command}\n").as_bytes())?;
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {
