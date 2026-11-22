@@ -1,0 +1,12 @@
+[package]
+name = "kymo"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Kymo host: drains the trace ring of a running Cortex-M target through a debug probe"
+publish = false
+
+[dependencies]
+libloading = "0.8"
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+probe-rs = "0.32"
