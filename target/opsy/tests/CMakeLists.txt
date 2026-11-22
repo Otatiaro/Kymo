@@ -21,9 +21,13 @@ set(kymo_include
 	${CMAKE_CURRENT_SOURCE_DIR}/../../include
 	${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
-foreach(image opsy_qemu_tests opsy_qemu_start_check opsy_qemu_before_start opsy_qemu_faults)
+foreach(image opsy_qemu_tests opsy_qemu_start_check opsy_qemu_before_start)
 	target_include_directories(${image} PRIVATE ${kymo_include})
 endforeach()
+
+# The fault image, traced: the adapter's events and the fault recording OpSy's
+# test_faults.cpp checks, ahead of OpSy's own fault hooks.
+target_include_directories(opsy_qemu_faults BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/faults ${kymo_include})
 
 # The bench, traced: its markers and the adapter's events together, ahead of
 # OpSy's own bench hooks. bench/overhead.py then holds what tracing adds to

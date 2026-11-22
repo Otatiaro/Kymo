@@ -13,7 +13,7 @@ env:
   TOOLCHAIN_VERSION: '16.2.0-1'
   # The OpSy the adapter is tested against. A change on OpSy's side reaches
   # Kymo when this moves.
-  OPSY_COMMIT: 194934fea11a657d545cc5268755f17497ae0f00
+  OPSY_COMMIT: ba4229c2a774ec37f1efb93a0d76ef9f7393c245
 
 # The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
 # writes and the control word under preemption, and the cost of an emit
@@ -51,8 +51,8 @@ jobs:
 
   # OpSy's on-target suite with the adapter's hooks, and the adapter's events
   # read back from the ring (target/opsy/tests). -Os is what ships, -Og the
-  # debug build. Not -O0: an event costs about 110 instructions there, and two
-  # of OpSy's cases assume hooks cheaper than that.
+  # debug build, -O0 the costliest hooks OpSy's cases must bear (an event is
+  # about 110 instructions there).
   opsy:
     name: OpSy adapter (cortex-${{ matrix.target }}, ${{ matrix.optimisation }})
     runs-on: ubuntu-latest
@@ -60,7 +60,7 @@ jobs:
       fail-fast: false
       matrix:
         target: [m33, m4]
-        optimisation: ['-Os;-DNDEBUG', '-Og']
+        optimisation: ['-Os;-DNDEBUG', '-Og', '-O0']
     steps:
       - uses: actions/checkout@v5
 
