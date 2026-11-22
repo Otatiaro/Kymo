@@ -91,17 +91,14 @@ impl Symbols {
     }
 }
 
-/// A symbol's name as C++ writes it, without a function's parameters, and
-/// without spaces, which separate an event's fields: dropped after a comma,
-/// `_` elsewhere (`(anonymous_namespace)::origin`). A name that is not
-/// mangled stays as it is.
+/// A symbol's name as the demangler writes it, without a function's
+/// parameters or return type. A name that is not mangled stays as it is.
 fn demangle(name: &str) -> String {
     let options = cpp_demangle::DemangleOptions::new().no_params().no_return_type();
-    let demangled = cpp_demangle::Symbol::new(name)
+    cpp_demangle::Symbol::new(name)
         .ok()
         .and_then(|symbol| symbol.demangle_with_options(&options).ok())
-        .unwrap_or_else(|| name.to_owned());
-    demangled.replace(", ", ",").replace(' ', "_")
+        .unwrap_or_else(|| name.to_owned())
 }
 
 #[cfg(test)]
@@ -130,13 +127,13 @@ mod tests {
     }
 
     #[test]
-    fn names_without_spaces() {
-        assert_eq!(demangle("_ZN12_GLOBAL__N_16originE"), "(anonymous_namespace)::origin");
+    fn names_as_demangled() {
+        assert_eq!(demangle("_ZN12_GLOBAL__N_16originE"), "(anonymous namespace)::origin");
         assert_eq!(
             demangle("_ZN2os4taskILj256EE5entryEv"),
-            "os::task<(unsigned_int)256>::entry"
+            "os::task<(unsigned int)256>::entry"
         );
-        assert_eq!(demangle("_Z1fIiJcEEvv"), "f<int,char>");
+        assert_eq!(demangle("_Z1fIiJcEEvv"), "f<int, char>");
         assert_eq!(demangle("timer_handler"), "timer_handler");
     }
 

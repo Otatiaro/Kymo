@@ -175,7 +175,7 @@ void emit_number(std::uint32_t n)
 					        qemu::write(",");
 				        write_signed(event.values[k]);
 			        }
-			        qemu::write("] from=(anonymous_namespace)::origin");
+			        qemu::write("] from=(anonymous namespace)::origin");
 			        qemu::write(" id=");
 			        qemu::write_unsigned(event.id);
 		        });
