@@ -3,10 +3,10 @@ name: Target
 on:
   push:
     branches: [master]
-    paths: ['target/**', '.github/workflows/target.yml', '.github/actions/**']
+    paths: ['target/**', 'host/**', '.github/workflows/target.yml', '.github/actions/**']
   pull_request:
     branches: [master]
-    paths: ['target/**', '.github/workflows/target.yml', '.github/actions/**']
+    paths: ['target/**', 'host/**', '.github/workflows/target.yml', '.github/actions/**']
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -16,8 +16,10 @@ env:
   OPSY_COMMIT: ba4229c2a774ec37f1efb93a0d76ef9f7393c245
 
 # The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
-# writes and the control word under preemption, and the cost of an emit
-# against its threshold; then the OpSy adapter on OpSy's own suite and bench.
+# writes and the control word under preemption, event layouts read by the host
+# against the target's, copies of the ring decoded by the host against the
+# events written, and the cost of an emit against its threshold; then the OpSy
+# adapter on OpSy's own suite and bench.
 # One compiler, GCC 16, from Otatiaro/arm-none-eabi-toolchain.
 jobs:
   tests:
@@ -36,6 +38,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build qemu-system-arm
           qemu-system-arm --version | head -1
+
+      # kymo events and kymo decode, for the layout and decode tests.
+      - name: Build the host
+        run: |
+          sudo apt-get install -y libudev-dev
+          cargo build --release --manifest-path host/Cargo.toml
 
       - name: Configure
         run: >

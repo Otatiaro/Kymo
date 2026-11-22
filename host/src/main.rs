@@ -1,7 +1,9 @@
 //! Kymo host.
 
 mod bench;
+mod decode;
 mod elf;
+mod events;
 mod ring;
 mod swo;
 mod target;
@@ -12,13 +14,22 @@ use std::time::Duration;
 use target::{Backend, Connection, Result};
 
 const USAGE: &str = "\
-usage: kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
+usage: kymo events <elf>
+       kymo decode <elf> <ring>
+       kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
 
-Measures how fast a probe drains the trace ring of the bench image, and
-how fast SWO carries the same events with --swo-baud, and whether the
+events: lists the event types of an image, read from its ELF: each type id,
+the type it stands for, its size, and each field's offset, size and type.
+
+decode: lists the events a copy of the trace ring holds, oldest first; the
+copy is the bytes of kymo::trace_ring, dumped from a stopped target running
+the image.
+
+bench: measures how fast a probe drains the trace ring of the bench image,
+and how fast SWO carries the same events with --swo-baud, and whether the
 cycle counter keeps counting once the probe leaves.
 
-options:
+bench options:
   --probe-id <id>    probe-rs: VID:PID[:SERIAL]; jlink, stlink: serial number
   --chip <name>      target name for probe-rs and J-Link (e.g. STM32H563ZITx)
   --speed <kHz>      debug clock (default 4000)
@@ -42,6 +53,25 @@ fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     match arguments.next().as_deref() {
         Some("bench") => {}
+        Some("events") => {
+            let elf = match (arguments.next(), arguments.next()) {
+                (Some(elf), None) => PathBuf::from(elf),
+                _ => return Err(USAGE.into()),
+            };
+            events::print(&events::read(&elf)?);
+            return Ok(());
+        }
+        Some("decode") => {
+            let (elf, ring) = match (arguments.next(), arguments.next(), arguments.next()) {
+                (Some(elf), Some(ring), None) => (PathBuf::from(elf), PathBuf::from(ring)),
+                _ => return Err(USAGE.into()),
+            };
+            let catalogue = events::read(&elf)?;
+            let bytes = std::fs::read(&ring).map_err(|error| format!("{}: {error}", ring.display()))?;
+            let (write_index, decoded) = decode::decode(&catalogue, &bytes)?;
+            decode::print(write_index, &decoded);
+            return Ok(());
+        }
         _ => return Err(USAGE.into()),
     }
     let mut backend = None;
