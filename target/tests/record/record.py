@@ -6,7 +6,11 @@
 
 Runs the image under QEMU with its monitor on a TCP port, records it with
 `kymo record --probe qemu` for a few seconds into a capture file, then
-checks the output (record.cpp):
+checks the output (record.cpp). QEMU starts stopped, and runs once the host
+has read the ring a first time: the host sees every event from the first,
+however long it takes to start.
+
+The output must show that:
 
 - every index from where recording started to where it stopped is in one
   event or one loss, in order, never both, never twice, and a loss is never
@@ -31,6 +35,7 @@ check does not predict them: it checks that the output accounts for each.
 """
 
 import argparse
+import json
 import os
 import socket
 import subprocess
@@ -63,6 +68,20 @@ def wait_for(port: int) -> None:
             if time.monotonic() > deadline:
                 raise
             time.sleep(0.05)
+
+
+def resume(port: int) -> None:
+    """Runs the stopped QEMU, through its second monitor."""
+    with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT_SECONDS) as monitor:
+        replies = monitor.makefile("r")
+        replies.readline()  # the greeting
+        for command in ("qmp_capabilities", "cont"):
+            monitor.sendall(json.dumps({"execute": command}).encode() + b"\n")
+            reply = json.loads(replies.readline())
+            while "return" not in reply and "error" not in reply:
+                reply = json.loads(replies.readline())  # an event
+            if "error" in reply:
+                raise RuntimeError(f"QEMU refused {command}: {reply['error']}")
 
 
 def expected_fields(name: str, index: int) -> dict[str, str]:
@@ -157,36 +176,42 @@ def main() -> int:
     parser.add_argument("--icount-shift", type=int)
     args = parser.parse_args()
 
-    port = free_port()
+    port, control = free_port(), free_port()
     target = subprocess.Popen(
-        [args.qemu, "-machine", args.machine, "-kernel", args.image, "-nographic",
+        [args.qemu, "-machine", args.machine, "-kernel", args.image, "-nographic", "-S",
          "-semihosting-config", "enable=on,target=native", "-monitor", "none", "-serial", "none",
-         "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off"]
+         "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off",
+         "-qmp", f"tcp:127.0.0.1:{control},server=on,wait=off"]
         + (["-icount", f"shift={args.icount_shift},sleep=off"] if args.icount_shift is not None else []),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with tempfile.TemporaryDirectory() as directory:
         capture = os.path.join(directory, "record.kcap")
         try:
             wait_for(port)
-            record = subprocess.run(
+            record = subprocess.Popen(
                 [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{port}",
                  "--elf", args.image, "--duration", LAP_RECORD_SECONDS if args.lap else RECORD_SECONDS,
                  "--out", capture, "--clock", CLOCK_HZ],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            first = record.stdout.readline()  # printed once the host has read the ring
+            if first.startswith("record "):
+                resume(control)
+            rest, stderr = record.communicate(timeout=TIMEOUT_SECONDS)
+            output = first + rest
         finally:
             target.kill()
             target.wait()
-        print(record.stderr.strip())
+        print(stderr.strip())
         if record.returncode != 0:
-            print(record.stdout[-2000:])
+            print(output[-2000:])
             print("kymo record failed")
             return 1
-        errors = check(record.stdout, args.lap)
+        errors = check(output, args.lap)
         replay = subprocess.run([args.host, "decode", args.image, capture],
                                 capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
         if replay.returncode != 0:
             errors.append(f"kymo decode of the capture failed: {replay.stderr.strip()}")
-        elif replay.stdout != record.stdout:
+        elif replay.stdout != output:
             errors.append("kymo decode of the capture differs from what kymo record printed")
     for error in errors[:20]:
         print(error)
