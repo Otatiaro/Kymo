@@ -4,7 +4,8 @@
  *          (record.py --lap).
  *
  * Thread mode writes the events of record.cpp, one at a time, with a pause
- * after each. Every HOLD_EVERY events, SysTick lands on the write's first
+ * after each. From the first event, at index 0, then every HOLD_EVERY events,
+ * SysTick lands on the write's first
  * instruction (preempt.hpp), then on each following one until the writer has
  * reserved its slots. Reserved and its first slot not yet published, the
  * writer is held: the interrupt emits `held` events, one slot each, for more
@@ -170,7 +171,7 @@ void test_main()
 	{
 		writer_index = trace_ring.write_index.load(std::memory_order_relaxed);
 		writer_type = type_of(n);
-		if (n % hold_every != hold_every - 1)
+		if (n % hold_every != 0)
 		{
 			write_event(n);
 		}

@@ -161,6 +161,36 @@ foreach(test layout decode record symbols)
 	endforeach()
 endforeach()
 
+# - channels: two rings in one image, each event in the ring of its family,
+#   each ring read by its name; without a name, the host lists both.
+foreach(cpu cortex-m33 cortex-m4)
+	set(name channels-${cpu}-Os)
+	kymo_qemu_image(${name} ${cpu} Os SOURCES channels/channels.cpp)
+	if(KYMO_HOST)
+		kymo_qemu_command(${name}
+			${CMAKE_CURRENT_SOURCE_DIR}/channels/channels.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+			--image $<TARGET_FILE:${name}> --host ${KYMO_HOST})
+	else()
+		add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
+		set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+	endif()
+endforeach()
+
+# A family with no route does not compile once one of its events is emitted;
+# with its route, the same source compiles.
+foreach(variant routed unrouted)
+	set(definitions "")
+	if(variant STREQUAL routed)
+		set(definitions -DKYMO_TEST_ROUTED)
+	endif()
+	add_test(NAME channels-${variant}
+		COMMAND ${CMAKE_CXX_COMPILER} -std=c++17 -mcpu=cortex-m4 -mthumb -fsyntax-only
+			-Wall -Wextra -Werror ${definitions}
+			-I ${CMAKE_CURRENT_SOURCE_DIR}/../include ${CMAKE_CURRENT_SOURCE_DIR}/channels/unrouted.cpp)
+endforeach()
+set_tests_properties(channels-unrouted PROPERTIES
+	PASS_REGULAR_EXPRESSION "error: [^\n]*on<kymo::family::scheduling>")
+
 # - record-lap: writers held for more than a lap while the host records,
 #   which follows (it reads each held writer before the lap) or falls behind
 #   (the lap comes between two of its reads).
