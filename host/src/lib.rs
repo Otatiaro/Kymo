@@ -7,6 +7,7 @@ pub mod capture;
 pub mod decode;
 pub mod elf;
 pub mod events;
+pub mod model;
 pub mod record;
 mod ring;
 mod swo;

@@ -3,7 +3,9 @@
 //! included, in a few milliseconds.
 
 use super::{Item, Recorder};
+use crate::capture::{Header, Record, Writer};
 use crate::events::{Catalogue, Event, Ring};
+use crate::model::{Element, Trace};
 use crate::target::{Result, Target};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -395,6 +397,107 @@ fn credits_a_writer_read_unpublished_then_published_once_lapped() {
             .any(|item| matches!(item, Item::Event(event, _) if event.index == writer)),
         "the writer was lapped, its slot may hold a newer event"
     );
+}
+
+/// A capture of a simulated recording with losses and suspect lines, read
+/// back by the model: the events, losses and suspect lines in the places the
+/// recording yielded them, the events dated in index order from their
+/// timestamps, at the capture's frequency.
+#[test]
+fn a_capture_reads_back_as_the_recording_yielded_it() {
+    let catalogue = catalogue();
+    let path = std::env::temp_dir().join(format!("kymo-model-{}.kcap", std::process::id()));
+    let clock = 1_000_000;
+    let (mut losses, mut suspects) = (0, 0);
+    for seed in 1..=50u64 {
+        let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        target.preempt = true;
+        target.run(1000);
+        let mut recorder = Recorder::start(&mut target, &catalogue, BASE).unwrap();
+        let header = Header {
+            first: recorder.next(),
+            clock: Some(clock),
+        };
+        let mut writer = Writer::create(&path, &header).unwrap();
+        let (mut items, mut yielded) = (Vec::new(), Vec::new());
+        for pass in 0..2000u64 {
+            let write_index = if pass < 1999 {
+                recorder.pass(&mut target, &mut items).unwrap()
+            } else {
+                target.stop();
+                recorder.finish(&mut target, &mut items).unwrap()
+            };
+            writer
+                .write(&Record::Pass {
+                    host_ns: 1_000 * pass,
+                    write_index,
+                })
+                .unwrap();
+            for item in items.drain(..) {
+                let record = match &item {
+                    Item::Event(event, slots) => Record::Event {
+                        index: event.index,
+                        slots,
+                    },
+                    Item::Lost { from, to } => Record::Lost { from: *from, to: *to },
+                    Item::Suspect { from, to, writers } => Record::Suspect {
+                        from: *from,
+                        to: *to,
+                        writers: *writers,
+                    },
+                };
+                writer.write(&record).unwrap();
+                yielded.push(item);
+            }
+        }
+        writer.write(&Record::End { next: recorder.next() }).unwrap();
+        writer.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let trace = Trace::read(&catalogue, &bytes, None).unwrap();
+        assert_eq!(trace.first, header.first, "seed {seed}");
+        assert_eq!(trace.end, Some(recorder.next()), "seed {seed}");
+        assert_eq!(trace.frequency, Some(clock as f64), "seed {seed}");
+        assert_eq!(trace.elements.len(), yielded.len(), "seed {seed}");
+        let mut previous: Option<(u32, i64)> = None;
+        let mut origin = None;
+        for (element, item) in trace.elements.iter().zip(&yielded) {
+            match (element, item) {
+                (Element::Event { event, cycles, seconds }, Item::Event(recorded, _)) => {
+                    assert_eq!(
+                        (event.index, event.event.id, event.timestamp, &event.payload),
+                        (recorded.index, recorded.event.id, recorded.timestamp, &recorded.payload),
+                        "seed {seed}"
+                    );
+                    if let Some((timestamp, before)) = previous {
+                        let delta = i64::from(event.timestamp.wrapping_sub(timestamp) as i32);
+                        assert_eq!(*cycles, before + delta, "seed {seed}: event {}", event.index);
+                    }
+                    previous = Some((event.timestamp, *cycles));
+                    let origin = *origin.get_or_insert(*cycles);
+                    assert_eq!(*seconds, Some((cycles - origin) as f64 / clock as f64), "seed {seed}");
+                }
+                (Element::Lost { from, to }, Item::Lost { from: f, to: t }) => {
+                    assert_eq!((from, to), (f, t), "seed {seed}");
+                    losses += 1;
+                }
+                (
+                    Element::Suspect { from, to, writers },
+                    Item::Suspect {
+                        from: f,
+                        to: t,
+                        writers: w,
+                    },
+                ) => {
+                    assert_eq!((from, to, writers), (f, t, w), "seed {seed}");
+                    suspects += 1;
+                }
+                _ => panic!("seed {seed}: an element out of place"),
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    assert!(losses > 0 && suspects > 0, "{losses} losses, {suspects} suspect lines");
 }
 
 /// The slots of an event of type `type_id`.
