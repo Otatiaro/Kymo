@@ -1,6 +1,7 @@
 //! Kymo timeline: shows a capture made by `kymo record --out`, read with the
 //! ELF of the image that made it.
 
+mod levels;
 mod timeline;
 
 use eframe::egui;
@@ -9,6 +10,7 @@ use kymo::model::Trace;
 use kymo::target::Result;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 const USAGE: &str = "\
 usage: kymo-ui <elf> <capture> [--clock <Hz>] [--measure]
@@ -19,7 +21,8 @@ the pointer; drag or horizontal wheel: scroll; double click: the whole
 capture. Hovering an event shows its line as kymo decode prints it.
 
   --clock <Hz>  the cycle counter's frequency, as for kymo decode
-  --measure     shows the whole capture then the narrowest view, 300 frames
+  --measure     prints the time to read the capture and build the timeline,
+                shows the whole capture then the narrowest view, 300 frames
                 each without vsync, prints the frame times and quits
 ";
 
@@ -52,7 +55,17 @@ fn run() -> Result<()> {
     // The trace borrows the catalogue, which lives as long as the window.
     let catalogue: &'static events::Catalogue = Box::leak(Box::new(events::read(elf)?));
     let bytes = std::fs::read(capture).map_err(|error| format!("{}: {error}", capture.display()))?;
+    let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;
+    let read = began.elapsed();
+    let timeline = timeline::Timeline::new(catalogue, trace, measure);
+    if measure {
+        println!(
+            "capture read in {:.0} ms, timeline built in {:.0} ms",
+            read.as_secs_f64() * 1e3,
+            (began.elapsed() - read).as_secs_f64() * 1e3
+        );
+    }
     let title = format!("Kymo: {}", capture.display());
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -63,10 +76,6 @@ fn run() -> Result<()> {
     if measure {
         options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
     }
-    eframe::run_native(
-        "kymo-ui",
-        options,
-        Box::new(move |_| Ok(Box::new(timeline::Timeline::new(catalogue, trace, measure)))),
-    )?;
+    eframe::run_native("kymo-ui", options, Box::new(move |_| Ok(Box::new(timeline))))?;
     Ok(())
 }

@@ -4,6 +4,7 @@
 //! are bands across the rows, between the events recorded before and after
 //! them.
 
+use crate::levels::Levels;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
 use kymo::decode;
 use kymo::events::Catalogue;
@@ -39,7 +40,10 @@ pub struct Timeline {
     /// The view: its left edge and its width, in cycles from `origin`.
     start: f64,
     span: f64,
+    /// The status line's counts, taken once: each is a pass over the trace.
+    events: usize,
     losses: usize,
+    suspects: u64,
     /// Milliseconds the last frame took to lay the timeline out.
     painted: f64,
     measure: Option<Measure>,
@@ -48,7 +52,7 @@ pub struct Timeline {
 /// The events of one type, by cycles, and their elements in the trace.
 struct Row {
     name: String,
-    cycles: Vec<i64>,
+    levels: Levels,
     elements: Vec<usize>,
 }
 
@@ -108,7 +112,7 @@ impl Timeline {
                 events.sort_by_key(|event| event.0);
                 Row {
                     name: event.name.clone(),
-                    cycles: events.iter().map(|event| event.0).collect(),
+                    levels: Levels::new(events.iter().map(|event| event.0).collect()),
                     elements: events.iter().map(|event| event.1).collect(),
                 }
             })
@@ -123,6 +127,7 @@ impl Timeline {
             .iter()
             .filter(|element| matches!(element, Element::Lost { .. }))
             .count();
+        let (events, suspects) = (trace.events(), trace.suspects());
         let mut timeline = Self {
             catalogue,
             trace,
@@ -133,7 +138,9 @@ impl Timeline {
             last,
             start: 0.0,
             span: 0.0,
+            events,
             losses,
+            suspects,
             painted: 0.0,
             measure: measure.then(Measure::default),
         };
@@ -208,6 +215,9 @@ impl Timeline {
         ));
         let font = FontId::proportional(12.0);
 
+        // The events of all rows in one mesh: their rectangles sit on whole
+        // pixels and need none of the anti-aliasing a shape each would get.
+        let mut events = egui::Mesh::default();
         for (n, row) in self.rows.iter().enumerate() {
             let top = area.top() + n as f32 * ROW;
             if top > area.bottom() {
@@ -227,14 +237,14 @@ impl Timeline {
                 font.clone(),
                 text,
             );
-            for (from, to) in view.columns(&row.cycles) {
-                painter.rect_filled(
+            for (from, to) in row.levels.columns(&view) {
+                events.add_colored_rect(
                     Rect::from_min_max(egui::pos2(from, top + 3.0), egui::pos2(to, top + ROW - 3.0)),
-                    0.0,
                     EVENT,
                 );
             }
         }
+        painter.add(egui::Shape::mesh(events));
         let bottom = (area.top() + self.rows.len() as f32 * ROW).min(area.bottom());
         for (kind, color) in [(false, LOSS), (true, SUSPECT)] {
             let marks = self
@@ -329,10 +339,11 @@ impl Timeline {
         let high = view.cycles(pointer.x + HOVER);
         let mut text = String::new();
         if let Some(row) = self.rows.get(((pointer.y - area.top()) / ROW) as usize) {
-            let from = row.cycles.partition_point(|&cycles| cycles < low);
-            let to = row.cycles.partition_point(|&cycles| cycles <= high);
+            let cycles = row.levels.cycles();
+            let from = cycles.partition_point(|&cycles| cycles < low);
+            let to = cycles.partition_point(|&cycles| cycles <= high);
             let at = view.cycles(pointer.x);
-            if let Some(nearest) = (from..to).min_by_key(|&n| (row.cycles[n] - at).abs())
+            if let Some(nearest) = (from..to).min_by_key(|&n| (cycles[n] - at).abs())
                 && let Element::Event { event, cycles, seconds } = &self.trace.elements[row.elements[nearest]]
             {
                 text = decode::line(&self.catalogue.symbols, event, *cycles, *seconds);
@@ -369,9 +380,7 @@ impl Timeline {
     fn status(&self) -> String {
         let mut status = format!(
             "{} events, {} losses, {} suspect writers",
-            self.trace.events(),
-            self.losses,
-            self.trace.suspects()
+            self.events, self.losses, self.suspects
         );
         match (self.frequency(), self.trace.measured) {
             (Some(hz), Some((measured, _))) if hz == measured => {
@@ -402,9 +411,9 @@ impl Timeline {
 }
 
 impl eframe::App for Timeline {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if self.measure.is_some() {
-            self.measure_frame(ui.ctx());
+            self.measure_frame(ui.ctx(), frame.info().cpu_usage.unwrap_or_default());
         }
         egui::Panel::bottom("status").show(ui, |ui| ui.label(self.status()));
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
@@ -412,42 +421,26 @@ impl eframe::App for Timeline {
 }
 
 /// The view's mapping between cycles and pixels.
-struct View {
-    origin: i64,
-    start: f64,
-    span: f64,
-    left: f32,
-    width: f64,
+pub struct View {
+    /// The cycles the view counts from.
+    pub origin: i64,
+    /// The left edge and the width, in cycles from `origin`.
+    pub start: f64,
+    pub span: f64,
+    /// The left edge and the width, in pixels.
+    pub left: f32,
+    pub width: f64,
 }
 
 impl View {
     /// The pixel of `cycles` from the origin.
-    fn x(&self, cycles: f64) -> f32 {
+    pub fn x(&self, cycles: f64) -> f32 {
         self.left + ((cycles - self.start) / self.span * self.width) as f32
     }
 
     /// The cycles, absolute, at pixel `x`.
-    fn cycles(&self, x: f32) -> i64 {
+    pub fn cycles(&self, x: f32) -> i64 {
         self.origin + (self.start + f64::from(x - self.left) / self.width * self.span).round() as i64
-    }
-
-    /// The pixel columns holding at least one of `cycles`, sorted, merged
-    /// into runs: one search per run, not one step per event.
-    fn columns(&self, cycles: &[i64]) -> Vec<(f32, f32)> {
-        let end = self.origin + (self.start + self.span).ceil() as i64;
-        let mut runs: Vec<(f32, f32)> = Vec::new();
-        let mut n = cycles.partition_point(|&at| at < self.cycles(self.left));
-        while n < cycles.len() && cycles[n] <= end {
-            let x = self.x((cycles[n] - self.origin) as f64).floor();
-            match runs.last_mut() {
-                Some(run) if x <= run.1 => run.1 = run.1.max(x + 1.0),
-                _ => runs.push((x, x + 1.0)),
-            }
-            // The first event past this column.
-            let next = self.cycles(x + 1.0);
-            n = past(cycles, n + 1, next);
-        }
-        runs
     }
 
     /// The marks in view, at least a pixel wide, merged where they touch.
@@ -469,90 +462,23 @@ impl View {
     }
 }
 
-/// The first of `cycles`, from `from` on, not before `at`: a search that
-/// widens from `from`, so a near answer stays in the cache lines around it.
-fn past(cycles: &[i64], from: usize, at: i64) -> usize {
-    let mut step = 1;
-    let mut low = from;
-    while low + step <= cycles.len() && cycles[low + step - 1] < at {
-        low += step;
-        step *= 2;
-    }
-    let high = (low + step).min(cycles.len());
-    low + cycles[low..high].partition_point(|&cycles| cycles < at)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A small xorshift, so the cases repeat.
-    fn random(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
-    }
-
-    /// The runs `columns` draws are the pixel columns of every event in
-    /// view, each event placed on its own, whatever the zoom.
-    #[test]
-    fn runs_cover_the_columns_of_the_events_in_view() {
-        let mut state = 0x9e37_79b9_7f4a_7c15;
-        for _ in 0..2000 {
-            let mut at = 1000 + (random(&mut state) % 1000) as i64;
-            let cycles: Vec<i64> = (0..random(&mut state) % 400)
-                .map(|_| {
-                    // Bursts and gaps, so columns hold many events or none.
-                    at += if random(&mut state).is_multiple_of(8) {
-                        (random(&mut state) % 100_000) as i64
-                    } else {
-                        (random(&mut state) % 50) as i64
-                    };
-                    at
-                })
-                .collect();
-            let view = View {
-                origin: 1000,
-                start: (random(&mut state) % 200_000) as f64 - 1000.0,
-                span: 100.0 + (random(&mut state) % 1_000_000) as f64,
-                left: 260.0,
-                width: 100.0 + (random(&mut state) % 1500) as f64,
-            };
-            let right = view.left + view.width as f32;
-            let mut expected: Vec<f32> = cycles
-                .iter()
-                .map(|&at| view.x((at - view.origin) as f64).floor())
-                .filter(|&x| x >= view.left && x < right)
-                .collect();
-            expected.dedup();
-            let drawn: Vec<f32> = view
-                .columns(&cycles)
-                .into_iter()
-                .flat_map(|(from, to)| (from as i64..to as i64).map(|x| x as f32))
-                .filter(|&x| x >= view.left && x < right)
-                .collect();
-            assert_eq!(drawn, expected, "{cycles:?}");
-        }
-    }
-}
-
 /// `--measure`: frames drawn without vsync, the whole capture then the
 /// narrowest view at its middle, after a warm-up each.
 #[derive(Default)]
 struct Measure {
     frame: u32,
     last: Option<Instant>,
-    /// Per view: each frame's interval and the time to lay the timeline
-    /// out, in milliseconds.
-    samples: [Vec<(f64, f64)>; 2],
+    /// Per view: each frame's interval, its time on the CPU as eframe
+    /// counts it (all but the wait to present), and the time to lay the
+    /// timeline out, in milliseconds.
+    samples: [Vec<[f64; 3]>; 2],
 }
 
 const WARM_UP: u32 = 30;
 const FRAMES: u32 = 300;
 
 impl Timeline {
-    fn measure_frame(&mut self, ctx: &egui::Context) {
+    fn measure_frame(&mut self, ctx: &egui::Context, cpu: f32) {
         let painted = self.painted;
         let Some(measure) = self.measure.as_mut() else {
             return;
@@ -562,7 +488,11 @@ impl Timeline {
         if let Some(last) = measure.last {
             let frame = measure.frame - 1;
             if frame % phase >= WARM_UP {
-                measure.samples[(frame / phase) as usize].push(((now - last).as_secs_f64() * 1e3, painted));
+                measure.samples[(frame / phase) as usize].push([
+                    (now - last).as_secs_f64() * 1e3,
+                    f64::from(cpu) * 1e3,
+                    painted,
+                ]);
             }
         }
         measure.last = Some(now);
@@ -577,19 +507,18 @@ impl Timeline {
             self.start = middle - NARROWEST / 2.0;
         } else if frame == 2 * phase {
             for (name, samples) in ["whole capture", "narrowest view"].iter().zip(&measure.samples) {
-                let mut frames: Vec<f64> = samples.iter().map(|sample| sample.0).collect();
-                let mut laid: Vec<f64> = samples.iter().map(|sample| sample.1).collect();
-                frames.sort_by(f64::total_cmp);
-                laid.sort_by(f64::total_cmp);
-                let at = |sorted: &[f64], q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+                let column = |n: usize| {
+                    let mut sorted: Vec<f64> = samples.iter().map(|sample| sample[n]).collect();
+                    sorted.sort_by(f64::total_cmp);
+                    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+                    format!("median {:.2} p99 {:.2} max {:.2}", at(0.5), at(0.99), at(1.0))
+                };
                 println!(
-                    "{name}: frame median {:.2} ms, p99 {:.2} ms, max {:.2} ms; timeline laid out median {:.2} ms, max {:.2} ms ({} frames)",
-                    at(&frames, 0.5),
-                    at(&frames, 0.99),
-                    at(&frames, 1.0),
-                    at(&laid, 0.5),
-                    at(&laid, 1.0),
-                    frames.len()
+                    "{name} ({} frames, ms): frame {}; cpu {}; timeline {}",
+                    samples.len(),
+                    column(0),
+                    column(1),
+                    column(2)
                 );
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
