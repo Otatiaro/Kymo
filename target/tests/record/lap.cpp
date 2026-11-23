@@ -4,13 +4,14 @@
  *          (record.py --lap).
  *
  * Thread mode writes the events of record.cpp, one at a time, with a pause
- * after each. Every HOLD_EVERY events, SysTick lands on an instruction of the
- * write (preempt.hpp; the delay steps on each time, so the landing point
- * moves along the write). When the writer has reserved its slots and not yet
- * published its first one, the interrupt holds it: it emits `held` events,
- * one slot each, for more than a lap, so the writer resumes into slots newer
- * events took. Anywhere else, the interrupt returns at once, and the event
- * keeps the index it was given.
+ * after each. Every HOLD_EVERY events, SysTick lands on the write's first
+ * instruction (preempt.hpp), then on each following one until the writer has
+ * reserved its slots. Reserved and its first slot not yet published, the
+ * writer is held: the interrupt emits `held` events, one slot each, for more
+ * than a lap, so the writer resumes into slots newer events took. Already
+ * published, the interrupt returns at once, and the event keeps the index it
+ * was given. Every hold attempt lands in the window, however fast the host
+ * reads.
  *
  * Its stale bytes stay in a newer event only until it writes its first
  * slot's header, with its own, older lap: a host reads them in that window
@@ -70,6 +71,10 @@ slot_copy before[max_slots];  // the writer's slots when it resumes
 /// The shortest delay that outlasts the return from the interrupt: grown
 /// each time a step lands on the instruction it stepped from.
 std::uint32_t step = 1;
+/// Added to the step on the way to the reservation, grown each time a step
+/// lands back in a loop: an interrupt between LDREX and STREX fails the
+/// reservation, which a step too short would interrupt again forever.
+std::uint32_t stride;
 std::uint32_t stepped_from;
 
 void wait(std::uint32_t rounds)
@@ -100,6 +105,18 @@ bool overwritten()
 	return false;
 }
 
+/// Lands the next interrupt on an instruction past the one just interrupted.
+void step_on()
+{
+	std::uint32_t const pc = preempt::interrupted();
+	if (pc == stepped_from)
+		++step;
+	else if (pc < stepped_from && !resumed)
+		++stride;
+	stepped_from = pc;
+	preempt::arm(step + stride);
+}
+
 void test_interrupt()
 {
 	if (resumed)
@@ -110,15 +127,16 @@ void test_interrupt()
 			wait(hold_pause);
 			return;
 		}
-		if (preempt::interrupted() == stepped_from)
-			++step;
-		stepped_from = preempt::interrupted();
-		preempt::arm(step);
+		step_on();
+		return;
+	}
+	if (kymo::trace_ring.write_index.load(std::memory_order_relaxed) == writer_index)
+	{
+		step_on();   // not reserved yet: on to the reservation
 		return;
 	}
 	std::uint32_t const head = kymo::trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
-	if (kymo::trace_ring.write_index.load(std::memory_order_relaxed) == writer_index
-	    || head == ring_type::header(writer_type, writer_index, true))
+	if (head == ring_type::header(writer_type, writer_index, true))
 		return;
 	for (std::uint32_t i = 0; i < held_events; ++i)
 	{
@@ -135,6 +153,7 @@ void test_interrupt()
 			before[k].words[w] = now.words[w];
 	}
 	resumed = true;
+	stride = 0;
 	stepped_from = preempt::interrupted();
 	preempt::arm(step);
 }
@@ -142,17 +161,18 @@ void test_interrupt()
 void test_main()
 {
 	preempt::calibrate();
-	std::uint32_t delay = 1;
 	for (std::uint32_t n = 0;; ++n)
 	{
 		writer_index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
 		writer_type = type_of(n);
-		if (n % hold_every != 0)
+		if (n % hold_every != hold_every - 1)
 			write_event(n);
-		else if (preempt::call(delay, write_event, n))
-			++delay;
 		else
-			delay = 1;
+		{
+			stride = 0;
+			stepped_from = 0;
+			preempt::call(1, write_event, n);
+		}
 		wait(pause);
 	}
 }
