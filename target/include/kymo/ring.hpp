@@ -164,11 +164,11 @@ private:
 	{
 		constexpr std::size_t offset = head_payload + ((I - 1) * tail_payload);
 		constexpr std::size_t left = sizeof(Event) - offset;
-		std::uint32_t const at = index + I;
-		slot& next = slots[at & (Slots - 1)];
+		std::uint32_t const tail_index = index + I;
+		slot& next = slots[tail_index & (Slots - 1)];
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): the event's bytes, past those already copied
 		std::memcpy(next.words.data(), bytes + offset, std::min(left, tail_payload));
-		next.header.store(header(type, at, false), std::memory_order_release);
+		next.header.store(header(type, tail_index, false), std::memory_order_release);
 	}
 };
 

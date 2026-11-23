@@ -18,9 +18,9 @@ crash, and turns the recording into a timeline and metrics on the host.
   plain `struct` on the target; the host reads its layout from DWARF, resolves
   objects and source lines from symbols, and checks the build-id. The target
   sends no strings.
-- **Lock-free on the target.** A single overwrite ring of fixed-size slots,
-  reserved with `LDREX`/`STREX`; interrupts are never masked; losses are
-  counted exactly.
+- **Lock-free on the target.** Overwrite rings of fixed-size slots, one per
+  channel the application routes event families to, reserved with
+  `LDREX`/`STREX`; interrupts are never masked; losses are counted exactly.
 - **A crash is an event.** What happens next (freeze, reboot, wait for the host)
   is the application's choice.
 - **Measured.** Every design choice on the target is judged by its measured

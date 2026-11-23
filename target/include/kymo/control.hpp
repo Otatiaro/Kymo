@@ -80,7 +80,7 @@ constexpr std::uint32_t bit(family which)
 }
 
 /** @brief The control word from reset: the bits of the families recorded_at_reset() names. */
-constexpr std::uint32_t control_at_reset()
+constexpr std::uint32_t control_at_reset() noexcept
 {
 	std::uint32_t word = 0;
 	for (unsigned value = 0; value < families; ++value)

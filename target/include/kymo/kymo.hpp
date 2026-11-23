@@ -79,6 +79,10 @@ struct tracer
 			return;
 		Trace::channel(on<family_of<Event>>{}).write(type_id_word<Event>(), timestamp(), event);
 	}
+
+private:
+	tracer() = default;
+	friend Trace;
 };
 
 } // namespace kymo
