@@ -20,7 +20,7 @@ import sys
 import tempfile
 
 TIMEOUT_SECONDS = 60
-SLOTS = 16  # KYMO_RING_SLOTS of the test images
+SLOTS = 16  # ring_slots of the test images (test_trace.hpp)
 
 
 class Copy:
@@ -58,7 +58,7 @@ def main() -> int:
             _, index, count, expected = line.split(" ", 3)
             index, count = int(index), int(count)
             for slot in range(count):
-                owner[index % SLOTS + slot] = index
+                owner[(index + slot) % SLOTS] = index
             lines[index] = expected
             counts[index] = count
             write_index = index + count
@@ -82,7 +82,7 @@ def main() -> int:
     for name, copy in copies.items():
         window = [index for index in sorted(lines) if index < copy.write_index and copy.write_index - index <= SLOTS]
         held[name] = [index for index in window
-                      if all(copy.owner_when_copied.get(index % SLOTS + slot) == index
+                      if all(copy.owner_when_copied.get((index + slot) % SLOTS) == index
                              for slot in range(counts[index]))]
         if name == "stopped" and held[name] != window:
             print(f"events within a ring of the write index, yet overwritten: {sorted(set(window) - set(held[name]))}")
@@ -93,7 +93,7 @@ def main() -> int:
     window = [index for index in lines if index < live.write_index and live.write_index - index <= SLOTS]
     kept = held["stopped"] + held["live"]
     coverage = {
-        "an event in the guard zone": any(index % SLOTS + counts[index] > SLOTS for index in kept),
+        "an event across the end of the ring": any(index % SLOTS + counts[index] > SLOTS for index in kept),
         "an overwritten event": len(held["stopped"]) < len(lines),
         "an enumeration value by name": any(" grade=low" in lines[index] or " grade=high" in lines[index]
                                             or " grade=mid" in lines[index] for index in kept),

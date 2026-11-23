@@ -14,7 +14,7 @@
 #include "../qemu/qemu.hpp"
 
 #ifndef KYMO_COST_BASELINE
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 #endif
 
 #include <array>
@@ -75,7 +75,7 @@ template<typename Event>
 #ifdef KYMO_COST_BASELINE
 	asm volatile("" : : "r"(&event) : "memory");
 #else
-	kymo::emit(event);
+	trace::emit(event);
 #endif
 }
 

@@ -23,7 +23,7 @@
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <atomic>
@@ -49,10 +49,10 @@ struct large_event
 static_assert(kymo::slots_for<lap_event> == 1);
 static_assert(kymo::slots_for<large_event> == 3);
 
-constexpr std::uint32_t slots = KYMO_RING_SLOTS;
+constexpr std::uint32_t slots = ring_slots;
 constexpr std::uint32_t max_delay = 100000;
 
-using ring_type = decltype(kymo::trace_ring);
+using ring_type = decltype(trace_ring);
 
 /// Where the writer stood when the interrupt landed.
 enum class landed : std::uint8_t
@@ -66,7 +66,7 @@ enum class landed : std::uint8_t
 std::uint32_t writer_index;   // the index the writer reserves
 landed volatile where;
 std::uint32_t lap_seq;
-using slot_bytes = std::array<unsigned char, sizeof(kymo::trace_ring.slots)>;
+using slot_bytes = std::array<unsigned char, sizeof(trace_ring.slots)>;
 slot_bytes copy;
 
 [[noreturn]] void fail(char const* what, std::uint32_t delay)
@@ -83,7 +83,7 @@ slot_bytes copy;
 bool same_as_copy()
 {
 	slot_bytes live{};
-	std::memcpy(live.data(), static_cast<void const*>(kymo::trace_ring.slots.data()), live.size());
+	std::memcpy(live.data(), static_cast<void const*>(trace_ring.slots.data()), live.size());
 	return live == copy;
 }
 
@@ -95,13 +95,13 @@ extern "C" [[gnu::noinline]] void write_large(std::uint32_t seq)
 	event.seq = seq;
 	for (std::uint32_t w = 0; w < event.words.size(); ++w)
 		event.words[w] = seq + w;
-	kymo::emit(event);
+	trace::emit(event);
 }
 
 void test_interrupt()
 {
-	std::uint32_t const index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
-	std::uint32_t const head = kymo::trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
+	std::uint32_t const index = trace_ring.write_index.load(std::memory_order_relaxed);
+	std::uint32_t const head = trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
 	if (index == writer_index)
 		where = landed::before;
 	else if (head == ring_type::header(kymo::type_id<large_event>(), writer_index, true))
@@ -110,16 +110,16 @@ void test_interrupt()
 		where = landed::unpublished;
 	for (std::uint32_t i = 0; i < slots; ++i)
 	{
-		kymo::emit(lap_event{lap_seq, ~lap_seq});
+		trace::emit(lap_event{lap_seq, ~lap_seq});
 		++lap_seq;
 	}
-	std::memcpy(copy.data(), static_cast<void const*>(kymo::trace_ring.slots.data()), copy.size());
+	std::memcpy(copy.data(), static_cast<void const*>(trace_ring.slots.data()), copy.size());
 }
 
 void test_main()
 {
 	preempt::calibrate();
-	kymo::trace_ring.write_index.store(0U - (3 * slots), std::memory_order_relaxed);
+	trace_ring.write_index.store(0U - (3 * slots), std::memory_order_relaxed);
 
 	std::array<std::uint32_t, 4> seen{};
 	std::uint32_t published_counted = 0;
@@ -127,13 +127,13 @@ void test_main()
 	{
 		if (delay > max_delay)
 			fail("the writer outlasted every delay", delay);
-		writer_index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
-		std::uint32_t const lapped = kymo::trace_ring.lapped.load(std::memory_order_relaxed);
+		writer_index = trace_ring.write_index.load(std::memory_order_relaxed);
+		std::uint32_t const lapped = trace_ring.lapped.load(std::memory_order_relaxed);
 		where = landed::none;
 		preempt::call(delay, write_large, delay);
 		if (where == landed::none)
 			break;
-		std::uint32_t const counted = kymo::trace_ring.lapped.load(std::memory_order_relaxed) - lapped;
+		std::uint32_t const counted = trace_ring.lapped.load(std::memory_order_relaxed) - lapped;
 		bool const stale = !same_as_copy();
 		switch (where)
 		{

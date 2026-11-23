@@ -11,7 +11,7 @@
  */
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <cstddef>
@@ -115,14 +115,14 @@ void test_main()
 {
 	for (;;)
 	{
-		kymo::emit(task_started{&app::first_task});
-		kymo::emit(task_started{&app::second_task});
-		kymo::emit(mutex_taken{&app::lock, &app::first_task});
-		kymo::emit(mutex_taken{&app::uart.lock, &app::second_task});
-		kymo::emit(notify{&app::ready});
-		kymo::emit(isr_enter{&app::timer_handler});
+		trace::emit(task_started{&app::first_task});
+		trace::emit(task_started{&app::second_task});
+		trace::emit(mutex_taken{&app::lock, &app::first_task});
+		trace::emit(mutex_taken{&app::uart.lock, &app::second_task});
+		trace::emit(notify{&app::ready});
+		trace::emit(isr_enter{&app::timer_handler});
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): an address in no symbol
-		kymo::emit(unnamed{reinterpret_cast<void const*>(0x40000000U), nullptr});
+		trace::emit(unnamed{reinterpret_cast<void const*>(0x40000000U), nullptr});
 		for (std::uint32_t volatile k = 0; k < pause; k = k + 1)
 		{
 		}

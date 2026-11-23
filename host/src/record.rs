@@ -9,6 +9,7 @@
 //! before its first one, and read after it, so a first slot found published
 //! vouches for the rest. An index the ring went past before it could be read
 //! is lost; a first slot not yet published is read again by the next pass.
+//! An event that reaches the end of the ring goes on at its first position.
 //!
 //! The target counts the writers the ring lapped (ADR-054). Each pass reads
 //! that count with the write index, and matches the writers counted since the
@@ -46,13 +47,14 @@ pub enum Item<'a> {
 pub struct Recorder<'a> {
     catalogue: &'a Catalogue,
     ring: &'a Ring,
-    /// The address of kymo::trace_ring.
     address: u32,
+    /// The most slots an event of the image takes.
+    max_event_slots: u32,
     /// The first index not yet settled.
     next: u32,
     /// The indexes `next..read_end` were read by the last pass.
     read_end: u32,
-    /// The ring's slots as last read, the guard zone included.
+    /// The ring's slots as last read.
     copy: Vec<u8>,
     /// The loss held back, `from..to`.
     loss: Option<(u32, u32)>,
@@ -101,7 +103,7 @@ struct Danger {
 
 impl Danger {
     /// Whether the slots `from..end` cover a slot of the `count`-slot event at
-    /// `index`, guard zone included: slot positions are compared, not indexes.
+    /// `index`: slot positions are compared, not indexes.
     fn covers(&self, from: u32, index: u32, count: u32, slots: u32) -> bool {
         let length = self.end.wrapping_sub(from);
         let mask = slots - 1;
@@ -113,16 +115,15 @@ impl<'a> Recorder<'a> {
     /// Starts at the current write index: events already in the ring are left
     /// out, but their writers not yet done are watched, as they may write on
     /// into the slots of the events recorded.
-    pub fn start(target: &mut dyn Target, catalogue: &'a Catalogue, address: u32) -> Result<Self> {
-        let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
-        let physical = ring.slots + ring.max_event_slots - 1;
+    pub fn start(target: &mut dyn Target, catalogue: &'a Catalogue, ring: &'a Ring) -> Result<Self> {
         let mut recorder = Self {
             catalogue,
             ring,
-            address,
+            address: u32::try_from(ring.address)?,
+            max_event_slots: decode::max_event_slots(catalogue),
             next: 0,
             read_end: 0,
-            copy: vec![0; (physical * SLOT_BYTES) as usize],
+            copy: vec![0; (ring.slots * SLOT_BYTES) as usize],
             loss: None,
             unpublished: Vec::new(),
             skipped: Vec::new(),
@@ -138,7 +139,7 @@ impl<'a> Recorder<'a> {
         let (lapped, write_index) = recorder.counters(target)?;
         recorder.lapped = lapped;
         recorder.pass_index = write_index;
-        recorder.read(target, 0, physical)?;
+        recorder.read(target, 0, ring.slots)?;
         let after = recorder.counters(target)?.1;
         // The last lap, its writers given up on: a ring not yet filled once has
         // nothing before index 0.
@@ -200,18 +201,10 @@ impl<'a> Recorder<'a> {
         }
         let count = write_index.wrapping_sub(self.next);
         let start = self.next & (slots - 1);
-        let guard = self.ring.max_event_slots - 1;
         if start + count <= slots {
             self.read(target, start, start + count)?;
-            if start < guard && count > 0 {
-                // Where the first indexes may lie instead: the following
-                // slots of an event that started near the end.
-                self.read(target, slots, slots + guard)?;
-            }
         } else {
-            // Up to the end of the guard zone, where the following slots of
-            // an event that starts near the end lie.
-            self.read(target, start, slots + guard)?;
+            self.read(target, start, slots)?;
             self.read(target, 0, start + count - slots)?;
         }
         self.read_end = write_index;
@@ -243,27 +236,15 @@ impl<'a> Recorder<'a> {
         Ok(())
     }
 
-    /// What the copy says of `index`. An index among the first positions,
-    /// whose slot there is of an older lap, may be the following slot of an
-    /// event that started near the end of the previous lap: that slot lies in
-    /// the guard zone, and carries the lap of that event's first slot.
+    /// The header the copy holds at `index`'s position.
+    fn word(&self, index: u32) -> u32 {
+        let at = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
+        u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// What the copy says of `index`.
     fn header(&self, index: u32) -> Header {
-        let word = |position: u32| {
-            let at = (position * SLOT_BYTES) as usize;
-            u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes"))
-        };
-        let position = index & (self.ring.slots - 1);
-        match decode::header(word(position), index, self.ring) {
-            Header::Unwritten if position < self.ring.max_event_slots - 1 => {
-                // An index of the previous lap: the guard zone follows its last position.
-                let previous_lap = index.wrapping_sub(position + 1);
-                match decode::header(word(self.ring.slots + position), previous_lap, self.ring) {
-                    Header::Tail => Header::Tail,
-                    _ => Header::Unwritten,
-                }
-            }
-            header => header,
-        }
+        decode::header(self.word(index), index, self.ring)
     }
 
     /// Settles the indexes the last pass read against `write_index`, read
@@ -285,7 +266,6 @@ impl<'a> Recorder<'a> {
                 index = to;
                 continue;
             }
-            let position = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
             match self.header(index) {
                 Header::Unwritten
                     if self
@@ -308,11 +288,11 @@ impl<'a> Recorder<'a> {
                 }
                 Header::Head => {
                     let count = self.count(index)?;
-                    let event = decode::event(self.catalogue, self.ring, index, &self.copy[position..])?;
+                    let event = decode::event_at(self.catalogue, self.ring, &self.copy, index)?;
                     let to = index.wrapping_add(count);
                     match event {
                         Some(event) if !self.endangered(index, count) => {
-                            let slots = self.copy[position..position + (count * SLOT_BYTES) as usize].to_vec();
+                            let slots = decode::gather(&self.copy, self.ring, index, count);
                             self.flush(items);
                             items.push(Item::Event(event, slots));
                         }
@@ -374,7 +354,7 @@ impl<'a> Recorder<'a> {
     /// next event read published, at most `max_event_slots`; returns its end.
     fn raise(&mut self, index: u32, write_index: u32) -> u32 {
         let mut end = index.wrapping_add(1);
-        let last = index.wrapping_add(self.ring.max_event_slots);
+        let last = index.wrapping_add(self.max_event_slots);
         while end != self.read_end && end != last && !matches!(self.header(end), Header::Head) {
             end = end.wrapping_add(1);
         }
@@ -393,19 +373,13 @@ impl<'a> Recorder<'a> {
     /// Whether the copy holds, at `index`'s position, a slot of an older lap:
     /// not yet reserved again when it was read.
     fn older(&self, index: u32) -> bool {
-        let at = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
-        let word = u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes"));
-        let behind = decode::lap(index, self.ring).wrapping_sub(word >> 17) & 0x7fff;
+        let behind = decode::lap(index, self.ring).wrapping_sub(self.word(index) >> 17) & 0x7fff;
         behind != 0 && behind < 0x4000
     }
 
     /// The slots of the event whose first slot, published in the copy, is at `index`.
     fn count(&self, index: u32) -> Result<u32> {
-        let at = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
-        self.slots_of(
-            index,
-            u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes")),
-        )
+        self.slots_of(index, self.word(index))
     }
 
     /// The slots of the event at `index` whose first slot's header is `word`.
@@ -503,14 +477,14 @@ impl<'a> Recorder<'a> {
     }
 }
 
-/// `kymo record`: prints the events as they come, until Enter is pressed on
-/// the standard input or `duration` has passed, and keeps them in the
+/// `kymo record` of `ring`: prints the events as they come, until Enter is
+/// pressed on the standard input or `duration` has passed, and keeps them in the
 /// capture file `out`. Their seconds are at `clock` hertz, or else at the
 /// frequency measured so far (time.rs).
 pub fn run(
     target: &mut dyn Target,
     catalogue: &Catalogue,
-    address: u32,
+    ring: &Ring,
     duration: Option<Duration>,
     out: Option<&Path>,
     clock: Option<u64>,
@@ -526,11 +500,12 @@ pub fn run(
         });
     }
     let started = Instant::now();
-    let mut recorder = Recorder::start(target, catalogue, address)?;
+    let mut recorder = Recorder::start(target, catalogue, ring)?;
     println!("record {}", recorder.next());
     let header = capture::Header {
         first: recorder.next(),
         clock,
+        channel: ring.name.clone(),
     };
     let mut capture = out.map(|out| Writer::create(out, &header)).transpose()?;
     let mut timeline = Timeline::new(clock);

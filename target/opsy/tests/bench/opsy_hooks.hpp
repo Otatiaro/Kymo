@@ -11,6 +11,8 @@
  */
 #pragma once
 
+#include <opsy_trace.hpp>
+
 #include <kymo/opsy/hooks.hpp>
 
 #include <cstdint>
@@ -36,9 +38,9 @@ void systick_entered();
 namespace opsy
 {
 
-class hooks : public kymo::opsy::hooks
+class hooks : public kymo::opsy::hooks<::trace>
 {
-	using traced = kymo::opsy::hooks;
+	using traced = kymo::opsy::hooks<::trace>;
 
 public:
 	static void condition_variable_notify_one(condition_variable& condition)

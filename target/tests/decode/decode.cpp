@@ -4,13 +4,13 @@
  *          decodes from a copy must be what was written (decode.py).
  *
  * The image emits events of one to four slots, enough to run around the
- * ring several times and through its guard zone, and reports each through
+ * ring several times and across its end, and reports each through
  * semihosting:
  *   emitted <index> <slots> event <index> <cycles> - <type> <field>=<value>...
  * The index comes from the ring; the values are written here, as the host is
  * expected to print them. The timestamps only grow, by less than a turn, so
  * their cycles are the timestamps themselves; with no frequency, no seconds. Then it reports two copies of the ring:
- *   ring <hexadecimal bytes of kymo::trace_ring>
+ *   ring <hexadecimal bytes of trace_ring>
  * taken with nothing writing, as from a stopped target; and
  *   copy
  *   copied <slot>      (after each slot, and the events emitted meanwhile)
@@ -20,7 +20,7 @@
  */
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <atomic>
@@ -122,12 +122,12 @@ void write_grade(level grade)
 template<typename Event, typename Fields>
 void emitted(char const* type, Event const& event, Fields fields)
 {
-	std::uint32_t const index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
-	kymo::emit(event);
+	std::uint32_t const index = trace_ring.write_index.load(std::memory_order_relaxed);
+	trace::emit(event);
 	// QEMU has no cycle counter: every timestamp reads 0. Each event gets
 	// its own, for the host to show it read the right word.
 	std::uint32_t const timestamp = 0x10000000U + (index * 7);
-	kymo::trace_ring.slots[index % KYMO_RING_SLOTS].words[0] = timestamp;
+	trace_ring.slots[index % ring_slots].words[0] = timestamp;
 	qemu::write("emitted ");
 	qemu::write_unsigned(index);
 	qemu::write(" ");
@@ -215,14 +215,14 @@ void emit_number(std::uint32_t n)
 	}
 }
 
-using ring_type = decltype(kymo::trace_ring);
+using ring_type = decltype(trace_ring);
 using ring_bytes = std::array<unsigned char, sizeof(ring_type)>;
 
 /// Copies bytes @p offset to @p offset + @p size of the ring, as the host reads them.
 void copy(ring_bytes& out, std::size_t offset, std::size_t size)
 {
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the ring's bytes
-	auto const* const ring = reinterpret_cast<unsigned char const volatile*>(&kymo::trace_ring);
+	auto const* const ring = reinterpret_cast<unsigned char const volatile*>(&trace_ring);
 	for (std::size_t n = offset; n < offset + size; ++n)
 		out[n] = ring[n];   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): within the ring
 }
@@ -251,7 +251,7 @@ void test_main()
 {
 	static_assert(kymo::slots_for<tiny> == 1 && kymo::slots_for<pair> == 1 && kymo::slots_for<reading> == 2
 	              && kymo::slots_for<span> == 3 && kymo::slots_for<block> == 4);
-	constexpr std::size_t slots = kymo::trace_ring.slots.size();
+	constexpr std::size_t slots = trace_ring.slots.size();
 
 	std::uint32_t n = 0;
 	for (; n < before_copies; ++n)
@@ -261,7 +261,7 @@ void test_main()
 	report("ring", stopped);
 
 	qemu::write("copy\n");
-	copy(live, offsetof(ring_type, write_index), sizeof(kymo::trace_ring.write_index));
+	copy(live, offsetof(ring_type, write_index), sizeof(trace_ring.write_index));
 	for (std::size_t slot = 0; slot < slots; ++slot)
 	{
 		copy(live, offsetof(ring_type, slots) + (slot * sizeof(kymo::slot)), sizeof(kymo::slot));

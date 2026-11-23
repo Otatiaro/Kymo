@@ -33,10 +33,10 @@ fn main() -> Result<()> {
         return Err("usage: large_capture <elf> <capture> <out> <events>".into());
     };
     let catalogue = events::read(&PathBuf::from(elf))?;
-    let ring = catalogue.ring.as_ref().ok_or("the image has no ring")?;
     let bytes = std::fs::read(input)?;
     let wanted: usize = wanted.parse()?;
     let (header, records) = capture::read(&bytes)?;
+    let ring = catalogue.ring(Some(&header.channel))?;
     let events: Vec<(u32, &[u8])> = records
         .iter()
         .filter_map(|record| match *record {
@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         &Header {
             first: header.first,
             clock: Some(25_000_000),
+            channel: header.channel.clone(),
         },
     )?;
     let mut written = 0usize;

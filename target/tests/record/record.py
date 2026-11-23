@@ -17,7 +17,7 @@ The output must show that:
   followed by another;
 - every event holds the values its image wrote for its index;
 - the recording went through losses, every type, and events whose slots run
-  into the guard zone;
+  past the end of the ring;
 - no writer was reported suspect: none is held for a lap;
 - `kymo decode` of the capture prints exactly what `kymo record` printed:
   they may differ only by the seconds, which are all 0 here (QEMU's
@@ -47,7 +47,7 @@ RECORD_SECONDS = "2"
 LAP_RECORD_SECONDS = "4"
 CLOCK_HZ = "64000000"  # given, so that the capture carries it to kymo decode
 TIMEOUT_SECONDS = 60
-SLOTS = 16  # KYMO_RING_SLOTS of the test images
+SLOTS = 16  # ring_slots of the test images (test_trace.hpp)
 TYPES = {"one": 1, "two": 2, "four": 4}  # slots each type takes
 LAP_TYPES = {**TYPES, "held": 1}
 
@@ -107,7 +107,7 @@ def check(output: str, lap: str | None) -> list[str]:
         return ["the output does not run from a record line to an end line"]
     expected = int(lines[0].split()[1])
     events = dict.fromkeys(types, 0)
-    losses = guard = 0
+    losses = across = 0
     previous = None
     suspects = []  # (from, to) of each suspect line
     wrong = []  # (index, line) of each event that does not hold its values
@@ -143,16 +143,16 @@ def check(output: str, lap: str | None) -> list[str]:
         elif name == "held":
             lapped.append(int(values["lapped"]))
         events[name] += 1
-        guard += index % SLOTS + types[name] > SLOTS
+        across += index % SLOTS + types[name] > SLOTS
         expected = index + types[name]
     end = int(lines[-1].split()[1])
     if expected != end:
         errors.append(f"the events and losses reach {expected}, the recording ends at {end}")
-    print(f"events {events}, {losses} losses, {guard} through the guard zone, {len(suspects)} suspect lines, "
+    print(f"events {events}, {losses} losses, {across} across the end of the ring, {len(suspects)} suspect lines, "
           f"{len(wrong)} events not holding their values, lapped from {min(lapped, default=0)} "
           f"to {max(lapped, default=0)}")
-    if losses == 0 or guard == 0 or 0 in events.values():
-        errors.append("the recording did not go through losses, every type and the guard zone")
+    if losses == 0 or across == 0 or 0 in events.values():
+        errors.append("the recording did not go through losses, every type and the end of the ring")
     if lap and max(lapped, default=0) == min(lapped, default=0):
         errors.append("no writer was lapped while recording")
     if lap == "behind":

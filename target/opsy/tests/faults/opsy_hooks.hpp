@@ -9,6 +9,8 @@
  */
 #pragma once
 
+#include <opsy_trace.hpp>
+
 #include <kymo/opsy/hooks.hpp>
 
 #include <cstdint>
@@ -26,7 +28,7 @@ struct fault_seen
 	static inline std::uint32_t exc_return = 0;
 };
 
-class hooks : public kymo::opsy::hooks
+class hooks : public kymo::opsy::hooks<::trace>
 {
 public:
 	static void fault(const fault_status& status, const exception_frame& frame, std::uint32_t exc_return)

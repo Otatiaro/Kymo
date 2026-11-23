@@ -5,7 +5,7 @@
  */
 #pragma once
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <cstdint>
@@ -50,17 +50,17 @@ inline void emit_numbered(std::uint32_t n, std::uint32_t index)
 	switch (n % 3)
 	{
 	case 0:
-		kymo::emit(one{index});
+		trace::emit(one{index});
 		break;
 	case 1:
-		kymo::emit(two{index, {index + 1, index + 2, index + 3}});
+		trace::emit(two{index, {index + 1, index + 2, index + 3}});
 		break;
 	default:
 	{
 		four event{index, {}};
 		for (std::uint32_t k = 0; k < event.words.size(); ++k)
 			event.words[k] = (index * 10) + k;
-		kymo::emit(event);
+		trace::emit(event);
 		break;
 	}
 	}

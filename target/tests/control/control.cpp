@@ -4,14 +4,14 @@
  *          freeze, and enable() and disable() interrupted at each of their
  *          instructions by a handler that changes another family.
  *
- * Built with KYMO_CONTROL_DEFAULT enabling every family but meta. The startup
- * code runs no constructors, so the value from reset proves the word is
+ * From reset the word enables every family but kernel. The startup code runs
+ * no constructors, so the value from reset proves the word is
  * constant-initialised.
  */
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -30,19 +30,19 @@ struct switch_event
 	std::uint32_t task;
 };
 
-struct loss_event
+struct tick_event
 {
-	static constexpr kymo::family kymo_family = kymo::family::meta;
-	std::uint32_t lost;
+	static constexpr kymo::family kymo_family = kymo::family::kernel;
+	std::uint32_t tick;
 };
 
 static_assert(kymo::family_of<app_event> == kymo::family::application);
 static_assert(kymo::family_of<switch_event> == kymo::family::scheduling);
-static_assert(kymo::family_of<loss_event> == kymo::family::meta);
+static_assert(kymo::family_of<tick_event> == kymo::family::kernel);
 static_assert(sizeof(switch_event) == 4, "kymo_family takes no room");
 
-constexpr std::uint32_t all_but_meta = ~kymo::bit(kymo::family::meta);
-static_assert(KYMO_CONTROL_DEFAULT == all_but_meta, "the build sets the default");
+constexpr std::uint32_t all_but_kernel = 0x7FU;
+static_assert(kymo::control_at_reset() == all_but_kernel, "every family but kernel from reset");
 
 constexpr std::uint32_t application = kymo::bit(kymo::family::application);
 constexpr std::uint32_t scheduling = kymo::bit(kymo::family::scheduling);
@@ -73,9 +73,9 @@ template<typename Event>
 void expect(Event const& event, bool recorded)
 {
 	++step;
-	std::uint32_t const before = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
-	kymo::emit(event);
-	std::uint32_t const written = kymo::trace_ring.write_index.load(std::memory_order_relaxed) - before;
+	std::uint32_t const before = trace_ring.write_index.load(std::memory_order_relaxed);
+	trace::emit(event);
+	std::uint32_t const written = trace_ring.write_index.load(std::memory_order_relaxed) - before;
 	if (written != (recorded ? 1U : 0U))
 		fail(recorded ? "the event was not recorded" : "the event was recorded");
 }
@@ -132,15 +132,15 @@ void test_interrupt()
 
 void test_main()
 {
-	expect_word(all_but_meta, "the control word is not KYMO_CONTROL_DEFAULT from reset");
+	expect_word(all_but_kernel, "the control word is not control_at_reset() from reset");
 
-	// The default records every family but meta.
+	// From reset, every family but kernel is recorded.
 	expect(app_event{1}, true);
 	expect(switch_event{2}, true);
-	expect(loss_event{3}, false);
+	expect(tick_event{3}, false);
 
 	// The host clears the application family.
-	kymo::control.store(all_but_meta & ~application, std::memory_order_relaxed);
+	kymo::control.store(all_but_kernel & ~application, std::memory_order_relaxed);
 	expect(app_event{4}, false);
 	expect(switch_event{5}, true);
 
@@ -149,7 +149,7 @@ void test_main()
 	expect_word(0, "the freeze did not clear the word");
 	expect(app_event{6}, false);
 	expect(switch_event{7}, false);
-	expect(loss_event{8}, false);
+	expect(tick_event{8}, false);
 
 	// Enabling a family after a freeze records it again, and it alone.
 	kymo::enable(kymo::family::scheduling);

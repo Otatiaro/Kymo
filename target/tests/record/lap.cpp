@@ -4,7 +4,8 @@
  *          (record.py --lap).
  *
  * Thread mode writes the events of record.cpp, one at a time, with a pause
- * after each. Every HOLD_EVERY events, SysTick lands on the write's first
+ * after each. From the first event, at index 0, then every HOLD_EVERY events,
+ * SysTick lands on the write's first
  * instruction (preempt.hpp), then on each following one until the writer has
  * reserved its slots. Reserved and its first slot not yet published, the
  * writer is held: the interrupt emits `held` events, one slot each, for more
@@ -34,7 +35,7 @@
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <atomic>
@@ -49,9 +50,9 @@ struct held
 namespace
 {
 
-using ring_type = decltype(kymo::trace_ring);
+using ring_type = decltype(trace_ring);
 
-constexpr std::uint32_t slots = KYMO_RING_SLOTS;
+constexpr std::uint32_t slots = ring_slots;
 constexpr std::uint32_t hold_every = 16;
 constexpr std::uint32_t held_events = slots + (slots / 4);
 /// Loop rounds after each event of thread mode: the host keeps up.
@@ -91,7 +92,7 @@ void wait(std::uint32_t rounds)
 
 extern "C" [[gnu::noinline]] void write_event(std::uint32_t n)
 {
-	emit_numbered(n, kymo::trace_ring.write_index.load(std::memory_order_relaxed));
+	emit_numbered(n, trace_ring.write_index.load(std::memory_order_relaxed));
 }
 
 /// Whether the resumed writer has changed a word of the slots it reserved.
@@ -99,7 +100,7 @@ bool overwritten()
 {
 	for (std::uint32_t k = 0; k < max_slots; ++k)
 	{
-		kymo::slot const& now = kymo::trace_ring.slots[(writer_index + k) % slots];
+		kymo::slot const& now = trace_ring.slots[(writer_index + k) % slots];
 		if (now.header.load(std::memory_order_relaxed) != before[k].header
 		    || now.words[0] != before[k].words[0] || now.words[1] != before[k].words[1]
 		    || now.words[2] != before[k].words[2])
@@ -133,26 +134,26 @@ void test_interrupt()
 		step_on();
 		return;
 	}
-	if (kymo::trace_ring.write_index.load(std::memory_order_relaxed) == writer_index)
+	if (trace_ring.write_index.load(std::memory_order_relaxed) == writer_index)
 	{
 		step_on();   // not reserved yet: on to the reservation
 		return;
 	}
-	std::uint32_t const head = kymo::trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
+	std::uint32_t const head = trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
 	if (head == ring_type::header(writer_type, writer_index, true))
 		return;
 	for (std::uint32_t i = 0; i < held_events; ++i)
 	{
-		kymo::emit(held{
-			kymo::trace_ring.write_index.load(std::memory_order_relaxed),
-			kymo::trace_ring.lapped.load(std::memory_order_relaxed),
+		trace::emit(held{
+			trace_ring.write_index.load(std::memory_order_relaxed),
+			trace_ring.lapped.load(std::memory_order_relaxed),
 		});
 		if (i < held_events - (slots - 1))
 			wait(hold_pause);
 	}
 	for (std::uint32_t k = 0; k < max_slots; ++k)
 	{
-		kymo::slot const& now = kymo::trace_ring.slots[(writer_index + k) % slots];
+		kymo::slot const& now = trace_ring.slots[(writer_index + k) % slots];
 		before[k].header = now.header.load(std::memory_order_relaxed);
 		for (std::uint32_t w = 0; w < 3; ++w)
 			before[k].words[w] = now.words[w];
@@ -168,9 +169,9 @@ void test_main()
 	preempt::calibrate();
 	for (std::uint32_t n = 0;; ++n)
 	{
-		writer_index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
+		writer_index = trace_ring.write_index.load(std::memory_order_relaxed);
 		writer_type = type_of(n);
-		if (n % hold_every != hold_every - 1)
+		if (n % hold_every != 0)
 		{
 			write_event(n);
 		}

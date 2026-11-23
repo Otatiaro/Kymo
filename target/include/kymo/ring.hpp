@@ -10,20 +10,19 @@
  *     Cortex-M, retried on contention, interrupts never masked);
  *  2. fill the timestamp and the payload;
  *  3. publish the headers, each after a release barrier, the first slot's
- *     last. Every header of an event carries the lap of its first slot's
- *     index, so a slot whose header shows the expected lap is complete.
+ *     last. Every header carries the lap of its own slot's index, so a slot
+ *     whose header shows the expected lap is complete.
  *
  * Every slot starts with a header, so every slot boundary is a point where
  * the host can pick up the stream: the head bit marks an event's first slot.
  * The first slot holds the timestamp and 8 bytes of payload; each following
  * slot holds 12 more.
  *
- * An event is never cut by the end of the ring: the ring has a guard zone
- * past its last slot, one slot short of the largest event, and an event that
- * starts near the end runs on into it. The slots it would have wrapped onto
- * are left as they were, with an older lap; the host reads the guard zone
- * instead, where the slots carry the lap of the event's first slot, not the
- * lap their own index would have. The writer never tests for the end.
+ * An event that reaches the end of the ring goes on at slot 0: slot I of the
+ * event whose first index is `index` is at `(index + I) mod Slots`, and carries
+ * the lap of `index + I`: a slot past the end is told from one the previous
+ * lap left there by its header alone. The writer never tests for the end; an
+ * event only has to fit in the ring, which is checked at compile time.
  *
  * The host knows a slot it read is intact when the write index read after the
  * slot has not gone past it by a full ring: no writer could have reserved the
@@ -61,8 +60,8 @@ constexpr std::size_t slot_words = 3;
 struct slot
 {
 	/// Bits 0-15: event type. Bit 16: head (first slot of an event).
-	/// Bits 17-31: lap of the index of the event's first slot plus one,
-	/// modulo 2^15, so that a zeroed slot never passes for a written one.
+	/// Bits 17-31: lap of the slot's index plus one, modulo 2^15, so that a
+	/// zeroed slot never passes for a written one.
 	std::atomic<std::uint32_t> header{0};
 	/// In an event's first slot: the timestamp, then 8 bytes of payload.
 	/// In the slots that follow: 12 bytes of payload.
@@ -98,25 +97,25 @@ constexpr std::size_t slots_for = sizeof(Event) <= head_payload
 	: 1 + ((sizeof(Event) - head_payload + tail_payload - 1) / tail_payload);
 
 /**
- * @brief The ring. @p Slots is a power of two so the index wraps cleanly at
- *        2^32 and a slot is found with a mask. @p MaxEventSlots bounds the
- *        events it takes and sizes the guard zone.
+ * @brief A ring, one of the channels events are written to. @p Slots is a
+ *        power of two so the index wraps cleanly at 2^32 and a slot is found
+ *        with a mask.
  *
- * The layout is read by the host from the ELF: keep the fields in this order.
+ * The host finds every object of this type in the ELF, reads @p Slots from the
+ * template parameter and the layout from the DWARF: keep the fields in this
+ * order. A ring at namespace scope is zeroed at reset: no slot looks written.
  */
-template<std::size_t Slots, std::size_t MaxEventSlots = 1>
+template<std::size_t Slots>
 struct ring
 {
 	static_assert(Slots >= 2 && (Slots & (Slots - 1)) == 0, "Slots must be a power of two");
-	static_assert(MaxEventSlots >= 1 && MaxEventSlots <= Slots, "MaxEventSlots must be from 1 to Slots");
 	static constexpr unsigned log2_slots = log2_of(Slots);
-	static constexpr std::size_t guard_slots = MaxEventSlots - 1;
 
 	std::atomic<std::uint32_t> write_index{0};   ///< next index to reserve
 	std::atomic<std::uint32_t> lapped{0};        ///< writers lapped by the ring, modulo 2^32
-	std::array<slot, Slots + guard_slots> slots;
+	std::array<slot, Slots> slots;
 
-	/** @brief The header of a slot of the event whose first slot is at @p index. */
+	/** @brief The header of the slot at @p index. */
 	static constexpr std::uint32_t header(std::uint32_t type, std::uint32_t index, bool head)
 	{
 		std::uint32_t const lap = ((index >> log2_slots) + 1) & lap_mask;
@@ -129,7 +128,7 @@ struct ring
 	{
 		static_assert(std::is_trivially_copyable_v<Event>, "an event is copied byte for byte");
 		constexpr std::size_t count = slots_for<Event>;
-		static_assert(count <= MaxEventSlots, "the event is larger than the ring's MaxEventSlots");
+		static_assert(count <= Slots, "the event does not fit in the ring");
 
 		std::uint32_t const index = write_index.fetch_add(count, std::memory_order_relaxed);
 		slot& first = slots[index & (Slots - 1)];
@@ -138,7 +137,7 @@ struct ring
 
 		first.words[0] = timestamp;
 		std::memcpy(&first.words[1], bytes, std::min(sizeof(Event), head_payload));
-		write_tails<Event>(&first, header(type, index, false), bytes, std::make_index_sequence<count - 1>{});
+		write_tails<Event>(type, index, bytes, std::make_index_sequence<count - 1>{});
 		first.header.store(header(type, index, true), std::memory_order_release);
 		// Keeps the read below after the store above: a writer lapped before
 		// its last write is never missed.
@@ -149,26 +148,27 @@ struct ring
 
 private:
 	/** @brief Fills and publishes the slots after the first, one per @p Tails
-	 *         (none for a one-slot event), each with the header @p tail. */
+	 *         (none for a one-slot event). */
 	template<typename Event, std::size_t... Tails>
-	[[gnu::always_inline]] static void write_tails([[maybe_unused]] slot* first, [[maybe_unused]] std::uint32_t tail,
+	[[gnu::always_inline]] void write_tails([[maybe_unused]] std::uint32_t type, [[maybe_unused]] std::uint32_t index,
 	                                        [[maybe_unused]] unsigned char const* bytes,
 	                                        std::index_sequence<Tails...> /*tails*/)
 	{
-		(write_tail<Event, Tails + 1>(first, tail, bytes), ...);
+		(write_tail<Event, Tails + 1>(type, index, bytes), ...);
 	}
 
-	/** @brief Fills and publishes slot @p I of an event, I > 0. */
+	/** @brief Fills and publishes slot @p I of the event whose first index is
+	 *         @p index, I > 0. */
 	template<typename Event, std::size_t I>
-	[[gnu::always_inline]] static void write_tail(slot* first, std::uint32_t tail, unsigned char const* bytes)
+	[[gnu::always_inline]] void write_tail(std::uint32_t type, std::uint32_t index, unsigned char const* bytes)
 	{
 		constexpr std::size_t offset = head_payload + ((I - 1) * tail_payload);
 		constexpr std::size_t left = sizeof(Event) - offset;
-		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): the slots after the head, which the guard zone keeps in the ring; indexing slots instead costs 2 instructions per slot
-		slot& next = first[I];
+		std::uint32_t const tail_index = index + I;
+		slot& next = slots[tail_index & (Slots - 1)];
 		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): the event's bytes, past those already copied
 		std::memcpy(next.words.data(), bytes + offset, std::min(left, tail_payload));
-		next.header.store(tail, std::memory_order_release);
+		next.header.store(header(type, tail_index, false), std::memory_order_release);
 	}
 };
 
