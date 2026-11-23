@@ -2,7 +2,7 @@
 
 use kymo::target::{self, Backend, Connection, Result};
 use kymo::{bench, capture, decode, elf, events, record};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -71,6 +71,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// The catalogue of the image at `path`, its warnings printed.
+fn catalogue(path: &Path) -> Result<events::Catalogue> {
+    let catalogue = events::read(path)?;
+    for warning in &catalogue.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(catalogue)
+}
+
 fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next();
@@ -81,7 +90,7 @@ fn run() -> Result<()> {
                 (Some(elf), None) => PathBuf::from(elf),
                 _ => return Err(USAGE.into()),
             };
-            events::print(&events::read(&elf)?);
+            events::print(&catalogue(&elf)?);
             return Ok(());
         }
         Some("decode") => {
@@ -98,7 +107,7 @@ fn run() -> Result<()> {
                     _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
                 }
             }
-            let catalogue = events::read(&PathBuf::from(elf))?;
+            let catalogue = catalogue(Path::new(&elf))?;
             let bytes = std::fs::read(&copy).map_err(|error| format!("{copy}: {error}"))?;
             if capture::is_capture(&bytes) {
                 if channel.is_some() {
@@ -154,7 +163,7 @@ fn run() -> Result<()> {
     };
     let elf_path = elf.ok_or(USAGE)?;
     if command.as_deref() == Some("record") {
-        let catalogue = events::read(&elf_path)?;
+        let catalogue = catalogue(&elf_path)?;
         let ring = catalogue.ring(channel.as_deref())?;
         let mut target = target::open(&connection)?;
         return record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock);

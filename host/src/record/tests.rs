@@ -289,6 +289,7 @@ fn catalogue() -> Catalogue {
             slots_offset: u64::from(SLOTS_OFFSET),
         }],
         symbols: Default::default(),
+        warnings: Vec::new(),
     }
 }
 

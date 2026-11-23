@@ -90,6 +90,25 @@ pub struct Catalogue {
     pub rings: Vec<Ring>,
     /// The functions and static objects pointer fields are named by.
     pub symbols: Symbols,
+    /// What the image seems to lack, for the user to read: it decodes all the same.
+    pub warnings: Vec<String>,
+}
+
+/// The namespace of the OpSy adapter's events (target/opsy).
+const OPSY_ADAPTER: &str = "kymo::opsy::";
+
+/// The warning for an image that runs OpSy and traces none of its events.
+const OPSY_UNHOOKED: &str = "the image runs OpSy without Kymo's hooks, so no kernel event is traced: \
+                             declare `class hooks : public kymo::opsy::hooks<trace> {};` in namespace opsy, \
+                             in an opsy_hooks.hpp on the include path (target/opsy/include/kymo/opsy/hooks.hpp)";
+
+/// Whether the image holds code of OpSy's: a symbol in namespace `opsy`.
+fn runs_opsy(file: &object::File) -> bool {
+    file.symbols().any(|symbol| {
+        symbol
+            .name()
+            .is_ok_and(|name| name.starts_with("_ZN4opsy") || name.starts_with("_ZNK4opsy"))
+    })
 }
 
 /// The catalogue of the image at `path`.
@@ -97,8 +116,16 @@ pub fn read(path: &Path) -> Result<Catalogue> {
     let data = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let file = object::File::parse(&*data)?;
     let ids = type_ids(&file)?;
+    let mut warnings = Vec::new();
+    if runs_opsy(&file) && !ids.values().any(|name| name.starts_with(OPSY_ADAPTER)) {
+        warnings.push(OPSY_UNHOOKED.to_owned());
+    }
     if ids.is_empty() {
-        return Err(format!("{}: no event type ids (.kymo.ids)", path.display()).into());
+        let hints = warnings
+            .iter()
+            .map(|warning| format!("; {warning}"))
+            .collect::<String>();
+        return Err(format!("{}: no event type ids (.kymo.ids){hints}", path.display()).into());
     }
     let debug = debug_info(&file, ids.values().map(String::as_str).collect())?;
     let events = ids
@@ -118,6 +145,7 @@ pub fn read(path: &Path) -> Result<Catalogue> {
         events,
         rings: debug.rings,
         symbols: Symbols::read(&file, &debug.bases),
+        warnings,
     })
 }
 
