@@ -1,7 +1,7 @@
 /**
  * @file    kymo.hpp
- * @brief   Kymo on the target: kymo::emit(event) writes any event to the
- *          trace ring.
+ * @brief   Kymo on the target: the application's tracer writes each event to
+ *          the channel its family is routed to.
  *
  * An event is any trivially copyable struct; the host finds its layout and
  * name in the ELF, through its type id (type_id.hpp) and the DWARF.
@@ -10,12 +10,25 @@
  * or family::application. The control word enables families one by one, and
  * kymo::freeze() stops everything.
  *
- * Configuration, the same for every translation unit of the program:
- * - KYMO_RING_SLOTS: slots in the ring, a power of two (default 256, 4 KiB);
- * - KYMO_MAX_EVENT_SLOTS: slots the largest event takes (default 4, that is
- *   44 bytes of payload); the ring has that many slots, less one, past its
- *   end;
- * - KYMO_CONTROL_DEFAULT: the control word from reset (default: everything).
+ * A channel is anything with a `write(type, timestamp, event)`; a ring
+ * (ring.hpp) is the channel the host drains through the debug port. The
+ * application declares its channels and routes each family to one by
+ * overloading `channel`; tracer gives it `emit`:
+ *
+ *     inline kymo::ring<256> os;
+ *     inline uart_channel serial;
+ *
+ *     struct trace : kymo::tracer<trace>
+ *     {
+ *         static auto& channel(kymo::on<kymo::family::application>) { return serial; }
+ *         template<kymo::family F>
+ *         static auto& channel(kymo::on<F>) { return os; }
+ *     };
+ *
+ *     trace::emit(event);
+ *
+ * A family with no overload does not compile once one of its events is
+ * emitted; the generic overload routes every family not named.
  *
  * Timestamps come from the DWT cycle counter, which the program or the host
  * enables (DEMCR.TRCENA, DWT_CTRL.CYCCNTENA).
@@ -29,22 +42,8 @@
 #include <atomic>
 #include <cstdint>
 
-#ifndef KYMO_RING_SLOTS
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
-#define KYMO_RING_SLOTS 256
-#endif
-
-#ifndef KYMO_MAX_EVENT_SLOTS
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
-#define KYMO_MAX_EVENT_SLOTS 4
-#endif
-
 namespace kymo
 {
-
-/// The ring the host drains. Zeroed at reset: no slot looks written.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): written from any context, read by the host
-inline ring<KYMO_RING_SLOTS, KYMO_MAX_EVENT_SLOTS> trace_ring;
 
 /// Address of DWT_CYCCNT, the cycle counter (ARMv7-M and ARMv8-M).
 constexpr std::uintptr_t dwt_cyccnt = 0xE0001004;
@@ -56,16 +55,30 @@ constexpr std::uintptr_t dwt_cyccnt = 0xE0001004;
 	return *reinterpret_cast<std::uint32_t const volatile*>(dwt_cyccnt);
 }
 
-/**
- * @brief Writes @p event to the trace, unless its family is disabled or the
- *        trace frozen. Safe from any priority, any context.
- */
-template<typename Event>
-[[gnu::always_inline]] inline void emit(Event const& event)
+/** @brief The tag a tracer's `channel` overloads take, one per family. */
+template<family Which>
+struct on
 {
-	if ((control.load(std::memory_order_relaxed) & bit(family_of<Event>)) == 0)
-		return;
-	trace_ring.write(type_id_word<Event>(), timestamp(), event);
-}
+};
+
+/**
+ * @brief Gives @p Trace, the application's tracer, `emit`. @p Trace routes
+ *        each family with a static `channel(on<F>)` that returns the channel.
+ */
+template<typename Trace>
+struct tracer
+{
+	/**
+	 * @brief Writes @p event to its family's channel, unless its family is
+	 *        disabled or the trace frozen. Safe from any priority, any context.
+	 */
+	template<typename Event>
+	[[gnu::always_inline]] static void emit(Event const& event)
+	{
+		if ((control.load(std::memory_order_relaxed) & bit(family_of<Event>)) == 0)
+			return;
+		Trace::channel(on<family_of<Event>>{}).write(type_id_word<Event>(), timestamp(), event);
+	}
+};
 
 } // namespace kymo

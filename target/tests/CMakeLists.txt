@@ -85,7 +85,7 @@ function(kymo_qemu_image name cpu level)
 	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 	# libstdc++ 16 asserts at -O0, and its assertion handler needs the
 	# unwinder: a bare-metal image turns the assertions off.
-	target_compile_definitions(${name} PRIVATE KYMO_RING_SLOTS=16 _GLIBCXX_NO_ASSERTIONS ${arg_DEFINITIONS})
+	target_compile_definitions(${name} PRIVATE _GLIBCXX_NO_ASSERTIONS ${arg_DEFINITIONS})
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections
@@ -130,8 +130,7 @@ foreach(cpu cortex-m33 cortex-m4)
 		# The control word: value from reset, filter by family, freeze, and
 		# enable() and disable() interrupted at every instruction.
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
-			SOURCES control/control.cpp qemu/preempt.cpp
-			DEFINITIONS KYMO_CONTROL_DEFAULT=0xffffffbfu)
+			SOURCES control/control.cpp qemu/preempt.cpp)
 	endforeach()
 endforeach()
 

@@ -11,7 +11,7 @@
 #include "events.hpp"
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -29,7 +29,7 @@ void test_main()
 {
 	for (std::uint32_t n = 0;; ++n)
 	{
-		emit_numbered(n, kymo::trace_ring.write_index.load(std::memory_order_relaxed));
+		emit_numbered(n, trace_ring.write_index.load(std::memory_order_relaxed));
 		if (n / burst % 2 == 1)
 			for (std::uint32_t volatile k = 0; k < pause; k = k + 1)
 			{

@@ -14,13 +14,13 @@
  * head slot is published must be whole.
  *
  * Two writers: an event of one slot, and one of three; the handler's takes
- * two. The ring is small (KYMO_RING_SLOTS) so that events keep wrapping into
- * the guard zone, and its index starts short of 2^32 so that it wraps too.
+ * two. The ring is small (ring_slots) so that events keep running past its
+ * end, and its index starts short of 2^32 so that it wraps too.
  */
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <atomic>
@@ -68,8 +68,8 @@ std::uint32_t isr_written;    // events the handler has emitted
 std::uint32_t isr_checked;    // of those, the ones found in the ring
 std::uint32_t checked_index;  // where the next check starts
 
-using ring_type = decltype(kymo::trace_ring);
-constexpr std::uint32_t slot_mask = KYMO_RING_SLOTS - 1;
+using ring_type = decltype(trace_ring);
+constexpr std::uint32_t slot_mask = ring_slots - 1;
 
 [[noreturn]] void fail(char const* what, std::uint32_t index)
 {
@@ -84,9 +84,9 @@ constexpr std::uint32_t slot_mask = KYMO_RING_SLOTS - 1;
 /** @brief Reads the event at @p index into @p out; returns its slot count. */
 std::uint32_t read_event(std::uint32_t index, std::uint16_t& type, event_bytes& out)
 {
-	// An event's slots follow each other, into the guard zone past the end.
+	// An event's slots follow each other, on at slot 0 past the end.
 	std::size_t const position = index & slot_mask;
-	kymo::slot const& first = kymo::trace_ring.slots[position];
+	kymo::slot const& first = trace_ring.slots[position];
 	std::uint32_t const head = first.header.load(std::memory_order_acquire);
 	type = static_cast<std::uint16_t>(head & 0xffffU);
 	if (head != ring_type::header(type, index, true))
@@ -108,7 +108,7 @@ std::uint32_t read_event(std::uint32_t index, std::uint16_t& type, event_bytes& 
 	std::memcpy(out.data(), &first.words[1], size < kymo::head_payload ? size : kymo::head_payload);
 	for (std::uint32_t i = 1; i < count; ++i)
 	{
-		kymo::slot const& tail = kymo::trace_ring.slots[position + i];
+		kymo::slot const& tail = trace_ring.slots[(index + i) & slot_mask];
 		if (tail.header.load(std::memory_order_acquire) != ring_type::header(type, index, false))
 			fail("no complete continuation slot", index + i);
 		std::size_t const offset = kymo::head_payload + ((i - 1) * kymo::tail_payload);
@@ -127,11 +127,11 @@ std::uint32_t read_event(std::uint32_t index, std::uint16_t& type, event_bytes& 
  */
 void read_published()
 {
-	std::uint32_t const end = kymo::trace_ring.write_index.load(std::memory_order_acquire);
+	std::uint32_t const end = trace_ring.write_index.load(std::memory_order_acquire);
 	std::uint32_t index = checked_index;
 	while (index != end)
 	{
-		std::uint32_t const head = kymo::trace_ring.slots[index & slot_mask].header.load(std::memory_order_acquire);
+		std::uint32_t const head = trace_ring.slots[index & slot_mask].header.load(std::memory_order_acquire);
 		if (head != ring_type::header(static_cast<std::uint16_t>(head & 0xffffU), index, true))
 			return;
 		event_bytes bytes{};
@@ -178,13 +178,13 @@ void check_isr(event_bytes const& bytes, std::uint32_t index)
 /** @brief Checks the slots written since the last check. @return whether the handler wrote in them. */
 bool check(std::uint16_t writer_type, std::uint32_t writer_seq)
 {
-	std::uint32_t const end = kymo::trace_ring.write_index.load(std::memory_order_acquire);
+	std::uint32_t const end = trace_ring.write_index.load(std::memory_order_acquire);
 	bool writer_found = false;
 	bool interrupted = false;
 	std::uint32_t index = checked_index;
 	while (index != end)
 	{
-		if (end - index > KYMO_RING_SLOTS)
+		if (end - index > ring_slots)
 			fail("more slots written than the ring holds", index);
 		event_bytes bytes{};
 		std::uint16_t type = 0;
@@ -239,7 +239,7 @@ void run(char const* name, std::uint16_t type, void (*writer)(std::uint32_t), st
 
 extern "C" [[gnu::noinline]] void write_small(std::uint32_t seq)
 {
-	kymo::emit(small_event{seq, ~seq});
+	trace::emit(small_event{seq, ~seq});
 }
 
 extern "C" [[gnu::noinline]] void write_large(std::uint32_t seq)
@@ -248,7 +248,7 @@ extern "C" [[gnu::noinline]] void write_large(std::uint32_t seq)
 	event.seq = seq;
 	for (std::uint32_t w = 0; w < event.words.size(); ++w)
 		event.words[w] = pattern(seq, w);
-	kymo::emit(event);
+	trace::emit(event);
 }
 
 void test_interrupt()
@@ -258,7 +258,7 @@ void test_interrupt()
 	event.seq = isr_written;
 	for (std::uint32_t w = 0; w < event.words.size(); ++w)
 		event.words[w] = pattern(~event.seq, w);
-	kymo::emit(event);
+	trace::emit(event);
 	++isr_written;
 }
 
@@ -267,14 +267,14 @@ void test_main()
 	preempt::calibrate();
 
 	// Start short of 2^32 so the index wraps during the run.
-	std::uint32_t const start = 0U - (7U * KYMO_RING_SLOTS) - 3U;
-	kymo::trace_ring.write_index.store(start, std::memory_order_relaxed);
+	std::uint32_t const start = 0U - (7U * ring_slots) - 3U;
+	trace_ring.write_index.store(start, std::memory_order_relaxed);
 	checked_index = start;
 
 	std::uint32_t seq = 0;
 	run("one-slot writer", kymo::type_id<small_event>(), write_small, seq);
 	run("three-slot writer", kymo::type_id<large_event>(), write_large, seq);
-	if (kymo::trace_ring.write_index.load(std::memory_order_relaxed) > start)
+	if (trace_ring.write_index.load(std::memory_order_relaxed) > start)
 		fail("the index did not wrap", checked_index);
 	qemu::finish(true);
 }

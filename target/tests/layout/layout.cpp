@@ -17,7 +17,7 @@
  */
 #include "../qemu/qemu.hpp"
 
-#include <kymo/kymo.hpp>
+#include "../test_trace.hpp"
 
 #include <array>
 #include <cstddef>
@@ -118,11 +118,11 @@ int origin;
 
 void test_main()
 {
-	kymo::emit(plain{1});
-	kymo::emit(app::motor::step{2, 3, -4});
-	kymo::emit(app::motor::mode_changed{app::motor::mode::idle, app::motor::mode::run, &origin, {'a', 'b', 'c'}});
-	kymo::emit(sensor::moved{{5, 6}, {{1, 2, 3}, {4, 5, 6}}, {7, 8}, true});
-	kymo::emit(tick{});
+	trace::emit(plain{1});
+	trace::emit(app::motor::step{2, 3, -4});
+	trace::emit(app::motor::mode_changed{app::motor::mode::idle, app::motor::mode::run, &origin, {'a', 'b', 'c'}});
+	trace::emit(sensor::moved{{5, 6}, {{1, 2, 3}, {4, 5, 6}}, {7, 8}, true});
+	trace::emit(tick{});
 
 	event<plain>("plain");
 	FIELD(plain, value, "uint32_t");

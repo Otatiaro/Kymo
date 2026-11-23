@@ -22,10 +22,10 @@
  * that freezes on a fault stops there, or resets once the host has read the
  * ring.
  *
- * The word holds KYMO_CONTROL_DEFAULT from reset, constant-initialised with
- * no startup code: a board with no host attached records with it. By default
- * every family but kernel: the RTOS's own machinery matters to whoever works
- * on the RTOS, and costs every path that crosses it.
+ * From reset the word enables the families recorded_at_reset() names,
+ * constant-initialised with no startup code: a board with no host attached
+ * records them. That is every family but kernel: the RTOS's own machinery
+ * matters to whoever works on the RTOS, and costs every path that crosses it.
  *
  * A writer that loads the word just before a freeze still writes its event
  * after it. That event is timestamped like any other.
@@ -35,11 +35,6 @@
 #include <atomic>
 #include <cstdint>
 #include <type_traits>
-
-#ifndef KYMO_CONTROL_DEFAULT
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
-#define KYMO_CONTROL_DEFAULT 0xffffff7fU
-#endif
 
 namespace kymo
 {
@@ -56,6 +51,15 @@ enum class family : std::uint8_t
 	meta,         ///< losses, active configuration, freeze, build id
 	kernel,       ///< the RTOS's own machinery: its tick, service calls, context switch interrupt
 };
+
+/// The number of families.
+constexpr unsigned families = static_cast<unsigned>(family::kernel) + 1;
+
+/** @brief Whether @p which is recorded from reset. */
+constexpr bool recorded_at_reset(family which)
+{
+	return which != family::kernel;
+}
 
 /**
  * @brief The family of @p Event: its static member kymo_family, or
@@ -75,9 +79,19 @@ constexpr std::uint32_t bit(family which)
 	return 1U << static_cast<unsigned>(which);
 }
 
+/** @brief The control word from reset: the bits of the families recorded_at_reset() names. */
+constexpr std::uint32_t control_at_reset()
+{
+	std::uint32_t word = 0;
+	for (unsigned value = 0; value < families; ++value)
+		if (recorded_at_reset(static_cast<family>(value)))
+			word |= bit(static_cast<family>(value));
+	return word;
+}
+
 /// The control word. The host finds it in the ELF.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): written by the program and by the host
-inline std::atomic<std::uint32_t> control{KYMO_CONTROL_DEFAULT};
+inline std::atomic<std::uint32_t> control{control_at_reset()};
 
 /** @brief Records the events of @p which. Safe from any priority, any context. */
 inline void enable(family which)
