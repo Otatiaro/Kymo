@@ -39,7 +39,10 @@ from the host time of the probe's passes once the events span a second.
 
 record: prints the events of a running target as it writes them, drained
 from its trace ring through the probe, and the indexes lost when the ring
-overtook the probe; stops on Enter, or after --duration.
+overtook the probe; stops on Enter, or after --duration. A line
+\"suspect <from> <to> <n>\" reports n writers the ring lapped while its write
+index went from <from> to <to>, where the probe could not tell which events
+they wrote into: events recorded near it may hold their bytes.
 
 record options:
   --probe-id, --chip, --speed as for bench; qemu: --probe-id <host>:<port>,

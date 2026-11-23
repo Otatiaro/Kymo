@@ -84,6 +84,9 @@ def check(output: str) -> list[str]:
             losses += 1
             expected = end
             continue
+        if fields[0] == "suspect":
+            errors.append(f"{line}: no writer of the image is held for a lap")
+            continue
         previous = "event"
         index, name = int(fields[1]), fields[4]
         if fields[0] != "event" or name not in TYPES:

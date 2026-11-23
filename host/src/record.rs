@@ -9,6 +9,13 @@
 //! before its first one, and read after it, so a first slot found published
 //! vouches for the rest. An index the ring went past before it could be read
 //! is lost; a first slot not yet published is read again by the next pass.
+//!
+//! The target counts the writers the ring lapped (ADR-054). Each pass reads
+//! that count with the write index, and matches the writers counted since the
+//! last pass against the dangers raised: a danger stands for at most as many
+//! writers as it covers slots. A writer left over was lapped where the host
+//! raised no danger, so the events recorded may hold its bytes: it is
+//! reported suspect, between the write indexes of the two passes.
 
 use crate::capture::{self, Record, Writer};
 use crate::decode::{self, Decoded, Header};
@@ -29,6 +36,10 @@ pub enum Item<'a> {
     Event(Decoded<'a>, Vec<u8>),
     /// The indexes `from..to`, overwritten before they could be read intact.
     Lost { from: u32, to: u32 },
+    /// `writers` writers lapped while the write index went from `from` to
+    /// `to`, that no danger accounts for. Placed among the items of the pass
+    /// that read the count, not in index order.
+    Suspect { from: u32, to: u32, writers: u32 },
 }
 
 pub struct Recorder<'a> {
@@ -55,6 +66,10 @@ pub struct Recorder<'a> {
     raised: u32,
     lifted: u32,
     expired: u32,
+    /// The count of writers lapped, and the write index, the last pass read.
+    lapped: u32,
+    pass_index: u32,
+    suspects: u32,
 }
 
 /// The events `start..end`, read unpublished then lapped by the ring: their
@@ -73,6 +88,9 @@ struct Danger {
     /// Every writer seen done: their slots may hold others' first slots
     /// overwritten, but nothing is written to them any more.
     done: bool,
+    /// The writers counted lapped it may still account for: one per slot
+    /// it covers.
+    credit: u32,
 }
 
 impl Danger {
@@ -106,10 +124,15 @@ impl<'a> Recorder<'a> {
             raised: 0,
             lifted: 0,
             expired: 0,
+            lapped: 0,
+            pass_index: 0,
+            suspects: 0,
         };
-        let write_index = recorder.write_index(target)?;
+        let (lapped, write_index) = recorder.counters(target)?;
+        recorder.lapped = lapped;
+        recorder.pass_index = write_index;
         recorder.read(target, 0, physical)?;
-        let after = recorder.write_index(target)?;
+        let after = recorder.counters(target)?.1;
         // The last lap, its writers given up on: a ring not yet filled once has
         // nothing before index 0.
         recorder.read_end = write_index;
@@ -136,10 +159,11 @@ impl<'a> Recorder<'a> {
         )
     }
 
-    /// The dangers raised, lifted, and expired unlifted, since recording started.
+    /// The dangers raised, lifted, and expired unlifted, and the writers
+    /// reported suspect, since recording started.
     #[cfg(test)]
-    pub fn dangers(&self) -> (u32, u32, u32) {
-        (self.raised, self.lifted, self.expired)
+    pub fn dangers(&self) -> (u32, u32, u32, u32) {
+        (self.raised, self.lifted, self.expired, self.suspects)
     }
 
     /// The first index not yet settled: where recording started, before the
@@ -148,15 +172,19 @@ impl<'a> Recorder<'a> {
         self.next
     }
 
-    fn write_index(&self, target: &mut dyn Target) -> Result<u32> {
-        target.read_word(self.address + self.ring.write_index_offset as u32)
+    /// The count of writers lapped and the write index, read in one go.
+    fn counters(&self, target: &mut dyn Target) -> Result<(u32, u32)> {
+        let mut words = [0u32; 2];
+        target.read_words(self.address + self.ring.write_index_offset as u32, &mut words)?;
+        Ok((words[1], words[0]))
     }
 
     /// One pass: settles the last pass's read, then reads what was written
     /// since. Returns the write index it read.
     pub fn pass(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<u32> {
-        let write_index = self.write_index(target)?;
+        let (lapped, write_index) = self.counters(target)?;
         self.settle(write_index, items)?;
+        self.account(lapped, write_index, items);
         self.lift(target, write_index)?;
         let slots = self.ring.slots;
         if write_index.wrapping_sub(self.next) > slots {
@@ -186,8 +214,9 @@ impl<'a> Recorder<'a> {
     /// Settles the last pass's read: call once recording ends. Returns the
     /// write index it read.
     pub fn finish(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<u32> {
-        let write_index = self.write_index(target)?;
+        let (lapped, write_index) = self.counters(target)?;
         self.settle(write_index, items)?;
+        self.account(lapped, write_index, items);
         self.flush(items);
         Ok(write_index)
     }
@@ -342,6 +371,7 @@ impl<'a> Recorder<'a> {
             end,
             expires: write_index.wrapping_add(self.ring.slots),
             done: false,
+            credit: end.wrapping_sub(index),
         });
         self.raised += 1;
         end
@@ -412,6 +442,29 @@ impl<'a> Recorder<'a> {
         Ok(())
     }
 
+    /// Matches the writers counted lapped since the last pass against the
+    /// dangers, oldest first, raised up to this pass; reports those left over.
+    /// A danger's credit goes when it expires: a writer counted after that
+    /// was held past it, out of the host's reach.
+    fn account(&mut self, lapped: u32, write_index: u32, items: &mut Vec<Item<'a>>) {
+        let mut writers = lapped.wrapping_sub(self.lapped);
+        for danger in &mut self.dangers {
+            let taken = writers.min(danger.credit);
+            danger.credit -= taken;
+            writers -= taken;
+        }
+        if writers > 0 {
+            items.push(Item::Suspect {
+                from: self.pass_index,
+                to: write_index,
+                writers,
+            });
+            self.suspects += writers;
+        }
+        self.lapped = lapped;
+        self.pass_index = write_index;
+    }
+
     /// Records `from..to` as lost. The loss is held back until an event
     /// follows or recording ends: the passes after may extend it.
     fn lost(&mut self, items: &mut Vec<Item<'a>>, from: u32, to: u32) {
@@ -464,7 +517,7 @@ pub fn run(
     let mut capture = out.map(|out| Writer::create(out, &header)).transpose()?;
     let mut timeline = Timeline::new(clock);
     let mut items = Vec::new();
-    let mut counts = (0u64, 0u64, 0u64);
+    let mut counts = (0u64, 0u64, 0u64, 0u64);
     loop {
         let done = stop.load(Ordering::Relaxed) || duration.is_some_and(|duration| started.elapsed() >= duration);
         let host_ns = SystemTime::now()
@@ -497,6 +550,15 @@ pub fn run(
                     println!("lost {from} {to}");
                     Record::Lost { from: *from, to: *to }
                 }
+                Item::Suspect { from, to, writers } => {
+                    counts.3 += u64::from(*writers);
+                    println!("suspect {from} {to} {writers}");
+                    Record::Suspect {
+                        from: *from,
+                        to: *to,
+                        writers: *writers,
+                    }
+                }
             };
             if let Some(capture) = &mut capture {
                 capture.write(&record)?;
@@ -509,15 +571,24 @@ pub fn run(
                 capture.finish()?;
             }
             eprintln!(
-                "{} events, {} slots lost, {} passes{}{}",
+                "{} events, {} slots lost, {} passes{}{}{}",
                 counts.0,
                 counts.1,
                 counts.2,
+                suspect(counts.3),
                 target::speed_text(target),
                 measured(&timeline)
             );
             return Ok(());
         }
+    }
+}
+
+/// The writers reported suspect over a recording, for its summary.
+fn suspect(writers: u64) -> String {
+    match writers {
+        0 => String::new(),
+        _ => format!(", {writers} lapped writers no danger accounts for: events near the suspect lines may hold their bytes"),
     }
 }
 
@@ -546,7 +617,7 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
                 let cycles = timeline.event(index, event.timestamp);
                 events.push((event, cycles));
             }
-            Record::Lost { .. } | Record::End { .. } => {}
+            Record::Lost { .. } | Record::Suspect { .. } | Record::End { .. } => {}
         }
     }
     let frequency = timeline.frequency();
@@ -561,15 +632,24 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
                 println!("{}", decode::line(&catalogue.symbols, event, *cycles, seconds));
             }
             Record::Lost { from, to } => println!("lost {from} {to}"),
+            Record::Suspect { from, to, writers } => println!("suspect {from} {to} {writers}"),
             Record::End { next } => println!("end {next}"),
         }
     }
+    let suspects = records
+        .iter()
+        .map(|record| match *record {
+            Record::Suspect { writers, .. } => u64::from(writers),
+            _ => 0,
+        })
+        .sum();
     eprintln!(
-        "{} events{}",
+        "{} events{}{}",
         records
             .iter()
             .filter(|record| matches!(record, Record::Event { .. }))
             .count(),
+        suspect(suspects),
         measured(&timeline)
     );
     Ok(())

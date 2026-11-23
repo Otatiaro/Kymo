@@ -76,6 +76,8 @@ pub struct Ring {
     pub max_event_slots: u32,
     pub size: u64,
     pub write_index_offset: u64,
+    /// The writers lapped by the ring, the word right after the write index.
+    pub lapped_offset: u64,
     pub slots_offset: u64,
 }
 
@@ -462,10 +464,15 @@ fn ring_layout(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: U
         slots: u32::try_from(get(&parameters, "Slots")?)?,
         max_event_slots: u32::try_from(get(&parameters, "MaxEventSlots")?)?,
         size,
+        lapped_offset: get(&members, "lapped")?,
         write_index_offset: get(&members, "write_index")?,
         slots_offset: get(&members, "slots")?,
     };
-    if !ring.slots.is_power_of_two() || ring.max_event_slots == 0 || ring.max_event_slots > ring.slots {
+    if !ring.slots.is_power_of_two()
+        || ring.max_event_slots == 0
+        || ring.max_event_slots > ring.slots
+        || ring.lapped_offset != ring.write_index_offset + 4
+    {
         return Err(format!("kymo::trace_ring: unexpected geometry {ring:?}").into());
     }
     Ok(ring)

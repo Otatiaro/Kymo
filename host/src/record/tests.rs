@@ -11,6 +11,10 @@ const SLOTS: u32 = 16;
 const MAX_EVENT_SLOTS: u32 = 4;
 const BASE: u32 = 0x2000_0000;
 const WRITE_INDEX_OFFSET: u32 = 0;
+const LAPPED_OFFSET: u32 = 4;
+/// Not a word: the writer reads the write index back, and counts itself
+/// lapped if the ring went past its index, here the store's value.
+const READ_BACK: usize = usize::MAX;
 const SLOTS_OFFSET: u32 = 16;
 const HEAD_BIT: u32 = 1 << 16;
 const LAP_SHIFT: u32 = 17;
@@ -58,6 +62,8 @@ struct Simulated {
     host_write_index: u32,
     /// Whether the writer runs in bursts that overtake the probe.
     bursts: bool,
+    /// The writers that counted themselves lapped.
+    counted: Vec<u32>,
 }
 
 impl Simulated {
@@ -83,18 +89,19 @@ impl Simulated {
             read_unpublished: BTreeSet::new(),
             host_write_index: 0,
             bursts: true,
+            counted: Vec::new(),
         }
     }
 
     /// Completes the events under way, then writes nothing until restarted.
     fn stop(&mut self) {
-        if !self.preempted.is_empty() {
+        if self.preempted_writes() {
             self.stale.push((self.preempted_index, self.write_index, true));
             self.blame();
         }
         let preempted = std::mem::take(&mut self.preempted);
-        for (word, value) in self.stores.drain(..).chain(preempted) {
-            self.memory[word] = value;
+        for (word, value) in std::mem::take(&mut self.stores).into_iter().chain(preempted) {
+            self.store(word, value);
         }
         self.stopped = true;
     }
@@ -102,7 +109,7 @@ impl Simulated {
     /// Records the indexes the preempted writer's stores, about to land,
     /// belong to now: those of the lap below the write index.
     fn blame(&mut self) {
-        for &(word, _) in &self.preempted {
+        for &(word, _) in self.preempted.iter().filter(|store| store.0 != READ_BACK) {
             let position = (word as u32 - SLOTS_OFFSET / 4) / 4 % SLOTS;
             let below = (self.write_index - position - 1) / SLOTS * SLOTS + position;
             let writers = self.stomped.entry(below).or_default();
@@ -151,6 +158,7 @@ impl Simulated {
         }
         self.stores
             .push_back((slot(0), u32::from(type_id) | HEAD_BIT | lap << LAP_SHIFT));
+        self.stores.push_back((READ_BACK, index));
         self.written.insert(
             index,
             Written {
@@ -177,8 +185,10 @@ impl Simulated {
             if self.stores.is_empty() {
                 if !self.preempted.is_empty() && self.write_index.wrapping_sub(self.preempted_index) > self.resume_after
                 {
-                    self.blame();
-                    self.stale.push((self.preempted_index, self.write_index, false));
+                    if self.preempted_writes() {
+                        self.blame();
+                        self.stale.push((self.preempted_index, self.write_index, false));
+                    }
                     self.stores = std::mem::take(&mut self.preempted);
                     self.current = self.preempted_index;
                 } else {
@@ -186,7 +196,22 @@ impl Simulated {
                 }
             }
             let (word, value) = self.stores.pop_front().expect("an event queued");
+            self.store(word, value);
+        }
+    }
+
+    /// Whether the preempted writer has slots left to write, not only its read-back.
+    fn preempted_writes(&self) -> bool {
+        self.preempted.iter().any(|store| store.0 != READ_BACK)
+    }
+
+    /// One store of the writer, or its read-back of the write index.
+    fn store(&mut self, word: usize, value: u32) {
+        if word != READ_BACK {
             self.memory[word] = value;
+        } else if self.write_index.wrapping_sub(value) > SLOTS {
+            self.memory[(LAPPED_OFFSET / 4) as usize] += 1;
+            self.counted.push(value);
         }
     }
 }
@@ -259,6 +284,7 @@ fn catalogue() -> Catalogue {
             max_event_slots: MAX_EVENT_SLOTS,
             size: u64::from(SLOTS_OFFSET + physical * 16),
             write_index_offset: u64::from(WRITE_INDEX_OFFSET),
+            lapped_offset: u64::from(LAPPED_OFFSET),
             slots_offset: u64::from(SLOTS_OFFSET),
         }),
         symbols: Default::default(),
@@ -271,14 +297,23 @@ fn catalogue() -> Catalogue {
 /// every type, and events whose slots run into the guard zone.
 #[test]
 fn records_what_was_written_or_reports_it_lost() {
-    records_with(false);
+    records_with(false, true, 20);
 }
 
 /// The same, with writers preempted for more than a full lap: the slots they
-/// reserved are reserved again by newer events before they write them.
+/// reserved are reserved again by newer events before they write them. The
+/// host keeps up, so every lapped writer it reports suspect is one it never
+/// read unpublished.
 #[test]
 fn records_what_was_written_with_writers_preempted_for_a_lap() {
-    records_with(true);
+    records_with(true, false, 1000);
+}
+
+/// The same, with bursts that overtake the probe: lapped writers the host
+/// never read unpublished are reported suspect.
+#[test]
+fn reports_suspect_the_lapped_writers_a_host_fallen_behind_missed() {
+    records_with(true, true, 200);
 }
 
 /// The slots of an event of type `type_id`.
@@ -287,12 +322,13 @@ fn slots(type_id: u16) -> u32 {
     super::decode::slots_for(u64::from(size)) as u32
 }
 
-fn records_with(preempt: bool) {
+fn records_with(preempt: bool, bursts: bool, seeds: u64) {
     let catalogue = catalogue();
-    for seed in 1..=if preempt { 1000u64 } else { 20 } {
+    let (mut all_suspects, mut silent) = (0, 0);
+    for seed in 1..=seeds {
         let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         target.preempt = preempt;
-        target.bursts = !preempt;
+        target.bursts = bursts;
         target.run(1000);
         // Recording starts while a writer is preempted, its slots not yet
         // written: the start must raise its danger.
@@ -351,9 +387,11 @@ fn records_with(preempt: bool) {
         }
         recorder.finish(&mut target, &mut items).unwrap();
         let (mut events, mut lost, mut guard, mut dropped, mut shown, mut wrong) = ([0u32; 3], 0, 0, 0u32, 0u32, 0);
+        let mut suspects = 0;
         let mut previous_lost = false;
         for item in &items {
             match item {
+                Item::Suspect { writers, .. } => suspects += writers,
                 Item::Lost { from, to } => {
                     assert_eq!(*from, expected, "seed {seed}: loss");
                     assert!(!previous_lost, "seed {seed}: a loss right after a loss, from {from}");
@@ -403,10 +441,31 @@ fn records_with(preempt: bool) {
             recorder.dangers()
         );
         assert_eq!(preempt, target.preemptions > 0, "seed {seed}: preemptions");
-        let (raised, lifted, expired) = recorder.dangers();
+        // A writer reported suspect is one the host never read unpublished,
+        // or one lapped once it had published, which wrote nothing stale: the
+        // host may have read it published, and raised no danger.
+        let unread = target
+            .counted
+            .iter()
+            .filter(|writer| {
+                !target.read_unpublished.contains(writer) || !target.stale.iter().any(|stale| stale.0 == **writer)
+            })
+            .count() as u32;
+        assert!(
+            suspects <= unread,
+            "seed {seed}: {suspects} suspect, {} counted, {unread} never read unpublished {}",
+            target.counted.len(),
+            recorder.state()
+        );
+        all_suspects += suspects;
+        silent += u32::from(wrong > 0 && suspects == 0);
+        let (raised, lifted, expired, _) = recorder.dangers();
         eprintln!(
-            "seed {seed}: preemptions {} dangers raised {raised} lifted {lifted} expired {expired} losses {lost} (indexes lost {dropped}, shown {shown}) blocked {blocked} wrong unread {wrong}",
-            target.preemptions
+            "seed {seed}: preemptions {} dangers raised {raised} lifted {lifted} expired {expired} losses {lost} (indexes lost {dropped}, shown {shown}) blocked {blocked} wrong unread {wrong} counted {} unread {unread} suspect {suspects}",
+            target.preemptions,
+            target.counted.len()
         );
     }
+    eprintln!("suspect writers {all_suspects}, seeds with a wrong event and no suspect {silent}");
+    assert_eq!(preempt, all_suspects > 0, "suspect writers");
 }
