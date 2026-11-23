@@ -53,7 +53,10 @@ extern "C" [[gnu::naked]] void SysTick_Handler()
 
 extern "C" void preempt_systick(std::uint32_t const* frame)
 {
+	// A short delay wraps the counter again during exception entry: the
+	// interrupt pending from that wrap is cleared, so the handler runs once.
 	reg(syst_csr) = 0;
+	reg(icsr) = icsr_pendstclr;
 	fired = true;
 	interrupted_pc = frame[6];
 	if (!calibrating)

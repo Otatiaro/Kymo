@@ -1,18 +1,24 @@
 /**
  * @file    lap.cpp
- * @brief   A writer preempted for a full lap of the ring: nothing the host
- *          takes as intact may hold another event's bytes.
+ * @brief   A writer lapped by the ring counts itself in `lapped`: once when it
+ *          wrote into slots no longer its own, never when the ring did not
+ *          lap it.
  *
- * A writer emits a three-slot event from thread mode. A first interrupt lands
- * on one of its instructions and emits a full ring of one-slot events, so the
- * slots the writer reserved are reserved again, by newer events, while the
- * writer is still in flight. It arms a second interrupt, which lands on a
- * later instruction of the writer and reads the ring as the host does: an
- * event is intact when its headers carry the lap of its index and the write
- * index, read after the event, has not gone past it by a full ring. Every
- * event it takes as intact must hold exactly its own bytes.
+ * A writer emits a three-slot event from thread mode. An interrupt lands on
+ * one of its instructions and emits a full ring of one-slot events, so the
+ * slots the writer reserved, if it had, are reserved again by newer events.
+ * The interrupt then keeps a copy of the ring. When the call returns:
+ *  - interrupted before its reservation, the writer was not lapped: `lapped`
+ *    is unchanged;
+ *  - interrupted after its reservation and before it published its first
+ *    slot, the writer went on writing into newer events' slots: the ring
+ *    differs from the copy, and `lapped` went up by one;
+ *  - interrupted after it published its first slot, it wrote nothing stale:
+ *    the ring equals the copy, and `lapped` went up by one when the interrupt
+ *    came before the writer read the write index again, by zero after.
  *
- * Both interrupts sweep every instruction of the writer (preempt.hpp).
+ * The interrupt sweeps every instruction of the writer (preempt.hpp). The
+ * write index starts short of 2^32, so the lap test wraps too.
  */
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
@@ -41,96 +47,43 @@ struct large_event
 static_assert(kymo::slots_for<lap_event> == 1, "");
 static_assert(kymo::slots_for<large_event> == 3, "");
 
-constexpr std::uint32_t pattern(std::uint32_t seq, std::uint32_t word)
-{
-	return (seq * 0x9E3779B1u) ^ (word * 0x85EBCA6Bu) ^ 0xA5A5A5A5u;
-}
-
 constexpr std::uint32_t slots = KYMO_RING_SLOTS;
-constexpr std::uint32_t slot_mask = slots - 1;
-constexpr std::uint32_t max_delay = 2000;
+constexpr std::uint32_t max_delay = 100000;
 
 using ring_type = decltype(kymo::trace_ring);
 
-std::uint32_t volatile second_delay;   // delay of the second interrupt
-std::uint32_t volatile stage;          // interrupts taken in the current call
+/// Where the writer stood when the interrupt landed.
+enum class landed
+{
+	none,        ///< the call ended first
+	before,      ///< before the writer reserved its slots
+	unpublished, ///< reserved, its first slot not yet published
+	published,   ///< its first slot published
+};
+
+std::uint32_t writer_index;   // the index the writer reserves
+landed volatile where;
 std::uint32_t lap_seq;
-std::uint32_t reads;                   // events the reader took as intact
+alignas(ring_type) unsigned char copy[sizeof(kymo::trace_ring.slots)];
 
-std::uint32_t volatile& reg(std::uint32_t address)
+[[noreturn]] void fail(char const* what, std::uint32_t delay)
 {
-	return *reinterpret_cast<std::uint32_t volatile*>(address);
-}
-
-[[noreturn]] void fail(char const* what, std::uint32_t first, std::uint32_t second)
-{
-	qemu::write("FAIL with delays ");
-	qemu::write_unsigned(first);
-	qemu::write(" and ");
-	qemu::write_unsigned(second);
+	qemu::write("FAIL with delay ");
+	qemu::write_unsigned(delay);
 	qemu::write(": ");
 	qemu::write(what);
 	qemu::write("\n");
 	qemu::finish(false);
 }
 
-std::uint32_t current_first_delay;
-
-/** @brief Reads the ring as the host does, and checks every intact event. */
-void read_as_host()
+/** @brief Whether the ring's slots hold what the interrupt copied. */
+bool same_as_copy()
 {
-	std::uint32_t const end = kymo::trace_ring.write_index.load(std::memory_order_acquire);
-	for (std::uint32_t index = end - slots; index != end; ++index)
-	{
-		kymo::slot const* const first = &kymo::trace_ring.slots[index & slot_mask];
-		std::uint32_t const head = first->header.load(std::memory_order_acquire);
-		std::uint16_t const type = static_cast<std::uint16_t>(head & 0xffffu);
-		if (head != ring_type::header(type, index, true))
-			continue;
-
-		alignas(4) unsigned char bytes[sizeof(large_event)];
-		std::size_t size;
-		if (type == kymo::type_id<lap_event>())
-			size = sizeof(lap_event);
-		else if (type == kymo::type_id<large_event>())
-			size = sizeof(large_event);
-		else
-			continue;
-		std::uint32_t const count = size == sizeof(large_event) ? kymo::slots_for<large_event> : 1;
-
-		bool whole = true;
-		std::memcpy(bytes, &first->words[1], size < kymo::head_payload ? size : kymo::head_payload);
-		for (std::uint32_t i = 1; i < count; ++i)
-		{
-			if (first[i].header.load(std::memory_order_acquire) != ring_type::header(type, index, false))
-				whole = false;
-			std::size_t const offset = kymo::head_payload + (i - 1) * kymo::tail_payload;
-			std::size_t const left = size - offset;
-			std::memcpy(bytes + offset, first[i].words, left < kymo::tail_payload ? left : kymo::tail_payload);
-		}
-		if (!whole)
-			continue;
-		std::uint32_t const after = kymo::trace_ring.write_index.load(std::memory_order_acquire);
-		if (after - index > slots)
-			continue;
-
-		++reads;
-		if (size == sizeof(lap_event))
-		{
-			lap_event e;
-			std::memcpy(&e, bytes, sizeof e);
-			if (e.check != ~e.seq)
-				fail("an intact one-slot event holds other bytes", current_first_delay, second_delay);
-		}
-		else
-		{
-			large_event e;
-			std::memcpy(&e, bytes, sizeof e);
-			for (std::uint32_t w = 0; w < 7; ++w)
-				if (e.words[w] != pattern(e.seq, w))
-					fail("an intact three-slot event holds other bytes", current_first_delay, second_delay);
-		}
-	}
+	auto const* const live = reinterpret_cast<unsigned char const volatile*>(kymo::trace_ring.slots);
+	for (std::size_t i = 0; i < sizeof copy; ++i)
+		if (live[i] != copy[i])
+			return false;
+	return true;
 }
 
 } // namespace
@@ -140,60 +93,81 @@ extern "C" [[gnu::noinline]] void write_large(std::uint32_t seq)
 	large_event e;
 	e.seq = seq;
 	for (std::uint32_t w = 0; w < 7; ++w)
-		e.words[w] = pattern(seq, w);
+		e.words[w] = seq + w;
 	kymo::emit(e);
 }
 
 void test_interrupt()
 {
-	if (stage++ == 0)
-	{
-		for (std::uint32_t i = 0; i < slots; ++i)
-		{
-			kymo::emit(lap_event{lap_seq, ~lap_seq});
-			++lap_seq;
-		}
-		// The second interrupt, from the same SysTick, after second_delay ticks.
-		// Enabled from its own handler, SysTick also pends at once under QEMU:
-		// that pending interrupt is cleared, so only the delayed one remains.
-		reg(0xE000E014u) = second_delay;
-		reg(0xE000E018u) = 0;
-		reg(0xE000E010u) = 7u;
-		reg(0xE000ED04u) = 1u << 25;
-	}
+	std::uint32_t const index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
+	std::uint32_t const head = kymo::trace_ring.slots[writer_index % slots].header.load(std::memory_order_relaxed);
+	if (index == writer_index)
+		where = landed::before;
+	else if (head == ring_type::header(kymo::type_id<large_event>(), writer_index, true))
+		where = landed::published;
 	else
-		read_as_host();
+		where = landed::unpublished;
+	for (std::uint32_t i = 0; i < slots; ++i)
+	{
+		kymo::emit(lap_event{lap_seq, ~lap_seq});
+		++lap_seq;
+	}
+	std::memcpy(copy, static_cast<void const*>(kymo::trace_ring.slots), sizeof copy);
 }
 
 void test_main()
 {
 	preempt::calibrate();
+	kymo::trace_ring.write_index.store(0u - 3 * slots, std::memory_order_relaxed);
 
-	std::uint32_t seq = 0;
-	std::uint32_t pairs = 0;
-	for (std::uint32_t first = 1;; ++first)
+	std::uint32_t seen[4] = {};
+	std::uint32_t published_counted = 0;
+	for (std::uint32_t delay = 1;; ++delay)
 	{
-		if (first > max_delay)
-			fail("the writer outlasted every delay", first, 0);
-		current_first_delay = first;
-		for (std::uint32_t second = 1;; ++second)
+		if (delay > max_delay)
+			fail("the writer outlasted every delay", delay);
+		writer_index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
+		std::uint32_t const lapped = kymo::trace_ring.lapped.load(std::memory_order_relaxed);
+		where = landed::none;
+		preempt::call(delay, write_large, delay);
+		if (where == landed::none)
+			break;
+		std::uint32_t const counted = kymo::trace_ring.lapped.load(std::memory_order_relaxed) - lapped;
+		bool const stale = !same_as_copy();
+		switch (where)
 		{
-			if (second > max_delay)
-				fail("the writer outlasted every second delay", first, second);
-			stage = 0;
-			second_delay = second;
-			preempt::call(first, write_large, seq++);
-			if (stage < 2)
-				break;   // the call ended before the second interrupt
-			++pairs;
+		case landed::before:
+			if (counted != 0)
+				fail("a writer the ring did not lap was counted", delay);
+			break;
+		case landed::unpublished:
+			if (!stale)
+				fail("a lapped writer wrote nothing after the lap", delay);
+			if (counted != 1)
+				fail("a writer that wrote into newer events' slots was not counted once", delay);
+			break;
+		case landed::published:
+			if (stale)
+				fail("a writer wrote after publishing its first slot", delay);
+			if (counted > 1)
+				fail("a writer was counted more than once", delay);
+			published_counted += counted;
+			break;
+		case landed::none:
+			break;
 		}
-		if (stage == 0)
-			break;   // the call ended before the first interrupt
+		++seen[static_cast<int>(where)];
 	}
-	qemu::write("pairs of interrupts: ");
-	qemu::write_unsigned(pairs);
-	qemu::write(", events read as intact: ");
-	qemu::write_unsigned(reads);
-	qemu::write("\n");
+	if (seen[1] == 0 || seen[2] == 0 || seen[3] == 0)
+		fail("an interrupt position was never reached", 0);
+	qemu::write("interrupted before the reservation: ");
+	qemu::write_unsigned(seen[1]);
+	qemu::write(", before publishing: ");
+	qemu::write_unsigned(seen[2]);
+	qemu::write(", after publishing: ");
+	qemu::write_unsigned(seen[3]);
+	qemu::write(" (counted ");
+	qemu::write_unsigned(published_counted);
+	qemu::write(")\n");
 	qemu::finish(true);
 }
