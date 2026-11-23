@@ -29,6 +29,14 @@
  * slot has not gone past it by a full ring: no writer could have reserved the
  * slot again in the meantime. Every index the host gives up on is lost, so
  * losses are counted exactly without any counter on the target.
+ *
+ * A writer preempted for a full lap writes on into slots newer events have
+ * reserved again. Once its first slot is published, it reads the write index
+ * again: past its index by more than a ring, it was lapped, and it counts
+ * itself in `lapped`. The reservation that lapped it came before its last
+ * write, so before that read: every writer that wrote into slots no longer
+ * its own is counted. One lapped between publishing and the read is counted
+ * too, though it wrote nothing stale.
  */
 #pragma once
 
@@ -84,6 +92,7 @@ struct ring
 	static constexpr std::size_t guard_slots = MaxEventSlots - 1;
 
 	std::atomic<std::uint32_t> write_index;   ///< next index to reserve
+	std::atomic<std::uint32_t> lapped;        ///< writers lapped by the ring, modulo 2^32
 	slot slots[Slots + guard_slots];
 
 	/** @brief The header of a slot of the event whose first slot is at @p index. */
@@ -109,6 +118,11 @@ struct ring
 		std::memcpy(&first->words[1], bytes, sizeof(Event) < head_payload ? sizeof(Event) : head_payload);
 		write_tails<Event>(first, header(type, index, false), bytes, std::make_index_sequence<count - 1>{});
 		first->header.store(header(type, index, true), std::memory_order_release);
+		// Keeps the read below after the store above: a writer lapped before
+		// its last write is never missed.
+		std::atomic_signal_fence(std::memory_order_seq_cst);
+		if (write_index.load(std::memory_order_relaxed) - index > Slots)
+			lapped.fetch_add(1, std::memory_order_relaxed);
 	}
 
 private:

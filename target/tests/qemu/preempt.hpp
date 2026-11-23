@@ -33,6 +33,17 @@ namespace preempt
 bool call(std::uint32_t delay, void (*function)(std::uint32_t), std::uint32_t argument);
 
 /**
+ * @brief Arms SysTick to interrupt after @p delay ticks (>= 1). From
+ *        test_interrupt(), lands a second interrupt on the code it returns
+ *        to, within the same call(); too short a delay expires before the
+ *        return, and interrupts the same instruction again.
+ */
+void arm(std::uint32_t delay);
+
+/// The instruction the last interrupt landed on.
+std::uint32_t interrupted();
+
+/**
  * @brief Checks that consecutive delays interrupt consecutive instructions of
  *        the called function, from its very first one.
  */

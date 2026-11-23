@@ -123,6 +123,10 @@ foreach(cpu cortex-m33 cortex-m4)
 		# Lock-free writes: an interrupt that emits, at every instruction of an emit.
 		kymo_qemu_test(emit-preemption-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES emit/preemption.cpp qemu/preempt.cpp)
+		# A writer preempted for a full lap: what the host takes as intact is,
+		# and the writer counts itself lapped.
+		kymo_qemu_test(emit-lap-${cpu}-${level} ${cpu} ${level} ICOUNT
+			SOURCES emit/lap.cpp qemu/preempt.cpp)
 		# The control word: value from reset, filter by family, freeze, and
 		# enable() and disable() interrupted at every instruction.
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
@@ -155,6 +159,33 @@ foreach(test layout decode record symbols)
 				set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
 			endif()
 		endforeach()
+	endforeach()
+endforeach()
+
+# - record-lap: writers held for more than a lap while the host records,
+#   which follows (it reads each held writer before the lap) or falls behind
+#   (the lap comes between two of its reads).
+foreach(cpu cortex-m33 cortex-m4)
+	foreach(lap follows behind)
+		if(lap STREQUAL follows)
+			set(hold_pause 1000000)
+		else()
+			set(hold_pause 0)
+		endif()
+		set(name record-lap-${lap}-${cpu}-Os)
+		kymo_qemu_image(${name} ${cpu} Os SOURCES record/lap.cpp qemu/preempt.cpp
+			DEFINITIONS KYMO_TEST_HOLD_PAUSE=${hold_pause})
+		if(KYMO_HOST)
+			kymo_qemu_command(${name}
+				${CMAKE_CURRENT_SOURCE_DIR}/record/record.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+				--image $<TARGET_FILE:${name}> --host ${KYMO_HOST} --lap ${lap} --icount-shift ${KYMO_ICOUNT_SHIFT})
+			# Whether the host follows depends on how fast it reads: alone,
+			# not slowed down by tests run alongside.
+			set_tests_properties(${name} PROPERTIES RUN_SERIAL ON)
+		else()
+			add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
+			set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+		endif()
 	endforeach()
 endforeach()
 

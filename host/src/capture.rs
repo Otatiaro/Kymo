@@ -10,6 +10,8 @@
 //! 2 event u32 index, u8 slot count, the event's slots as read (16 bytes each)
 //! 3 lost  u32 first index lost, u32 index after the last one
 //! 4 end   u32 index recording stopped at
+//! 5 suspect u32 write index of the pass before, u32 of the pass that found
+//!         them, u32 writers lapped meanwhile that no danger accounts for
 //! ```
 //!
 //! A pass record comes before the events and losses that pass settled.
@@ -33,6 +35,7 @@ pub enum Record<'a> {
     Pass { host_ns: u64, write_index: u32 },
     Event { index: u32, slots: &'a [u8] },
     Lost { from: u32, to: u32 },
+    Suspect { from: u32, to: u32, writers: u32 },
     End { next: u32 },
 }
 
@@ -71,6 +74,12 @@ impl Writer {
                 self.file.write_all(&[3])?;
                 self.file.write_all(&from.to_le_bytes())?;
                 self.file.write_all(&to.to_le_bytes())?;
+            }
+            Record::Suspect { from, to, writers } => {
+                self.file.write_all(&[5])?;
+                self.file.write_all(&from.to_le_bytes())?;
+                self.file.write_all(&to.to_le_bytes())?;
+                self.file.write_all(&writers.to_le_bytes())?;
             }
             Record::End { next } => {
                 self.file.write_all(&[4])?;
@@ -127,6 +136,11 @@ pub fn read(bytes: &[u8]) -> Result<(Header, Vec<Record<'_>>)> {
                 to: cursor.u32()?,
             },
             4 => Record::End { next: cursor.u32()? },
+            5 => Record::Suspect {
+                from: cursor.u32()?,
+                to: cursor.u32()?,
+                writers: cursor.u32()?,
+            },
             tag => return Err(format!("unknown record tag {tag} in the capture").into()),
         };
         records.push(record);

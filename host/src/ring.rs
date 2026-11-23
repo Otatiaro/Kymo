@@ -15,6 +15,8 @@ const SLOT_WORDS: usize = 4;
 const HEAD_BIT: u32 = 1 << 16;
 const LAP_SHIFT: u32 = 17;
 const LAP_MASK: u32 = 0x7fff;
+/// The write index and the count of writers lapped, before the slots.
+const COUNTERS: u32 = 8;
 
 /// Where the ring is and how many slots it has, from its ELF symbol.
 #[derive(Clone, Copy, Debug)]
@@ -26,7 +28,7 @@ pub struct Layout {
 impl Layout {
     pub fn from_symbol(symbol: Symbol) -> Result<Self> {
         let slots = symbol.size.checked_sub(4).map(|bytes| bytes / SLOT_BYTES).unwrap_or(0);
-        if slots < 2 || !slots.is_power_of_two() || 4 + slots * SLOT_BYTES != symbol.size {
+        if slots < 2 || !slots.is_power_of_two() || COUNTERS + slots * SLOT_BYTES != symbol.size {
             return Err(format!("kymo_ring has an unexpected size of {} bytes", symbol.size).into());
         }
         Ok(Self {
@@ -36,11 +38,11 @@ impl Layout {
     }
 
     pub fn bytes(&self) -> u32 {
-        4 + self.slots * SLOT_BYTES
+        COUNTERS + self.slots * SLOT_BYTES
     }
 
     fn slot_address(&self, index: u32) -> u32 {
-        self.address + 4 + (index & (self.slots - 1)) * SLOT_BYTES
+        self.address + COUNTERS + (index & (self.slots - 1)) * SLOT_BYTES
     }
 
     /// The header a slot holds once the event at `index` is published.
