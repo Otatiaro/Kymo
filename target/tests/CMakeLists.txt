@@ -22,7 +22,7 @@ find_program(KYMO_SIZE arm-none-eabi-size HINTS "${bin}" REQUIRED)
 # translation units sharing a type, linked with --gc-sections and no linker
 # script, where any linker warning fails the build.
 foreach(cpu cortex-m33 cortex-m4)
-	foreach(variant O0 Os O2 Os-lto)
+	foreach(variant Og Os O2 Os-lto)
 		set(target type-id-${cpu}-${variant})
 		string(REPLACE "-lto" "" level ${variant})
 		set(options -mcpu=${cpu} -mthumb -${level})
@@ -83,9 +83,7 @@ function(kymo_qemu_image name cpu level)
 	add_executable(${name} ${arg_SOURCES} qemu/startup.cpp)
 	set_target_properties(${name} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
 	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-	# libstdc++ 16 asserts at -O0, and its assertion handler needs the
-	# unwinder: a bare-metal image turns the assertions off.
-	target_compile_definitions(${name} PRIVATE _GLIBCXX_NO_ASSERTIONS ${arg_DEFINITIONS})
+	target_compile_definitions(${name} PRIVATE ${arg_DEFINITIONS})
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections
@@ -119,7 +117,7 @@ function(kymo_qemu_test name cpu level)
 endfunction()
 
 foreach(cpu cortex-m33 cortex-m4)
-	foreach(level O0 Os O2)
+	foreach(level Og Os O2)
 		# Lock-free writes: an interrupt that emits, at every instruction of an emit.
 		kymo_qemu_test(emit-preemption-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES emit/preemption.cpp qemu/preempt.cpp)
@@ -146,7 +144,7 @@ endforeach()
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
 foreach(test layout decode record symbols)
 	foreach(cpu cortex-m33 cortex-m4)
-		foreach(level O0 Os Os-lto)
+		foreach(level Og Os Os-lto)
 			set(name ${test}-${cpu}-${level})
 			kymo_qemu_image(${name} ${cpu} ${level} SOURCES ${test}/${test}.cpp)
 			if(KYMO_HOST)
@@ -220,8 +218,8 @@ endforeach()
 
 # What an emit costs, in instructions executed under QEMU, against the
 # threshold: 50 for a one-slot event, 15 for each slot more. QEMU counts
-# instructions; cycles are measured on hardware. Optimised builds only: -O0
-# is not what ships.
+# instructions; cycles are measured on hardware. The builds that ship: -Os and
+# -O2, not the debug build.
 set(KYMO_COST_EVENT 50 CACHE STRING "Most instructions a one-slot event may cost")
 set(KYMO_COST_SLOT 15 CACHE STRING "Most instructions each slot more may cost")
 foreach(cpu cortex-m33 cortex-m4)
