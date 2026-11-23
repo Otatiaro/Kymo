@@ -8,6 +8,7 @@ pub mod decode;
 pub mod elf;
 pub mod events;
 pub mod model;
+pub mod opsy;
 pub mod record;
 mod ring;
 mod swo;

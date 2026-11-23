@@ -1,14 +1,15 @@
 //! Kymo command line.
 
+use kymo::model::Trace;
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{bench, capture, decode, elf, events, record};
+use kymo::{bench, capture, decode, elf, events, opsy, record};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "\
 usage: kymo events <elf>
-       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>]
+       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--opsy]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
 
@@ -19,7 +20,13 @@ decode: lists the events a copy of a trace ring holds, oldest first; the
 copy is the bytes of a kymo::ring object, dumped from a stopped target
 running the image. Given a capture made by kymo record --out, prints what
 kymo record printed while making it, but for the seconds: they are
-recomputed over the whole capture.
+recomputed over the whole capture. With --opsy, prints instead OpSy's spans
+in a capture of an image built with Kymo's OpSy hooks: a line each for a task
+on the core (`run`, the idle task as `task=idle`), a handler running
+(`interrupt`, `depth` handlers below it), a mutex held (`hold`) or waited
+for (`wait`), from one event index to another; `lost` for an edge hidden by a
+loss, `to=open` for a span still open at the end. Then a line
+`contradiction <index>` for each event against the order OpSy's hooks keep.
 
 The ring of a copy is the image's only kymo::ring object, or the one
 --channel names by its qualified name (e.g. app::trace_ring) when the image
@@ -99,7 +106,12 @@ fn run() -> Result<()> {
             };
             let mut channel = None;
             let mut clock = None;
+            let mut spans = false;
             while let Some(option) = arguments.next() {
+                if option == "--opsy" {
+                    spans = true;
+                    continue;
+                }
                 let value = arguments.next().ok_or_else(|| format!("{option} needs a value"))?;
                 match option.as_str() {
                     "--channel" => channel = Some(value),
@@ -113,7 +125,22 @@ fn run() -> Result<()> {
                 if channel.is_some() {
                     return Err("--channel names the ring of a copy; a capture names its own".into());
                 }
+                if spans {
+                    let trace = Trace::read(&catalogue, &bytes, clock)?;
+                    let mut opsy = opsy::Opsy::new(&catalogue, trace.first)?;
+                    if !opsy.traced() {
+                        return Err("the image has no OpSy hook events".into());
+                    }
+                    opsy.add(&trace.elements, 0);
+                    for line in opsy::lines(&trace, &opsy) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
                 return record::print_capture(&catalogue, &bytes, clock);
+            }
+            if spans {
+                return Err("--opsy reads a capture, not a copy of a ring".into());
             }
             let ring = catalogue.ring(channel.as_deref())?;
             let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;

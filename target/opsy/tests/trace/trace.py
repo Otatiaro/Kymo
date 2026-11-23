@@ -24,7 +24,10 @@ that:
 - every task_priority_changed moves the task's priority away from the last
   one task_added or task_priority_changed gave it, and the suite's mutex
   donations make the priority both rise and drop;
-- every family on by default was recorded.
+- every family on by default was recorded;
+- `kymo decode --opsy` on the capture of the recording gives the spans
+  computed here from its event lines: tasks on the core, handlers running,
+  mutexes held and waited for.
 
 After a loss, the running task, the waiting ones, the open interrupts and the
 priorities are unknown until seen again: a check that needs them is skipped
@@ -38,6 +41,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "tests", "record"))
@@ -189,6 +193,109 @@ def check(output: str) -> list[str]:
         errors.append(f"the recording left a check unexercised: {counts}")
     return errors
 
+def spans(output: str) -> list[str]:
+    """OpSy's spans in the event lines of a recording, as kymo decode --opsy
+    prints them, sorted.
+
+    A task runs from its task_started, or the idle task from enter_idle, to
+    the next of either. A handler runs from its isr_enter to the isr_exit
+    that closes it, at the depth of the handlers still open below it. A mutex
+    is held from mutex_taken to mutex_released by the same task, and waited
+    for from mutex_blocked to its waiter's mutex_taken, or the waiter's
+    task_terminated. A loss ends whatever is open; an exit or a release seen
+    after one, with nothing open to close, starts at it. An event against
+    that order is a contradiction.
+    """
+    out = []
+    lost = False
+    running = None  # (task, since), or None while unknown
+    isrs = []  # (handler, since)
+    held = {}  # mutex: (owner, since)
+    waits = {}  # (mutex, waiter): since
+    for line, name, fields in parse(output):
+        if name is None:
+            if running is not None:
+                out.append(f"run from={running[1]} to=lost task={running[0]}")
+            for depth, (handler, since) in enumerate(isrs):
+                out.append(f"interrupt from={since} to=lost depth={depth} handler={handler}")
+            for mutex, (owner, since) in held.items():
+                out.append(f"hold from={since} to=lost mutex={mutex} task={owner}")
+            for (mutex, waiter), since in waits.items():
+                out.append(f"wait from={since} to=lost mutex={mutex} task={waiter}")
+            lost, running, isrs, held, waits = True, None, [], {}, {}
+            continue
+        at = line.split(" ")[1]
+        name = name[len(PREFIX):] if name.startswith(PREFIX) else name
+        values = dict(fields)
+        if name in ("task_started", "enter_idle"):
+            task = values.get("task", "idle")
+            if running is not None:
+                out.append(f"run from={running[1]} to={at} task={running[0]}")
+            running = (task, at)
+        elif name == "isr_enter":
+            isrs.append((values["handler"], at))
+        elif name == "isr_exit":
+            handler = values["handler"]
+            if isrs and isrs[-1][0] == handler:
+                since = isrs.pop()[1]
+            elif not isrs and lost:
+                since = "lost"
+            else:
+                out.append(f"contradiction {at}")
+                continue
+            out.append(f"interrupt from={since} to={at} depth={len(isrs)} handler={handler}")
+        elif name == "mutex_taken":
+            mutex, owner = values["mutex"], values["owner"]
+            if mutex in held:
+                out.append(f"contradiction {at}")
+                continue
+            if (mutex, owner) in waits:
+                out.append(f"wait from={waits.pop((mutex, owner))} to={at} mutex={mutex} task={owner}")
+            held[mutex] = (owner, at)
+        elif name == "mutex_released":
+            mutex, owner = values["mutex"], values["owner"]
+            if mutex in held and held[mutex][0] == owner:
+                since = held.pop(mutex)[1]
+            elif mutex not in held and lost:
+                since = "lost"
+            else:
+                out.append(f"contradiction {at}")
+                continue
+            out.append(f"hold from={since} to={at} mutex={mutex} task={owner}")
+        elif name == "mutex_blocked":
+            key = (values["mutex"], values["waiter"])
+            if key in waits:
+                out.append(f"contradiction {at}")
+                continue
+            waits[key] = at
+        elif name == "task_terminated":
+            for mutex, waiter in [key for key in waits if key[1] == values["task"]]:
+                out.append(f"wait from={waits.pop((mutex, waiter))} to={at} mutex={mutex} task={waiter}")
+    if running is not None:
+        out.append(f"run from={running[1]} to=open task={running[0]}")
+    for depth, (handler, since) in enumerate(isrs):
+        out.append(f"interrupt from={since} to=open depth={depth} handler={handler}")
+    for mutex, (owner, since) in held.items():
+        out.append(f"hold from={since} to=open mutex={mutex} task={owner}")
+    for (mutex, waiter), since in waits.items():
+        out.append(f"wait from={since} to=open mutex={mutex} task={waiter}")
+    return sorted(out)
+
+
+def check_spans(output: str, decoded: str) -> list[str]:
+    """kymo decode --opsy's spans against those computed here, each kind seen."""
+    expected, got = spans(output), sorted(decoded.splitlines())
+    kinds = {kind: sum(line.startswith(kind + " ") for line in expected)
+             for kind in ("run", "interrupt", "hold", "wait")}
+    print(f"spans: {kinds}, {len(got)} printed by kymo decode --opsy")
+    errors = [f"expected, not printed: {line}" for line in sorted(set(expected) - set(got))]
+    errors += [f"printed, not expected: {line}" for line in sorted(set(got) - set(expected))]
+    if not errors and expected != got:
+        errors.append("the same spans, not as many times each")
+    if 0 in kinds.values():
+        errors.append(f"the recording left a kind of span unexercised: {kinds}")
+    return errors
+
 
 def symbol(image: str, name: str) -> int:
     """The address of a function of an ELF32 little-endian image, from its symbol table."""
@@ -242,6 +349,8 @@ def main() -> int:
     args = parser.parse_args()
 
     exit_address = symbol(args.image, EXIT)
+    directory = tempfile.TemporaryDirectory()
+    capture = os.path.join(directory.name, "suite.kcap")
     record_port, gdb_port = free_port(), free_port()
     # -S: paused until kymo record runs. align=on: the guest's clock does not
     # run ahead of the host's, so the passes keep up with it.
@@ -269,7 +378,7 @@ def main() -> int:
         gdb = Gdb(gdb_port)
         record = subprocess.Popen(
             [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{record_port}",
-             "--elf", args.image],
+             "--elf", args.image, "--out", capture],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         reader = threading.Thread(target=read, args=(record.stdout,))
         reader.start()
@@ -295,6 +404,13 @@ def main() -> int:
         print("kymo record failed" if record.returncode != 0 else f"stopped short of {EXIT}")
         return 1
     errors = check(stdout)
+    decoded = subprocess.run([args.host, "decode", args.image, capture, "--opsy"],
+                             capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    if decoded.returncode != 0:
+        errors.append(f"kymo decode --opsy failed: {decoded.stderr.strip()}")
+    else:
+        errors += check_spans(stdout, decoded.stdout)
+    directory.cleanup()
     for error in errors[:20]:
         print(error)
     print("RESULT:", "FAIL" if errors else "PASS")
