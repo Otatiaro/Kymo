@@ -9,7 +9,9 @@ struct event_b { std::uint32_t value; };
 struct event_c { std::uint32_t value; };
 
 /// Where each translation unit stores the ids it computes.
-extern volatile std::uint16_t ids_first[3];   // a, b, a again
-extern volatile std::uint16_t ids_second[2];  // b, c
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): volatile stores, which GCC 14 to 16 drop under -flto when made through std::get (a constexpr function returning a volatile reference)
+extern std::uint16_t volatile ids_first[3];    // a, b, a again
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): volatile stores, which GCC 14 to 16 drop under -flto when made through std::get (a constexpr function returning a volatile reference)
+extern std::uint16_t volatile ids_second[2];   // b, c
 
 void second();

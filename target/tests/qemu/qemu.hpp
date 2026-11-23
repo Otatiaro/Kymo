@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace qemu
@@ -12,6 +14,7 @@ namespace qemu
 
 inline int semihosting_call(int operation, void const* argument)
 {
+	// NOLINTNEXTLINE(misc-const-correctness): the asm statement writes it
 	register int r0 asm("r0") = operation;
 	register void const* r1 asm("r1") = argument;
 	asm volatile("bkpt 0xAB" : "+r"(r0) : "r"(r1) : "memory");
@@ -26,22 +29,19 @@ inline void write(char const* text)
 
 inline void write_unsigned(std::uint32_t value)
 {
-	char digits[11];
-	int index = 10;
-	digits[index] = '\0';
-	do
-	{
-		digits[--index] = static_cast<char>('0' + value % 10);
-		value /= 10;
-	} while (value != 0);
+	std::array<char, 11> digits{};   // the last one stays the terminator
+	std::size_t index = digits.size() - 1;
+	for (; value >= 10; value /= 10)
+		digits[--index] = static_cast<char>('0' + (value % 10));
+	digits[--index] = static_cast<char>('0' + value);
 	write(&digits[index]);
 }
 
 /** @brief SYS_EXIT_EXTENDED: QEMU exits with status 0 for 0, 1 otherwise. */
 [[noreturn]] inline void exit(int code)
 {
-	std::uint32_t const parameters[2] = {0x20026u, static_cast<std::uint32_t>(code)};   // ADP_Stopped_ApplicationExit
-	semihosting_call(0x20, parameters);
+	std::array<std::uint32_t, 2> const parameters{0x20026U, static_cast<std::uint32_t>(code)};   // ADP_Stopped_ApplicationExit
+	semihosting_call(0x20, parameters.data());
 	for (;;)
 	{
 	}

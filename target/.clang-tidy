@@ -1,0 +1,51 @@
+---
+# Every check of these groups runs, and any finding fails the build. A check
+# is left out only for a reason that holds for the whole target code:
+#
+# - modernize-use-trailing-return-type: a style, not a modernisation; the code
+#   writes the return type first, as the standard library does.
+# - portability-avoid-pragma-once: every compiler Kymo supports has it.
+# - portability-no-assembler: the type id is a MOVW of a link-time symbol, and
+#   the tests' startup and semihosting need assembly; there is no other way.
+# - readability-braces-around-statements, hicpp-braces-around-statements:
+#   a single statement goes without braces, as in OpSy.
+# - cppcoreguidelines-pro-bounds-constant-array-index,
+#   cppcoreguidelines-pro-bounds-avoid-unchecked-container-access: they ask
+#   for at(), which throws, and the target builds without exceptions; ring
+#   indexes are masked to the ring.
+#
+# Where the target must do what a check forbids (a register at a fixed
+# address, the bytes of an event), the line says why in a NOLINT comment.
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  hicpp-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -portability-avoid-pragma-once,
+  -portability-no-assembler,
+  -readability-braces-around-statements,
+  -hicpp-braces-around-statements,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
+CheckOptions:
+  # Two adjacent words (a type and an index) are the ring's own vocabulary;
+  # three or more of a kind in a row must be a struct.
+  bugprone-easily-swappable-parameters.MinimumLength: 3
+  # 1U << 25: a positive literal is no signed operand.
+  bugprone-signed-bitwise.IgnorePositiveIntegerLiterals: true
+  # Loop indexes, and names that are words of the architecture (r0, pc).
+  readability-identifier-length.IgnoredVariableNames: '^(i|k|n|id|r[0-9]|pc)$'
+  readability-identifier-length.IgnoredParameterNames: '^(i|k|n|id)$'
+  readability-identifier-length.IgnoredLoopCounterNames: '^(i|k|n|w)$'
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*[/\\]target[/\\].*'
+...

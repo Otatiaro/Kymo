@@ -25,6 +25,8 @@
 
 #include <kymo/kymo.hpp>
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -41,11 +43,11 @@ struct lap_event
 struct large_event
 {
 	std::uint32_t seq;
-	std::uint32_t words[7];
+	std::array<std::uint32_t, 7> words;
 };
 
-static_assert(kymo::slots_for<lap_event> == 1, "");
-static_assert(kymo::slots_for<large_event> == 3, "");
+static_assert(kymo::slots_for<lap_event> == 1);
+static_assert(kymo::slots_for<large_event> == 3);
 
 constexpr std::uint32_t slots = KYMO_RING_SLOTS;
 constexpr std::uint32_t max_delay = 100000;
@@ -53,7 +55,7 @@ constexpr std::uint32_t max_delay = 100000;
 using ring_type = decltype(kymo::trace_ring);
 
 /// Where the writer stood when the interrupt landed.
-enum class landed
+enum class landed : std::uint8_t
 {
 	none,        ///< the call ended first
 	before,      ///< before the writer reserved its slots
@@ -64,7 +66,8 @@ enum class landed
 std::uint32_t writer_index;   // the index the writer reserves
 landed volatile where;
 std::uint32_t lap_seq;
-alignas(ring_type) unsigned char copy[sizeof(kymo::trace_ring.slots)];
+using slot_bytes = std::array<unsigned char, sizeof(kymo::trace_ring.slots)>;
+slot_bytes copy;
 
 [[noreturn]] void fail(char const* what, std::uint32_t delay)
 {
@@ -79,22 +82,20 @@ alignas(ring_type) unsigned char copy[sizeof(kymo::trace_ring.slots)];
 /** @brief Whether the ring's slots hold what the interrupt copied. */
 bool same_as_copy()
 {
-	auto const* const live = reinterpret_cast<unsigned char const volatile*>(kymo::trace_ring.slots);
-	for (std::size_t i = 0; i < sizeof copy; ++i)
-		if (live[i] != copy[i])
-			return false;
-	return true;
+	slot_bytes live{};
+	std::memcpy(live.data(), static_cast<void const*>(kymo::trace_ring.slots.data()), live.size());
+	return live == copy;
 }
 
 } // namespace
 
 extern "C" [[gnu::noinline]] void write_large(std::uint32_t seq)
 {
-	large_event e;
-	e.seq = seq;
-	for (std::uint32_t w = 0; w < 7; ++w)
-		e.words[w] = seq + w;
-	kymo::emit(e);
+	large_event event{};
+	event.seq = seq;
+	for (std::uint32_t w = 0; w < event.words.size(); ++w)
+		event.words[w] = seq + w;
+	kymo::emit(event);
 }
 
 void test_interrupt()
@@ -112,15 +113,15 @@ void test_interrupt()
 		kymo::emit(lap_event{lap_seq, ~lap_seq});
 		++lap_seq;
 	}
-	std::memcpy(copy, static_cast<void const*>(kymo::trace_ring.slots), sizeof copy);
+	std::memcpy(copy.data(), static_cast<void const*>(kymo::trace_ring.slots.data()), copy.size());
 }
 
 void test_main()
 {
 	preempt::calibrate();
-	kymo::trace_ring.write_index.store(0u - 3 * slots, std::memory_order_relaxed);
+	kymo::trace_ring.write_index.store(0U - (3 * slots), std::memory_order_relaxed);
 
-	std::uint32_t seen[4] = {};
+	std::array<std::uint32_t, 4> seen{};
 	std::uint32_t published_counted = 0;
 	for (std::uint32_t delay = 1;; ++delay)
 	{
@@ -156,7 +157,7 @@ void test_main()
 		case landed::none:
 			break;
 		}
-		++seen[static_cast<int>(where)];
+		++seen[static_cast<std::size_t>(where)];
 	}
 	if (seen[1] == 0 || seen[2] == 0 || seen[3] == 0)
 		fail("an interrupt position was never reached", 0);

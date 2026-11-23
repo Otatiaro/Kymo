@@ -31,10 +31,13 @@
  * lap falls between two of its reads.
  */
 #include "events.hpp"
-
 #include "../qemu/preempt.hpp"
 #include "../qemu/qemu.hpp"
 
+#include <kymo/kymo.hpp>
+
+#include <array>
+#include <atomic>
 #include <cstdint>
 
 struct held
@@ -50,7 +53,7 @@ using ring_type = decltype(kymo::trace_ring);
 
 constexpr std::uint32_t slots = KYMO_RING_SLOTS;
 constexpr std::uint32_t hold_every = 16;
-constexpr std::uint32_t held_events = slots + slots / 4;
+constexpr std::uint32_t held_events = slots + (slots / 4);
 /// Loop rounds after each event of thread mode: the host keeps up.
 constexpr std::uint32_t pause = 200000;
 constexpr std::uint32_t hold_pause = KYMO_TEST_HOLD_PAUSE;
@@ -61,13 +64,13 @@ constexpr std::uint32_t max_slots = 4;
 struct slot_copy
 {
 	std::uint32_t header;
-	std::uint32_t words[3];
+	std::array<std::uint32_t, 3> words;
 };
 
 std::uint32_t writer_index;   // the index the writer reserves
 std::uint32_t writer_type;
 bool volatile resumed;        // the next interrupt lands on the resumed writer
-slot_copy before[max_slots];  // the writer's slots when it resumes
+std::array<slot_copy, max_slots> before;   // the writer's slots when it resumes
 /// The shortest delay that outlasts the return from the interrupt: grown
 /// each time a step lands on the instruction it stepped from.
 std::uint32_t step = 1;
@@ -140,8 +143,10 @@ void test_interrupt()
 		return;
 	for (std::uint32_t i = 0; i < held_events; ++i)
 	{
-		kymo::emit(held{kymo::trace_ring.write_index.load(std::memory_order_relaxed),
-		                kymo::trace_ring.lapped.load(std::memory_order_relaxed)});
+		kymo::emit(held{
+			kymo::trace_ring.write_index.load(std::memory_order_relaxed),
+			kymo::trace_ring.lapped.load(std::memory_order_relaxed),
+		});
 		if (i < held_events - (slots - 1))
 			wait(hold_pause);
 	}
@@ -166,7 +171,9 @@ void test_main()
 		writer_index = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
 		writer_type = type_of(n);
 		if (n % hold_every != hold_every - 1)
+		{
 			write_event(n);
+		}
 		else
 		{
 			stride = 0;

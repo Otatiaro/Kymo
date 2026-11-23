@@ -13,6 +13,7 @@
 
 #include <kymo/kymo.hpp>
 
+#include <atomic>
 #include <cstdint>
 
 namespace
@@ -35,9 +36,9 @@ struct loss_event
 	std::uint32_t lost;
 };
 
-static_assert(kymo::family_of<app_event> == kymo::family::application, "");
-static_assert(kymo::family_of<switch_event> == kymo::family::scheduling, "");
-static_assert(kymo::family_of<loss_event> == kymo::family::meta, "");
+static_assert(kymo::family_of<app_event> == kymo::family::application);
+static_assert(kymo::family_of<switch_event> == kymo::family::scheduling);
+static_assert(kymo::family_of<loss_event> == kymo::family::meta);
 static_assert(sizeof(switch_event) == 4, "kymo_family takes no room");
 
 constexpr std::uint32_t all_but_meta = ~kymo::bit(kymo::family::meta);
@@ -75,7 +76,7 @@ void expect(Event const& event, bool recorded)
 	std::uint32_t const before = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
 	kymo::emit(event);
 	std::uint32_t const written = kymo::trace_ring.write_index.load(std::memory_order_relaxed) - before;
-	if (written != (recorded ? 1u : 0u))
+	if (written != (recorded ? 1U : 0U))
 		fail(recorded ? "the event was not recorded" : "the event was recorded");
 }
 
@@ -111,12 +112,12 @@ void run(char const* name, void (*writer)(std::uint32_t), std::uint32_t start,
 
 } // namespace
 
-extern "C" [[gnu::noinline]] void enable_application(std::uint32_t)
+extern "C" [[gnu::noinline]] void enable_application(std::uint32_t /*unused*/)
 {
 	kymo::enable(kymo::family::application);
 }
 
-extern "C" [[gnu::noinline]] void disable_application(std::uint32_t)
+extern "C" [[gnu::noinline]] void disable_application(std::uint32_t /*unused*/)
 {
 	kymo::disable(kymo::family::application);
 }

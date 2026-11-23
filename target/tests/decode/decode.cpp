@@ -22,6 +22,8 @@
 
 #include <kymo/kymo.hpp>
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -47,6 +49,7 @@ struct pair
 struct reading
 {
 	level grade;
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the host decodes C arrays as well as std::array
 	std::int16_t values[3];
 	void const* from;
 	std::uint8_t id;
@@ -60,13 +63,13 @@ struct point
 
 struct span
 {
-	std::uint32_t words[6];
+	std::array<std::uint32_t, 6> words;
 };
 
 struct block
 {
 	point at;
-	std::uint32_t words[10];
+	std::array<std::uint32_t, 10> words;
 };
 
 namespace
@@ -82,13 +85,14 @@ void write_signed(std::int32_t value)
 {
 	if (value < 0)
 		qemu::write("-");
-	qemu::write_unsigned(value < 0 ? 0u - static_cast<std::uint32_t>(value) : static_cast<std::uint32_t>(value));
+	qemu::write_unsigned(value < 0 ? 0U - static_cast<std::uint32_t>(value) : static_cast<std::uint32_t>(value));
 }
 
-void write_list(std::uint32_t const* words, std::size_t count)
+template<std::size_t Count>
+void write_list(std::array<std::uint32_t, Count> const& words)
 {
 	qemu::write("[");
-	for (std::size_t n = 0; n < count; ++n)
+	for (std::size_t n = 0; n < Count; ++n)
 	{
 		if (n > 0)
 			qemu::write(",");
@@ -122,7 +126,7 @@ void emitted(char const* type, Event const& event, Fields fields)
 	kymo::emit(event);
 	// QEMU has no cycle counter: every timestamp reads 0. Each event gets
 	// its own, for the host to show it read the right word.
-	std::uint32_t const timestamp = 0x10000000u + index * 7;
+	std::uint32_t const timestamp = 0x10000000U + (index * 7);
 	kymo::trace_ring.slots[index % KYMO_RING_SLOTS].words[0] = timestamp;
 	qemu::write("emitted ");
 	qemu::write_unsigned(index);
@@ -152,7 +156,7 @@ void emit_number(std::uint32_t n)
 		});
 		break;
 	case 1:
-		emitted("pair", pair{-static_cast<std::int32_t>(n) * 1000, 0xfffffff0u + n}, [](pair const& event) {
+		emitted("pair", pair{-static_cast<std::int32_t>(n) * 1000, 0xfffffff0U + n}, [](pair const& event) {
 			qemu::write(" x=");
 			write_signed(event.x);
 			qemu::write(" y=");
@@ -186,10 +190,10 @@ void emit_number(std::uint32_t n)
 	{
 		span event{};
 		for (std::uint32_t k = 0; k < 6; ++k)
-			event.words[k] = n * 100 + k;
+			event.words[k] = (n * 100) + k;
 		emitted("span", event, [](span const& event) {
 			qemu::write(" words=");
-			write_list(event.words, 6);
+			write_list(event.words);
 		});
 		break;
 	}
@@ -197,46 +201,49 @@ void emit_number(std::uint32_t n)
 	{
 		block event{{static_cast<std::int16_t>(n), static_cast<std::int16_t>(-static_cast<int>(n))}, {}};
 		for (std::uint32_t k = 0; k < 10; ++k)
-			event.words[k] = 0x01010101u * k + n;
+			event.words[k] = (0x01010101U * k) + n;
 		emitted("block", event, [](block const& event) {
 			qemu::write(" at={x=");
 			write_signed(event.at.x);
 			qemu::write(" y=");
 			write_signed(event.at.y);
 			qemu::write("} words=");
-			write_list(event.words, 10);
+			write_list(event.words);
 		});
 		break;
 	}
 	}
 }
 
-using ring_bytes = unsigned char[sizeof(kymo::trace_ring)];
+using ring_type = decltype(kymo::trace_ring);
+using ring_bytes = std::array<unsigned char, sizeof(ring_type)>;
 
-void copy(unsigned char* to, std::size_t offset, std::size_t size)
+/// Copies bytes @p offset to @p offset + @p size of the ring, as the host reads them.
+void copy(ring_bytes& out, std::size_t offset, std::size_t size)
 {
-	auto const* const from = reinterpret_cast<unsigned char const volatile*>(&kymo::trace_ring);
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the ring's bytes
+	auto const* const ring = reinterpret_cast<unsigned char const volatile*>(&kymo::trace_ring);
 	for (std::size_t n = offset; n < offset + size; ++n)
-		to[n] = from[n];
+		out[n] = ring[n];   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): within the ring
 }
 
 void report(char const* label, ring_bytes const& bytes)
 {
-	char text[2 * sizeof(ring_bytes) + 1];
-	for (std::size_t n = 0; n < sizeof(ring_bytes); ++n)
+	constexpr std::array<char, 16> hex{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+	std::array<char, (2 * sizeof(ring_bytes)) + 1> text{};   // the last one stays the terminator
+	for (std::size_t n = 0; n < bytes.size(); ++n)
 	{
-		text[2 * n] = "0123456789abcdef"[bytes[n] >> 4];
-		text[2 * n + 1] = "0123456789abcdef"[bytes[n] & 0xf];
+		text[2 * n] = hex[bytes[n] / 16U];
+		text[(2 * n) + 1] = hex[bytes[n] % 16U];
 	}
-	text[2 * sizeof(ring_bytes)] = '\0';
 	qemu::write(label);
 	qemu::write(" ");
-	qemu::write(text);
+	qemu::write(text.data());
 	qemu::write("\n");
 }
 
-ring_bytes stopped;
-ring_bytes live;
+ring_bytes stopped{};
+ring_bytes live{};
 
 } // namespace
 
@@ -244,24 +251,20 @@ void test_main()
 {
 	static_assert(kymo::slots_for<tiny> == 1 && kymo::slots_for<pair> == 1 && kymo::slots_for<reading> == 2
 	              && kymo::slots_for<span> == 3 && kymo::slots_for<block> == 4);
-	constexpr std::size_t slots = sizeof(kymo::trace_ring.slots) / sizeof(kymo::trace_ring.slots[0]);
-	auto const offset = [](void const* member) {
-		return static_cast<std::size_t>(reinterpret_cast<unsigned char const*>(member)
-		                                - reinterpret_cast<unsigned char const*>(&kymo::trace_ring));
-	};
+	constexpr std::size_t slots = kymo::trace_ring.slots.size();
 
 	std::uint32_t n = 0;
 	for (; n < before_copies; ++n)
 		emit_number(n);
 
-	copy(stopped, 0, sizeof(ring_bytes));
+	copy(stopped, 0, stopped.size());
 	report("ring", stopped);
 
 	qemu::write("copy\n");
-	copy(live, offset(&kymo::trace_ring.write_index), sizeof(kymo::trace_ring.write_index));
+	copy(live, offsetof(ring_type, write_index), sizeof(kymo::trace_ring.write_index));
 	for (std::size_t slot = 0; slot < slots; ++slot)
 	{
-		copy(live, offset(&kymo::trace_ring.slots[slot]), sizeof(kymo::trace_ring.slots[slot]));
+		copy(live, offsetof(ring_type, slots) + (slot * sizeof(kymo::slot)), sizeof(kymo::slot));
 		qemu::write("copied ");
 		qemu::write_unsigned(slot);
 		qemu::write("\n");

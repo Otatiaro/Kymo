@@ -17,6 +17,7 @@
 #include <kymo/kymo.hpp>
 #endif
 
+#include <array>
 #include <cstdint>
 
 namespace
@@ -24,22 +25,22 @@ namespace
 
 struct slots_1
 {
-	std::uint32_t words[2];
+	std::array<std::uint32_t, 2> words;
 };
 
 struct slots_2
 {
-	std::uint32_t words[5];
+	std::array<std::uint32_t, 5> words;
 };
 
 struct slots_3
 {
-	std::uint32_t words[8];
+	std::array<std::uint32_t, 8> words;
 };
 
 struct slots_4
 {
-	std::uint32_t words[11];
+	std::array<std::uint32_t, 11> words;
 };
 
 struct disabled
@@ -47,21 +48,21 @@ struct disabled
 #ifndef KYMO_COST_BASELINE
 	static constexpr kymo::family kymo_family = kymo::family::meta;
 #endif
-	std::uint32_t words[2];
+	std::array<std::uint32_t, 2> words;
 };
 
 #ifndef KYMO_COST_BASELINE
-static_assert(kymo::slots_for<slots_1> == 1, "");
-static_assert(kymo::slots_for<slots_2> == 2, "");
-static_assert(kymo::slots_for<slots_3> == 3, "");
-static_assert(kymo::slots_for<slots_4> == 4, "");
+static_assert(kymo::slots_for<slots_1> == 1);
+static_assert(kymo::slots_for<slots_2> == 2);
+static_assert(kymo::slots_for<slots_3> == 3);
+static_assert(kymo::slots_for<slots_4> == 4);
 #endif
 
 /** @brief An event whose words all come from @p seed, so none is a constant. */
 template<typename Event>
 [[gnu::always_inline]] inline Event make(std::uint32_t seed)
 {
-	Event event;
+	Event event{};
 	for (std::uint32_t& word : event.words)
 		word = seed++;
 	return event;
@@ -70,7 +71,7 @@ template<typename Event>
 template<typename Event>
 [[gnu::always_inline]] inline void emit(std::uint32_t seed)
 {
-	Event const event = make<Event>(seed);
+	auto const event = make<Event>(seed);
 #ifdef KYMO_COST_BASELINE
 	asm volatile("" : : "r"(&event) : "memory");
 #else

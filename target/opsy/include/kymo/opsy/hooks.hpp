@@ -107,7 +107,7 @@ struct task_ready
 struct task_sleep
 {
 	static constexpr family kymo_family = family::causality;
-	task_t task;
+	task_t task{};
 	::opsy::time_point until;
 };
 
@@ -123,8 +123,8 @@ struct task_wait
 struct task_wait_timeout
 {
 	static constexpr family kymo_family = family::causality;
-	task_t task;
-	condition_variable_t condition;
+	task_t task{};
+	condition_variable_t condition{};
 	::opsy::time_point until;
 };
 
@@ -226,33 +226,33 @@ struct mutex_blocked
  */
 struct hooks
 {
-	static void starting(auto&, std::uint32_t core_clock, auto&&) { emit(kymo::opsy::starting{core_clock}); }
+	static void starting(auto& /*idle*/, std::uint32_t core_clock, auto&& /*foreach_task*/) { emit(kymo::opsy::starting{core_clock}); }
 
-	static void task_added(auto& task) { emit(kymo::opsy::task_added{&task, static_cast<std::uint8_t>(task.priority())}); }
+	static void task_added(auto& task) { emit(kymo::opsy::task_added{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())}); }
 	static void task_terminated(::opsy::task_control_block& task) { emit(kymo::opsy::task_terminated{&task}); }
 	static void task_started(::opsy::task_control_block& task) { emit(kymo::opsy::task_started{&task}); }
 	static void enter_idle() { emit(kymo::opsy::enter_idle{}); }
 	static void task_priority_changed(auto& task)
 	{
-		emit(kymo::opsy::task_priority_changed{&task, static_cast<std::uint8_t>(task.priority())});
+		emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())});
 	}
 
 	static void task_ready(::opsy::task_control_block& task, ::opsy::wake_reason reason)
 	{
-		emit(kymo::opsy::task_ready{&task, reason});
+		emit(kymo::opsy::task_ready{.task = &task, .reason = reason});
 	}
 	static void task_sleep(::opsy::task_control_block& task, ::opsy::time_point until)
 	{
-		emit(kymo::opsy::task_sleep{&task, until});
+		emit(kymo::opsy::task_sleep{.task = &task, .until = until});
 	}
 	static void task_wait(::opsy::task_control_block& task, ::opsy::condition_variable& condition)
 	{
-		emit(kymo::opsy::task_wait{&task, &condition});
+		emit(kymo::opsy::task_wait{.task = &task, .condition = &condition});
 	}
 	static void task_wait_timeout(::opsy::task_control_block& task, ::opsy::condition_variable& condition,
 		::opsy::time_point until)
 	{
-		emit(kymo::opsy::task_wait_timeout{&task, &condition, until});
+		emit(kymo::opsy::task_wait_timeout{.task = &task, .condition = &condition, .until = until});
 	}
 	static void condition_variable_notify_one(::opsy::condition_variable& condition)
 	{
@@ -283,15 +283,15 @@ struct hooks
 
 	static void mutex_taken(::opsy::mutex& taken, ::opsy::task_control_block& owner)
 	{
-		emit(kymo::opsy::mutex_taken{&taken, &owner});
+		emit(kymo::opsy::mutex_taken{.mutex = &taken, .owner = &owner});
 	}
 	static void mutex_released(::opsy::mutex& released, ::opsy::task_control_block& owner)
 	{
-		emit(kymo::opsy::mutex_released{&released, &owner});
+		emit(kymo::opsy::mutex_released{.mutex = &released, .owner = &owner});
 	}
 	static void mutex_blocked(::opsy::mutex& blocking, ::opsy::task_control_block& waiter)
 	{
-		emit(kymo::opsy::mutex_blocked{&blocking, &waiter});
+		emit(kymo::opsy::mutex_blocked{.mutex = &blocking, .waiter = &waiter});
 	}
 };
 

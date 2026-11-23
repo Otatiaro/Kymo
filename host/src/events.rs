@@ -689,10 +689,18 @@ fn describe(
                 }
             } else {
                 let (size, fields) = record(dwarf, unit, names, offset)?;
-                Type {
-                    name: unnamed(),
-                    size: Some(size),
-                    kind: Kind::Record(fields),
+                let qualified = names.get(&global(unit, offset)?);
+                match standard_array(qualified, size, &fields) {
+                    Some(kind) => Type {
+                        name: qualified.cloned().unwrap_or_else(unnamed),
+                        size: Some(size),
+                        kind,
+                    },
+                    None => Type {
+                        name: unnamed(),
+                        size: Some(size),
+                        kind: Kind::Record(fields),
+                    },
                 }
             }
         }
@@ -702,6 +710,32 @@ fn describe(
             kind: Kind::Opaque,
         },
     })
+}
+
+/// The array a `std::array` of `size` bytes holds, when `fields` are those of
+/// one: a single member, `_M_elems` (libstdc++) or `__elems_` (libc++), a C
+/// array that fills it. An empty `std::array` holds no C array and stays a
+/// structure.
+fn standard_array(qualified: Option<&String>, size: u64, fields: &[Field]) -> Option<Kind> {
+    let name = qualified?.strip_prefix("std::")?;
+    // libc++ puts it in an inline namespace: std::__1::array.
+    let unversioned = match name.split_once("::") {
+        Some((inline, rest)) if inline.starts_with("__") => rest,
+        _ => name,
+    };
+    if !unversioned.starts_with("array<") {
+        return None;
+    }
+    let [field] = fields else {
+        return None;
+    };
+    let filled = field.offset == 0 && field.ty.size == Some(size);
+    match &field.ty.kind {
+        Kind::Array(..) if filled && matches!(field.name.as_str(), "_M_elems" | "__elems_") => {
+            Some(field.ty.kind.clone())
+        }
+        _ => None,
+    }
 }
 
 /// What the type at `offset`, the target of a pointer, is.

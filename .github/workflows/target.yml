@@ -41,12 +41,15 @@ jobs:
           qemu-system-arm --version | head -1
 
       # kymo events, kymo decode and kymo record, for the layout, decode,
-      # record and symbols tests; then the host's own tests.
+      # record and symbols tests; then the host's own tests, its format and
+      # its lints.
       - name: Build the host
         run: |
           sudo apt-get install -y libudev-dev
           cargo build --release --manifest-path host/Cargo.toml
           cargo test --release --manifest-path host/Cargo.toml
+          cargo fmt --check --manifest-path host/Cargo.toml
+          cargo clippy --all-targets --manifest-path host/Cargo.toml -- -D warnings
 
       - name: Configure
         run: >
@@ -59,6 +62,51 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
+
+  # clang-tidy over the target code, with the .clang-tidy files under target/:
+  # the library and its tests, the bench image, and the OpSy adapter with its
+  # test, each as the Arm toolchain compiles it (target/tidy.py); each public
+  # header also on its own, with the library's checks. In the OpSy
+  # tree only the adapter's test is Kymo's; OpSy's own sources are not checked.
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/checkout@v5
+        with:
+          repository: Otatiaro/OpSy
+          ref: ${{ env.OPSY_COMMIT }}
+          path: opsy
+
+      - name: Install the arm-none-eabi toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Install Ninja and clang-tidy
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          pip install clang-tidy==23.1.4
+          clang-tidy --version
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          toolchain="-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/target/cmake/arm-none-eabi.cmake"
+          cmake -S target/tests -B build/tests -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake -S target/bench -B build/bench -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake -S target/opsy/tests -B build/opsy -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DKYMO_OPSY_DIR="$GITHUB_WORKSPACE/opsy" -DOPSY_TARGET=m33
+
+      - name: clang-tidy
+        run: |
+          set -euo pipefail
+          python3 target/tidy.py --clang-tidy clang-tidy --build build/tests --headers target/include
+          python3 target/tidy.py --clang-tidy clang-tidy --build build/bench
+          python3 target/tidy.py --clang-tidy clang-tidy --build build/opsy \
+            --headers target/opsy/include target/opsy/tests/ring_check.cpp
 
   # OpSy's on-target suite with the adapter's hooks, the adapter's events
   # read back from the ring, and the suite recorded by the host with its trace

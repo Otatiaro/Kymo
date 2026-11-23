@@ -11,17 +11,18 @@
 namespace
 {
 
-std::uint32_t volatile& reg(std::uint32_t address)
+std::uint32_t volatile& reg(std::uintptr_t address)
 {
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): a register at a fixed address
 	return *reinterpret_cast<std::uint32_t volatile*>(address);
 }
 
-constexpr std::uint32_t syst_csr = 0xE000E010u;
-constexpr std::uint32_t syst_rvr = 0xE000E014u;
-constexpr std::uint32_t syst_cvr = 0xE000E018u;
-constexpr std::uint32_t icsr = 0xE000ED04u;
-constexpr std::uint32_t csr_enable_interrupt_processor_clock = 7u;
-constexpr std::uint32_t icsr_pendstclr = 1u << 25;
+constexpr std::uintptr_t syst_csr = 0xE000E010U;
+constexpr std::uintptr_t syst_rvr = 0xE000E014U;
+constexpr std::uintptr_t syst_cvr = 0xE000E018U;
+constexpr std::uintptr_t icsr = 0xE000ED04U;
+constexpr std::uint32_t csr_enable_interrupt_processor_clock = 7U;
+constexpr std::uint32_t icsr_pendstclr = 1U << 25;
 
 constexpr std::uint32_t sled_length = 64;   // NOPs, then a return
 constexpr std::uint32_t max_delay = 64 * (sled_length + 1);
@@ -34,31 +35,37 @@ std::uint32_t volatile interrupted_pc;
 
 extern "C"
 {
-void sled(std::uint32_t);
-void preempt_systick(std::uint32_t const* frame);
+void sled(std::uint32_t /*unused*/);
+/// What the processor stacks on exception entry.
+struct exception_frame
+{
+	std::uint32_t r0, r1, r2, r3, r12, lr, pc, xpsr;
+};
+
+void preempt_systick(exception_frame const* frame);
 void SysTick_Handler();
 }
 
 /// NOPs only, so that instruction n sits at 2 n bytes from the entry.
-extern "C" [[gnu::naked, gnu::noinline]] void sled(std::uint32_t)
+extern "C" [[gnu::naked, gnu::noinline]] void sled(std::uint32_t /*unused*/)
 {
 	asm(".rept 64\n\tnop\n\t.endr\n\tbx lr");
 }
 
-/// Passes the exception frame on: its seventh word is the interrupted PC.
+/// Passes the exception frame on, which holds the interrupted PC.
 extern "C" [[gnu::naked]] void SysTick_Handler()
 {
 	asm("mrs r0, msp\n\tb preempt_systick");
 }
 
-extern "C" void preempt_systick(std::uint32_t const* frame)
+extern "C" void preempt_systick(exception_frame const* frame)
 {
 	// A short delay wraps the counter again during exception entry: the
 	// interrupt pending from that wrap is cleared, so the handler runs once.
 	reg(syst_csr) = 0;
 	reg(icsr) = icsr_pendstclr;
 	fired = true;
-	interrupted_pc = frame[6];
+	interrupted_pc = frame->pc;
 	if (!calibrating)
 		test_interrupt();
 }
@@ -91,7 +98,8 @@ std::uint32_t interrupted()
 void calibrate()
 {
 	calibrating = true;
-	std::uint32_t const entry = reinterpret_cast<std::uint32_t>(&sled) & ~1u;
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the address of the code, without the Thumb bit
+	std::uint32_t const entry = reinterpret_cast<std::uintptr_t>(&sled) & ~1U;
 	std::uint32_t next = 0;   // the instruction the next delay must reach
 	for (std::uint32_t delay = 1; next <= sled_length; ++delay)
 	{
@@ -107,7 +115,9 @@ void calibrate()
 			continue;   // before the sled: the call itself
 		std::uint32_t const instruction = offset / 2;
 		if (instruction == next)
+		{
 			++next;
+		}
 		else if (instruction + 1 != next)
 		{
 			qemu::write("calibration: delay ");

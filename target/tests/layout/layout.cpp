@@ -19,6 +19,7 @@
 
 #include <kymo/kymo.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -48,6 +49,7 @@ struct mode_changed
 	mode from;
 	mode to;
 	void const* source;
+	// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the host names C arrays too
 	char tag[3];
 };
 
@@ -64,8 +66,10 @@ struct sensor
 	struct moved
 	{
 		point to;
+		// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the host names arrays of arrays
 		std::uint16_t samples[2][3];
-		bool const valid;
+		std::array<std::uint8_t, 2> gains;
+		bool const valid;   // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members): the host names qualified types
 	};
 };
 
@@ -117,7 +121,7 @@ void test_main()
 	kymo::emit(plain{1});
 	kymo::emit(app::motor::step{2, 3, -4});
 	kymo::emit(app::motor::mode_changed{app::motor::mode::idle, app::motor::mode::run, &origin, {'a', 'b', 'c'}});
-	kymo::emit(sensor::moved{{5, 6}, {{1, 2, 3}, {4, 5, 6}}, true});
+	kymo::emit(sensor::moved{{5, 6}, {{1, 2, 3}, {4, 5, 6}}, {7, 8}, true});
 	kymo::emit(tick{});
 
 	event<plain>("plain");
@@ -137,6 +141,7 @@ void test_main()
 	event<sensor::moved>("sensor::moved");
 	FIELD(sensor::moved, to, "point");
 	FIELD(sensor::moved, samples, "uint16_t[2][3]");
+	FIELD(sensor::moved, gains, "std::array<unsigned char, 2>");
 	FIELD(sensor::moved, valid, "bool const");
 
 	event<tick>("(anonymous namespace)::tick");

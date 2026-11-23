@@ -13,6 +13,7 @@
 
 #include <kymo/kymo.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -29,10 +30,11 @@ template <std::size_t Size>
 class stack_storage
 {
 protected:
-	alignas(8) std::byte stack[Size];
+	alignas(8) std::array<std::byte, Size> stack;
 };
 
 template <std::size_t Size>
+// NOLINTNEXTLINE(misc-multiple-inheritance): a task as an RTOS lays it out, which the host must see through
 class task : private stack_storage<Size>, public task_control_block
 {
 };
@@ -119,7 +121,8 @@ void test_main()
 		kymo::emit(mutex_taken{&app::uart.lock, &app::second_task});
 		kymo::emit(notify{&app::ready});
 		kymo::emit(isr_enter{&app::timer_handler});
-		kymo::emit(unnamed{reinterpret_cast<void const*>(0x40000000u), nullptr});
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): an address in no symbol
+		kymo::emit(unnamed{reinterpret_cast<void const*>(0x40000000U), nullptr});
 		for (std::uint32_t volatile k = 0; k < pause; k = k + 1)
 		{
 		}
