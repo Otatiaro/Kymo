@@ -56,7 +56,8 @@ cycle counter keeps counting once the probe leaves.
 bench options:
   --probe-id <id>    probe-rs: VID:PID[:SERIAL]; jlink, stlink: serial number
   --chip <name>      target name for probe-rs and J-Link (e.g. STM32H563ZITx)
-  --speed <kHz>      debug clock (default 4000)
+  --speed <kHz>      debug clock, or the closest the probe supports
+                     below it (default 24000)
   --step <seconds>   duration of each measurement (default 2)
   --max-rate <n>     highest rate tried, in events per tick (default 1024)
   --swo-baud <Bd>    also measure SWO at this baud rate, alone then alongside
@@ -108,7 +109,7 @@ fn run() -> Result<()> {
     let mut probe = None;
     let mut chip = None;
     let mut elf = None;
-    let mut speed_khz = 4000;
+    let mut speed_khz = 24_000;
     let mut step = 2.0;
     let mut max_events_per_tick = 1024;
     let mut swo_baud = None;

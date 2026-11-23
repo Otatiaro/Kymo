@@ -13,6 +13,12 @@ pub trait Target {
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()>;
     fn write_word(&mut self, address: u32, value: u32) -> Result<()>;
 
+    /// The debug clock the probe runs at, in kHz: the one asked for, or the
+    /// closest the probe supports. None where there is no debug clock.
+    fn speed_khz(&self) -> Option<u32> {
+        None
+    }
+
     fn read_word(&mut self, address: u32) -> Result<u32> {
         let mut word = [0u32];
         self.read_words(address, &mut word)?;
@@ -30,6 +36,14 @@ pub trait Target {
     fn swo_read(&mut self, _bytes: &mut Vec<u8>) -> Result<()> {
         Err("this backend does not capture SWO".into())
     }
+}
+
+/// " at <n> kHz", the debug clock the target's probe runs at, for a summary;
+/// empty where there is none.
+pub fn speed_text(target: &dyn Target) -> String {
+    target
+        .speed_khz()
+        .map_or_else(String::new, |khz| format!(" at {khz} kHz"))
 }
 
 /// The ways the host reaches a probe.

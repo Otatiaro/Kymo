@@ -37,6 +37,8 @@ struct Api {
     execute: unsafe extern "C" fn(*const c_char, *mut c_char, c_int) -> c_int,
     select_interface: unsafe extern "C" fn(c_int) -> c_int,
     set_speed: unsafe extern "C" fn(u32),
+    /// -> the debug clock in kHz
+    get_speed: unsafe extern "C" fn() -> u16,
     connect: unsafe extern "C" fn() -> c_int,
     /// (address, count, words, status per word) -> words read, negative on error
     read_u32: unsafe extern "C" fn(u32, u32, *mut u32, *mut u8) -> c_int,
@@ -63,6 +65,7 @@ impl Api {
                 execute: *library.get(b"JLINKARM_ExecCommand")?,
                 select_interface: *library.get(b"JLINKARM_TIF_Select")?,
                 set_speed: *library.get(b"JLINKARM_SetSpeed")?,
+                get_speed: *library.get(b"JLINKARM_GetSpeed")?,
                 connect: *library.get(b"JLINKARM_Connect")?,
                 read_u32: *library.get(b"JLINKARM_ReadMemU32")?,
                 write_u32: *library.get(b"JLINKARM_WriteU32")?,
@@ -160,6 +163,11 @@ fn load_library() -> Result<Library> {
 }
 
 impl Target for JLinkTarget {
+    fn speed_khz(&self) -> Option<u32> {
+        // SAFETY: the library is open, as long as self is.
+        Some(u32::from(unsafe { (self.api.get_speed)() }))
+    }
+
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
         self.status.resize(words.len(), 0);
         // SAFETY: both buffers hold words.len() items.

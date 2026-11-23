@@ -9,6 +9,7 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 
 pub struct ProbeRsTarget {
     session: Session,
+    speed_khz: u32,
 }
 
 impl ProbeRsTarget {
@@ -26,13 +27,17 @@ impl ProbeRsTarget {
                 }
             }
         };
-        probe.set_speed(connection.speed_khz)?;
+        let speed_khz = probe.set_speed(connection.speed_khz)?;
         let session = probe.attach(chip, Permissions::default())?;
-        Ok(Self { session })
+        Ok(Self { session, speed_khz })
     }
 }
 
 impl Target for ProbeRsTarget {
+    fn speed_khz(&self) -> Option<u32> {
+        Some(self.speed_khz)
+    }
+
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
         self.session.core(0)?.read_32(address.into(), words)?;
         Ok(())

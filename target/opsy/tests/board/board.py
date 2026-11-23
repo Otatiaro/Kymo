@@ -17,10 +17,11 @@ Then checks, besides trace.py's oracle:
 - that the intervals average 8000 cycles within 0.1: the core and the timer
   run on the same HSE, so the period holds a whole number of cycles, which
   checks the timer;
-- that they average the nominal millisecond within 5e-4 in the seconds Kymo
+- that they average the nominal millisecond within 1e-4 in the seconds Kymo
   gives, which checks Kymo's measure of the clock against the HSE, which the
-  ST-Link derives from its crystal. Measured from the host time of the
-  probe's passes, that clock strays by up to 2.4e-4 between recordings.
+  ST-Link derives from its crystal. That measure holds while the probe keeps
+  up with the ring: at the default 24 MHz of SWD it repeats within 1e-7; at
+  4 MHz, where the ring overtakes the probe, it strays by up to 2.4e-4.
 """
 
 import argparse
@@ -106,7 +107,7 @@ def check_board(output: str) -> list[str]:
     # The timer counts the core's clock: the period is a whole number of cycles.
     if abs(cycles - PERIOD_CYCLES) > 0.1:
         errors.append(f"the timer's period is {cycles:.4f} cycles, not {PERIOD_CYCLES}")
-    if abs(deviation) > 5e-4:
+    if abs(deviation) > 1e-4:
         errors.append(f"the timer's period deviates by {deviation:+.2e} from {PERIOD} s")
     return errors
 
