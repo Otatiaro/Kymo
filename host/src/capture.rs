@@ -5,7 +5,9 @@
 //!
 //! ```text
 //! header  "KYMOCAP\0", u32 version (1), u32 first index recorded,
-//!         u64 cycle counter frequency in hertz given to the recording (0: none)
+//!         u64 cycle counter frequency in hertz given to the recording (0: none),
+//!         u16 length and UTF-8 bytes of the channel: the qualified name of
+//!         the ring recorded
 //! 1 pass  u64 host time (ns since the Unix epoch), u32 write index read
 //! 2 event u32 index, u8 slot count, the event's slots as read (16 bytes each)
 //! 3 lost  u32 first index lost, u32 index after the last one
@@ -29,6 +31,7 @@ const SLOT_BYTES: usize = 16;
 pub struct Header {
     pub first: u32,
     pub clock: Option<u64>,
+    pub channel: String,
 }
 
 pub enum Record<'a> {
@@ -53,6 +56,9 @@ impl Writer {
         writer.file.write_all(&VERSION.to_le_bytes())?;
         writer.file.write_all(&header.first.to_le_bytes())?;
         writer.file.write_all(&header.clock.unwrap_or(0).to_le_bytes())?;
+        let length = u16::try_from(header.channel.len()).map_err(|_| "channel name of more than 65535 bytes")?;
+        writer.file.write_all(&length.to_le_bytes())?;
+        writer.file.write_all(header.channel.as_bytes())?;
         Ok(writer)
     }
 
@@ -112,9 +118,12 @@ pub fn read(bytes: &[u8]) -> Result<(Header, Vec<Record<'_>>)> {
     }
     let first = cursor.u32()?;
     let clock = cursor.u64()?;
+    let length = usize::from(cursor.u16()?);
+    let channel = std::str::from_utf8(cursor.take(length)?).map_err(|_| "the capture's channel name is not UTF-8")?;
     let header = Header {
         first,
         clock: (clock != 0).then_some(clock),
+        channel: channel.to_owned(),
     };
     let mut records = Vec::new();
     while !cursor.bytes.is_empty() {
@@ -161,6 +170,10 @@ impl<'a> Cursor<'a> {
         let (taken, rest) = self.bytes.split_at(count);
         self.bytes = rest;
         Ok(taken)
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
     }
 
     fn u32(&mut self) -> Result<u32> {

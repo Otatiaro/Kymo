@@ -15,6 +15,8 @@
 
 #include "qemu_test.hpp"
 
+#include <opsy_trace.hpp>
+
 #include <condition_variable.hpp>
 #include <cortex_m.hpp>
 #include <hooks.hpp>
@@ -39,7 +41,7 @@
 #include <span>
 #include <type_traits>
 
-static_assert(KYMO_CONTROL_DEFAULT == ~kymo::bit(kymo::family::kernel), "kernel alone is off by default");
+static_assert(kymo::control_at_reset() == ((1U << kymo::families) - 1U) - kymo::bit(kymo::family::kernel), "kernel alone is off by default");
 
 namespace
 {
@@ -70,15 +72,15 @@ using read_events = std::array<read_event, 16>;
 
 /**
  * @brief The events written from @p from on, first slots only, SysTick's
- *        left out, in @p out; returns how many. A slot whose lap is not its
- *        index's is the start of an event that ran into the guard zone: its
- *        slots are past the end.
+ *        left out, in @p out; returns how many. A slot whose header does not
+ *        carry its index's lap was not written there by this pass, or was
+ *        overwritten since: it is skipped.
  */
 std::size_t read_since(std::uint32_t from, std::span<read_event> out)
 {
-	auto& ring = kymo::trace_ring;
+	auto& ring = trace_ring;
 	using ring_t = std::remove_reference_t<decltype(ring)>;
-	constexpr std::uint32_t mask = KYMO_RING_SLOTS - 1;
+	constexpr std::uint32_t mask = ring_slots - 1;
 	constexpr std::uint32_t type_mask = kymo::head_bit - 1;
 	std::uint32_t const systick_in = kymo::type_id<kymo::opsy::enter_systick>();
 	std::uint32_t const systick_out = kymo::type_id<kymo::opsy::exit_systick>();
@@ -116,7 +118,7 @@ std::uint32_t address(Pointer pointer)
 std::size_t wake_once(read_events& events)
 {
 	int const woken = g_woken;
-	std::uint32_t const from = kymo::trace_ring.write_index.load(std::memory_order_relaxed);
+	std::uint32_t const from = trace_ring.write_index.load(std::memory_order_relaxed);
 	qemu_test::raise(g_irq);
 	CHECK(g_woken == woken + 1);
 	return read_since(from, events);

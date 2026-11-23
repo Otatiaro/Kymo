@@ -505,6 +505,7 @@ pub fn run(
     let header = capture::Header {
         first: recorder.next(),
         clock,
+        channel: ring.name.clone(),
     };
     let mut capture = out.map(|out| Writer::create(out, &header)).transpose()?;
     let mut timeline = Timeline::new(clock);
@@ -594,11 +595,11 @@ fn measured(measured: Option<(f64, f64)>) -> String {
     }
 }
 
-/// `kymo decode` of a capture of `ring`: the lines `kymo record` printed
-/// while making it, but for the seconds: they are at `clock` hertz, or the
-/// capture's, or else at the frequency measured over the whole capture.
-pub fn print_capture(catalogue: &Catalogue, ring: &Ring, bytes: &[u8], clock: Option<u64>) -> Result<()> {
-    let trace = Trace::read(catalogue, ring, bytes, clock)?;
+/// `kymo decode` of a capture: the lines `kymo record` printed while making
+/// it, but for the seconds: they are at `clock` hertz, or the capture's, or
+/// else at the frequency measured over the whole capture.
+pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) -> Result<()> {
+    let trace = Trace::read(catalogue, bytes, clock)?;
     println!("record {}", trace.first);
     for element in &trace.elements {
         match element {

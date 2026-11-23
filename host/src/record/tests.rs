@@ -417,6 +417,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
         let header = Header {
             first: recorder.next(),
             clock: Some(clock),
+            channel: ring.name.clone(),
         };
         let mut writer = Writer::create(&path, &header).unwrap();
         let (mut items, mut yielded) = (Vec::new(), Vec::new());
@@ -454,7 +455,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
         writer.finish().unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        let trace = Trace::read(&catalogue, ring, &bytes, None).unwrap();
+        let trace = Trace::read(&catalogue, &bytes, None).unwrap();
         assert_eq!(trace.first, header.first, "seed {seed}");
         assert_eq!(trace.end, Some(recorder.next()), "seed {seed}");
         assert_eq!(trace.frequency, Some(clock as f64), "seed {seed}");

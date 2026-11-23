@@ -1,6 +1,6 @@
 /**
  * @file    hooks.hpp
- * @brief   The OpSy adapter: kymo::opsy::hooks turns what OpSy reports into
+ * @brief   The OpSy adapter: kymo::opsy::hooks<Trace> turns what OpSy reports into
  *          Kymo events.
  *
  * Each event is named after the OpSy hook that emits it, and carries what
@@ -17,9 +17,21 @@
  * and mutex_restored_for_task, condition_variable_start_waiting (task_wait
  * says it), task_name_changed. idle_wait is left to OpSy.
  *
- * Include it through OpSy: <opsy_hooks.hpp>, next to this directory, makes
- * these the program's hooks. A program that has hooks of its own defines
- * opsy::hooks as a class deriving from kymo::opsy::hooks, each of its hooks
+ * The events go through the application's tracer (kymo.hpp), which routes
+ * each family to its channel. OpSy takes its hooks from the program's
+ * <opsy_hooks.hpp>, which makes these the program's hooks:
+ *
+ *     #include <kymo/opsy/hooks.hpp>
+ *     #include "trace.hpp" // the application's tracer
+ *
+ *     namespace opsy
+ *     {
+ *     /// A class, not an alias: OpSy's task_control_block names it as a friend.
+ *     class hooks : public kymo::opsy::hooks<::trace>
+ *     {};
+ *     }
+ *
+ * A program that has hooks of its own declares them in that class, each
  * calling the one it hides.
  *
  * Requires OpSy's root on the include path, for its config.hpp.
@@ -219,55 +231,57 @@ struct mutex_blocked
 };
 
 /**
- * @brief The hooks OpSy calls, each emitting the event of its name.
+ * @brief The hooks OpSy calls, each emitting the event of its name through
+ *        @p Trace, the application's tracer.
  *
  * The hooks that read a task's priority are templates: OpSy declares
  * task_control_block, without defining it, where it includes them.
  */
+template<typename Trace>
 struct hooks
 {
-	static void starting(auto& /*idle*/, std::uint32_t core_clock, auto&& /*foreach_task*/) { emit(kymo::opsy::starting{core_clock}); }
+	static void starting(auto& /*idle*/, std::uint32_t core_clock, auto&& /*foreach_task*/) { Trace::emit(kymo::opsy::starting{core_clock}); }
 
-	static void task_added(auto& task) { emit(kymo::opsy::task_added{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())}); }
-	static void task_terminated(::opsy::task_control_block& task) { emit(kymo::opsy::task_terminated{&task}); }
-	static void task_started(::opsy::task_control_block& task) { emit(kymo::opsy::task_started{&task}); }
-	static void enter_idle() { emit(kymo::opsy::enter_idle{}); }
+	static void task_added(auto& task) { Trace::emit(kymo::opsy::task_added{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())}); }
+	static void task_terminated(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_terminated{&task}); }
+	static void task_started(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_started{&task}); }
+	static void enter_idle() { Trace::emit(kymo::opsy::enter_idle{}); }
 	static void task_priority_changed(auto& task)
 	{
-		emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())});
+		Trace::emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())});
 	}
 
 	static void task_ready(::opsy::task_control_block& task, ::opsy::wake_reason reason)
 	{
-		emit(kymo::opsy::task_ready{.task = &task, .reason = reason});
+		Trace::emit(kymo::opsy::task_ready{.task = &task, .reason = reason});
 	}
 	static void task_sleep(::opsy::task_control_block& task, ::opsy::time_point until)
 	{
-		emit(kymo::opsy::task_sleep{.task = &task, .until = until});
+		Trace::emit(kymo::opsy::task_sleep{.task = &task, .until = until});
 	}
 	static void task_wait(::opsy::task_control_block& task, ::opsy::condition_variable& condition)
 	{
-		emit(kymo::opsy::task_wait{.task = &task, .condition = &condition});
+		Trace::emit(kymo::opsy::task_wait{.task = &task, .condition = &condition});
 	}
 	static void task_wait_timeout(::opsy::task_control_block& task, ::opsy::condition_variable& condition,
 		::opsy::time_point until)
 	{
-		emit(kymo::opsy::task_wait_timeout{.task = &task, .condition = &condition, .until = until});
+		Trace::emit(kymo::opsy::task_wait_timeout{.task = &task, .condition = &condition, .until = until});
 	}
 	static void condition_variable_notify_one(::opsy::condition_variable& condition)
 	{
-		emit(kymo::opsy::condition_variable_notify_one{&condition});
+		Trace::emit(kymo::opsy::condition_variable_notify_one{&condition});
 	}
 	static void condition_variable_notify_all(::opsy::condition_variable& condition)
 	{
-		emit(kymo::opsy::condition_variable_notify_all{&condition});
+		Trace::emit(kymo::opsy::condition_variable_notify_all{&condition});
 	}
 
-	static void enter_systick() { emit(kymo::opsy::enter_systick{}); }
-	static void exit_systick(bool task_switch) { emit(kymo::opsy::exit_systick{task_switch}); }
-	static void enter_service_call() { emit(kymo::opsy::enter_service_call{}); }
-	static void exit_service_call(bool task_switch) { emit(kymo::opsy::exit_service_call{task_switch}); }
-	static void enter_pend_sv() { emit(kymo::opsy::enter_pend_sv{}); }
+	static void enter_systick() { Trace::emit(kymo::opsy::enter_systick{}); }
+	static void exit_systick(bool task_switch) { Trace::emit(kymo::opsy::exit_systick{task_switch}); }
+	static void enter_service_call() { Trace::emit(kymo::opsy::enter_service_call{}); }
+	static void exit_service_call(bool task_switch) { Trace::emit(kymo::opsy::exit_service_call{task_switch}); }
+	static void enter_pend_sv() { Trace::emit(kymo::opsy::enter_pend_sv{}); }
 
 	/** @brief The handler a vector table holds in place of @p Handler: the same, its entry and exit recorded */
 	template<handler_t Handler>
@@ -275,23 +289,23 @@ struct hooks
 	{
 		return +[]
 		{
-			emit(isr_enter{Handler});
+			Trace::emit(isr_enter{Handler});
 			Handler();
-			emit(isr_exit{Handler});
+			Trace::emit(isr_exit{Handler});
 		};
 	}
 
 	static void mutex_taken(::opsy::mutex& taken, ::opsy::task_control_block& owner)
 	{
-		emit(kymo::opsy::mutex_taken{.mutex = &taken, .owner = &owner});
+		Trace::emit(kymo::opsy::mutex_taken{.mutex = &taken, .owner = &owner});
 	}
 	static void mutex_released(::opsy::mutex& released, ::opsy::task_control_block& owner)
 	{
-		emit(kymo::opsy::mutex_released{.mutex = &released, .owner = &owner});
+		Trace::emit(kymo::opsy::mutex_released{.mutex = &released, .owner = &owner});
 	}
 	static void mutex_blocked(::opsy::mutex& blocking, ::opsy::task_control_block& waiter)
 	{
-		emit(kymo::opsy::mutex_blocked{.mutex = &blocking, .waiter = &waiter});
+		Trace::emit(kymo::opsy::mutex_blocked{.mutex = &blocking, .waiter = &waiter});
 	}
 };
 

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.25)
 
 # The OpSy adapter, on OpSy's own QEMU suite: the suite's images built with
-# Kymo's opsy_hooks.hpp on their include path, so that every hook OpSy calls
-# while the suite runs emits its event. One core per build tree, like OpSy's:
+# traced/opsy_hooks.hpp on their include path, so that every hook OpSy calls
+# while the suite runs emits its event, through the tracer of opsy_trace.hpp. One core per build tree, like OpSy's:
 #   cmake -S target/opsy/tests -B build/opsy-m33 -G Ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=$PWD/target/cmake/arm-none-eabi.cmake \
 #         -DKYMO_OPSY_DIR=<OpSy's sources> -DOPSY_TARGET=m33 "-DOPSY_OPTIMISATION=-Os;-DNDEBUG"
@@ -19,10 +19,11 @@ add_subdirectory(${KYMO_OPSY_DIR}/tests/qemu opsy)
 
 set(kymo_include
 	${CMAKE_CURRENT_SOURCE_DIR}/../../include
-	${CMAKE_CURRENT_SOURCE_DIR}/../include)
+	${CMAKE_CURRENT_SOURCE_DIR}/../include
+	${CMAKE_CURRENT_SOURCE_DIR})
 
 foreach(image opsy_qemu_tests opsy_qemu_start_check opsy_qemu_before_start)
-	target_include_directories(${image} PRIVATE ${kymo_include})
+	target_include_directories(${image} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${kymo_include})
 endforeach()
 
 # The fault image, traced: the adapter's events and the fault recording OpSy's
@@ -80,7 +81,7 @@ if(KYMO_OPSY_BOARD)
 	# What OpSy's directory adds to its own images: debug information and the
 	# optimisation level.
 	target_compile_options(opsy_board PRIVATE -g ${OPSY_OPTIMISATION})
-	target_include_directories(opsy_board PRIVATE ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+	target_include_directories(opsy_board PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
 	find_program(KYMO_PROBE_RS probe-rs)
 	add_test(NAME opsy_board_h563
 		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/board.py

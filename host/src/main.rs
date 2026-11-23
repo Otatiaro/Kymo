@@ -21,8 +21,9 @@ running the image. Given a capture made by kymo record --out, prints what
 kymo record printed while making it, but for the seconds: they are
 recomputed over the whole capture.
 
-The ring is the image's only kymo::ring object, or the one --channel names
-by its qualified name (e.g. app::trace_ring) when the image has several.
+The ring of a copy is the image's only kymo::ring object, or the one
+--channel names by its qualified name (e.g. app::trace_ring) when the image
+has several. A capture names the ring it was recorded from.
 
 Each event line reads: index, cycles (the cycle counter timestamp extended
 to 64 bits), seconds since the first event (- without a frequency), type,
@@ -98,11 +99,14 @@ fn run() -> Result<()> {
                 }
             }
             let catalogue = events::read(&PathBuf::from(elf))?;
-            let ring = catalogue.ring(channel.as_deref())?;
             let bytes = std::fs::read(&copy).map_err(|error| format!("{copy}: {error}"))?;
             if capture::is_capture(&bytes) {
-                return record::print_capture(&catalogue, ring, &bytes, clock);
+                if channel.is_some() {
+                    return Err("--channel names the ring of a copy; a capture names its own".into());
+                }
+                return record::print_capture(&catalogue, &bytes, clock);
             }
+            let ring = catalogue.ring(channel.as_deref())?;
             let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;
             decode::print(&catalogue, write_index, &decoded, clock);
             return Ok(());
