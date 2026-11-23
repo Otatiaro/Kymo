@@ -4,8 +4,10 @@
  */
 #include "qemu.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 extern "C"
 {
@@ -15,7 +17,7 @@ void Fault_Handler();
 void SysTick_Handler();
 }
 
-/// GCC calls memcpy and memset whenever it likes, and a freestanding program
+/// GCC calls memcpy, memset and memcmp whenever it likes, and a freestanding program
 /// has to provide them; these images link no C library. Built without loop
 /// pattern recognition, so they do not turn into calls to themselves; kept
 /// whether referenced or not, since with -flto the calls appear only after
@@ -23,20 +25,33 @@ void SysTick_Handler();
 extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
 void* memcpy(void* destination, void const* source, std::size_t size)
 {
-	auto* to = static_cast<unsigned char*>(destination);
+	// NOLINTNEXTLINE(misc-const-correctness): written through *out++, which clang-tidy 23 takes for a read
+	auto* out = static_cast<unsigned char*>(destination);
 	auto const* from = static_cast<unsigned char const*>(source);
 	while (size-- != 0)
-		*to++ = *from++;
+		*out++ = *from++;   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): memcpy itself
 	return destination;
 }
 
 extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
 void* memset(void* destination, int value, std::size_t size)
 {
-	auto* to = static_cast<unsigned char*>(destination);
+	// NOLINTNEXTLINE(misc-const-correctness): written through *out++, which clang-tidy 23 takes for a read
+	auto* out = static_cast<unsigned char*>(destination);
 	while (size-- != 0)
-		*to++ = static_cast<unsigned char>(value);
+		*out++ = static_cast<unsigned char>(value);   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): memset itself
 	return destination;
+}
+
+extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+int memcmp(void const* left, void const* right, std::size_t size)
+{
+	auto const* one = static_cast<unsigned char const*>(left);
+	auto const* other = static_cast<unsigned char const*>(right);
+	for (; size != 0; --size, ++one, ++other)   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): memcmp itself
+		if (*one != *other)
+			return *one < *other ? -1 : 1;
+	return 0;
 }
 
 extern "C" void Fault_Handler()
@@ -48,33 +63,49 @@ extern "C" void Fault_Handler()
 /// An image that needs SysTick defines it (preempt.cpp does).
 extern "C" [[gnu::weak, gnu::alias("Fault_Handler")]] void SysTick_Handler();
 
+/// The vector table: the initial stack pointer, then the exception handlers.
+struct vector_table
+{
+	std::uint32_t const* stack;
+	std::array<void (*)(), 15> handlers;
+};
+
 __attribute__((section(".isr_vector"), used))
-void const* const vectors[16] = {
+constexpr vector_table vectors{
 	&_estack,
-	reinterpret_cast<void const*>(&Reset_Handler),
-	reinterpret_cast<void const*>(&Fault_Handler),   // NMI
-	reinterpret_cast<void const*>(&Fault_Handler),   // HardFault
-	reinterpret_cast<void const*>(&Fault_Handler),   // MemManage
-	reinterpret_cast<void const*>(&Fault_Handler),   // BusFault
-	reinterpret_cast<void const*>(&Fault_Handler),   // UsageFault
-	reinterpret_cast<void const*>(&Fault_Handler),   // SecureFault
-	nullptr, nullptr, nullptr,
-	reinterpret_cast<void const*>(&Fault_Handler),   // SVCall
-	reinterpret_cast<void const*>(&Fault_Handler),   // DebugMonitor
-	nullptr,
-	reinterpret_cast<void const*>(&Fault_Handler),   // PendSV
-	reinterpret_cast<void const*>(&SysTick_Handler),
+	{
+		&Reset_Handler,
+		&Fault_Handler,   // NMI
+		&Fault_Handler,   // HardFault
+		&Fault_Handler,   // MemManage
+		&Fault_Handler,   // BusFault
+		&Fault_Handler,   // UsageFault
+		&Fault_Handler,   // SecureFault
+		nullptr,
+		nullptr,
+		nullptr,
+		&Fault_Handler,   // SVCall
+		&Fault_Handler,   // DebugMonitor
+		nullptr,
+		&Fault_Handler,   // PendSV
+		&SysTick_Handler,
+	},
 };
 
 extern "C" void Reset_Handler()
 {
+	// The linker symbols bound the sections; to the compiler each is a single
+	// word, and it knows nothing of what lies past it.
+	// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,clang-analyzer-security.ArrayBound)
 	std::uint32_t const* source = &_sidata;
 	for (std::uint32_t* destination = &_sdata; destination < &_edata; ++destination, ++source)
 		*destination = *source;
 	for (std::uint32_t* destination = &_sbss; destination < &_ebss; ++destination)
 		*destination = 0;
+	// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,clang-analyzer-security.ArrayBound)
 
-	*reinterpret_cast<std::uint32_t volatile*>(0xE000ED08u) = reinterpret_cast<std::uint32_t>(&vectors[0]);   // VTOR
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): VTOR, a register at a fixed address
+	*reinterpret_cast<std::uint32_t volatile*>(0xE000ED08U) = reinterpret_cast<std::uintptr_t>(&vectors);
 
 	test_main();
 	qemu::write("test_main returned\n");

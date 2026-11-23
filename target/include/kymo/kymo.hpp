@@ -22,17 +22,20 @@
  */
 #pragma once
 
-#include <kymo/control.hpp>
-#include <kymo/ring.hpp>
-#include <kymo/type_id.hpp>
+#include <kymo/control.hpp>   // IWYU pragma: export
+#include <kymo/ring.hpp>      // IWYU pragma: export
+#include <kymo/type_id.hpp>   // IWYU pragma: export
 
+#include <atomic>
 #include <cstdint>
 
 #ifndef KYMO_RING_SLOTS
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
 #define KYMO_RING_SLOTS 256
 #endif
 
 #ifndef KYMO_MAX_EVENT_SLOTS
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
 #define KYMO_MAX_EVENT_SLOTS 4
 #endif
 
@@ -40,12 +43,17 @@ namespace kymo
 {
 
 /// The ring the host drains. Zeroed at reset: no slot looks written.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): written from any context, read by the host
 inline ring<KYMO_RING_SLOTS, KYMO_MAX_EVENT_SLOTS> trace_ring;
+
+/// Address of DWT_CYCCNT, the cycle counter (ARMv7-M and ARMv8-M).
+constexpr std::uintptr_t dwt_cyccnt = 0xE0001004;
 
 /** @brief The DWT cycle counter. */
 [[gnu::always_inline]] inline std::uint32_t timestamp()
 {
-	return *reinterpret_cast<std::uint32_t const volatile*>(0xE0001004u);
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): a register at a fixed address
+	return *reinterpret_cast<std::uint32_t const volatile*>(dwt_cyccnt);
 }
 
 /**

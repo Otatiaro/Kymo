@@ -40,6 +40,8 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -50,31 +52,50 @@
 namespace kymo
 {
 
+/// Bytes of a slot, as the host reads them.
+constexpr std::size_t slot_size = 16;
+/// Words of a slot after its header.
+constexpr std::size_t slot_words = 3;
+
 /** @brief One slot. The header is written last; see the file comment. */
 struct slot
 {
 	/// Bits 0-15: event type. Bit 16: head (first slot of an event).
 	/// Bits 17-31: lap of the index of the event's first slot plus one,
 	/// modulo 2^15, so that a zeroed slot never passes for a written one.
-	std::atomic<std::uint32_t> header;
+	std::atomic<std::uint32_t> header{0};
 	/// In an event's first slot: the timestamp, then 8 bytes of payload.
 	/// In the slots that follow: 12 bytes of payload.
-	std::uint32_t words[3];
+	std::array<std::uint32_t, slot_words> words{};
 };
-static_assert(sizeof(slot) == 16, "the host reads 16-byte slots");
+static_assert(sizeof(slot) == slot_size, "the host reads 16-byte slots");
 
-constexpr std::uint32_t head_bit = 1u << 16;
-constexpr unsigned lap_shift = 17;
+constexpr unsigned type_bits = 16;
+constexpr std::uint32_t head_bit = 1U << type_bits;
+constexpr unsigned lap_shift = type_bits + 1;
+constexpr std::uint32_t lap_mask = (1U << (32 - lap_shift)) - 1;
 
 /// Payload bytes in an event's first slot, and in each slot after it.
-constexpr std::size_t head_payload = 8;
-constexpr std::size_t tail_payload = 12;
+constexpr std::size_t head_payload = sizeof(slot::words) - sizeof(std::uint32_t);
+constexpr std::size_t tail_payload = sizeof(slot::words);
+
+/** @brief The base-2 logarithm of @p n, a power of two. */
+constexpr unsigned log2_of(std::size_t n)
+{
+	unsigned bits = 0;
+	while (n > 1)
+	{
+		n >>= 1U;
+		++bits;
+	}
+	return bits;
+}
 
 /** @brief The slots an event of @p Event takes. */
 template<typename Event>
 constexpr std::size_t slots_for = sizeof(Event) <= head_payload
 	? 1
-	: 1 + (sizeof(Event) - head_payload + tail_payload - 1) / tail_payload;
+	: 1 + ((sizeof(Event) - head_payload + tail_payload - 1) / tail_payload);
 
 /**
  * @brief The ring. @p Slots is a power of two so the index wraps cleanly at
@@ -88,17 +109,17 @@ struct ring
 {
 	static_assert(Slots >= 2 && (Slots & (Slots - 1)) == 0, "Slots must be a power of two");
 	static_assert(MaxEventSlots >= 1 && MaxEventSlots <= Slots, "MaxEventSlots must be from 1 to Slots");
-	static constexpr unsigned log2_slots = __builtin_ctz(Slots);
+	static constexpr unsigned log2_slots = log2_of(Slots);
 	static constexpr std::size_t guard_slots = MaxEventSlots - 1;
 
-	std::atomic<std::uint32_t> write_index;   ///< next index to reserve
-	std::atomic<std::uint32_t> lapped;        ///< writers lapped by the ring, modulo 2^32
-	slot slots[Slots + guard_slots];
+	std::atomic<std::uint32_t> write_index{0};   ///< next index to reserve
+	std::atomic<std::uint32_t> lapped{0};        ///< writers lapped by the ring, modulo 2^32
+	std::array<slot, Slots + guard_slots> slots;
 
 	/** @brief The header of a slot of the event whose first slot is at @p index. */
 	static constexpr std::uint32_t header(std::uint32_t type, std::uint32_t index, bool head)
 	{
-		std::uint32_t const lap = ((index >> log2_slots) + 1) & 0x7fffu;
+		std::uint32_t const lap = ((index >> log2_slots) + 1) & lap_mask;
 		return type | (head ? head_bit : 0) | (lap << lap_shift);
 	}
 
@@ -106,18 +127,19 @@ struct ring
 	template<typename Event>
 	[[gnu::always_inline]] void write(std::uint32_t type, std::uint32_t timestamp, Event const& event)
 	{
-		static_assert(std::is_trivially_copyable<Event>::value, "an event is copied byte for byte");
+		static_assert(std::is_trivially_copyable_v<Event>, "an event is copied byte for byte");
 		constexpr std::size_t count = slots_for<Event>;
 		static_assert(count <= MaxEventSlots, "the event is larger than the ring's MaxEventSlots");
 
 		std::uint32_t const index = write_index.fetch_add(count, std::memory_order_relaxed);
-		slot* const first = &slots[index & (Slots - 1)];
+		slot& first = slots[index & (Slots - 1)];
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): an event is copied byte for byte, which aliasing allows
 		auto const* const bytes = reinterpret_cast<unsigned char const*>(&event);
 
-		first->words[0] = timestamp;
-		std::memcpy(&first->words[1], bytes, sizeof(Event) < head_payload ? sizeof(Event) : head_payload);
-		write_tails<Event>(first, header(type, index, false), bytes, std::make_index_sequence<count - 1>{});
-		first->header.store(header(type, index, true), std::memory_order_release);
+		first.words[0] = timestamp;
+		std::memcpy(&first.words[1], bytes, std::min(sizeof(Event), head_payload));
+		write_tails<Event>(&first, header(type, index, false), bytes, std::make_index_sequence<count - 1>{});
+		first.header.store(header(type, index, true), std::memory_order_release);
 		// Keeps the read below after the store above: a writer lapped before
 		// its last write is never missed.
 		std::atomic_signal_fence(std::memory_order_seq_cst);
@@ -130,8 +152,8 @@ private:
 	 *         (none for a one-slot event), each with the header @p tail. */
 	template<typename Event, std::size_t... Tails>
 	[[gnu::always_inline]] static void write_tails([[maybe_unused]] slot* first, [[maybe_unused]] std::uint32_t tail,
-	                                               [[maybe_unused]] unsigned char const* bytes,
-	                                               std::index_sequence<Tails...>)
+	                                        [[maybe_unused]] unsigned char const* bytes,
+	                                        std::index_sequence<Tails...> /*tails*/)
 	{
 		(write_tail<Event, Tails + 1>(first, tail, bytes), ...);
 	}
@@ -140,10 +162,13 @@ private:
 	template<typename Event, std::size_t I>
 	[[gnu::always_inline]] static void write_tail(slot* first, std::uint32_t tail, unsigned char const* bytes)
 	{
-		constexpr std::size_t offset = head_payload + (I - 1) * tail_payload;
+		constexpr std::size_t offset = head_payload + ((I - 1) * tail_payload);
 		constexpr std::size_t left = sizeof(Event) - offset;
-		std::memcpy(first[I].words, bytes + offset, left < tail_payload ? left : tail_payload);
-		first[I].header.store(tail, std::memory_order_release);
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): the slots after the head, which the guard zone keeps in the ring; indexing slots instead costs 2 instructions per slot
+		slot& next = first[I];
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): the event's bytes, past those already copied
+		std::memcpy(next.words.data(), bytes + offset, std::min(left, tail_payload));
+		next.header.store(tail, std::memory_order_release);
 	}
 };
 

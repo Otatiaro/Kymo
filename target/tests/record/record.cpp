@@ -9,9 +9,11 @@
  * alternate with pauses it can catch up in.
  */
 #include "events.hpp"
-
 #include "../qemu/qemu.hpp"
 
+#include <kymo/kymo.hpp>
+
+#include <atomic>
 #include <cstdint>
 
 namespace

@@ -1,0 +1,20 @@
+---
+# The checks of target/tests, for the same reasons: these are test programs
+# too. Besides, on OpSy's suite:
+#
+# - bugprone-throwing-static-initialization, cert-err58-cpp: the suite
+#   registers its cases, and OpSy builds its objects, with constructors not
+#   marked noexcept; the images build with -fno-exceptions.
+# - IgnoreMacros: the suite's CHECK is a do-while macro.
+InheritParentConfig: true
+Checks: >
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -misc-use-internal-linkage,
+  -bugprone-throwing-static-initialization,
+  -cert-err58-cpp
+CheckOptions:
+  cppcoreguidelines-avoid-do-while.IgnoreMacros: true
+  readability-function-cognitive-complexity.IgnoreMacros: true
+...

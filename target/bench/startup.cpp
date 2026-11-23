@@ -4,6 +4,8 @@
  *          The vector table stays in flash; only SysTick is used.
  */
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 extern "C"
@@ -28,32 +30,55 @@ void Default_Handler()
 	}
 }
 
-__attribute__((section(".isr_vector"), used))
-const void* const vectors[16] = {
-	&_estack,
-	reinterpret_cast<const void*>(&Reset_Handler),
-	reinterpret_cast<const void*>(&Default_Handler),   // NMI
-	reinterpret_cast<const void*>(&Default_Handler),   // HardFault
-	reinterpret_cast<const void*>(&Default_Handler),   // MemManage
-	reinterpret_cast<const void*>(&Default_Handler),   // BusFault
-	reinterpret_cast<const void*>(&Default_Handler),   // UsageFault
-	reinterpret_cast<const void*>(&Default_Handler),   // SecureFault (v8-M)
-	nullptr, nullptr, nullptr,
-	reinterpret_cast<const void*>(&Default_Handler),   // SVCall
-	reinterpret_cast<const void*>(&Default_Handler),   // DebugMonitor
-	nullptr,
-	reinterpret_cast<const void*>(&Default_Handler),   // PendSV
-	reinterpret_cast<const void*>(&SysTick_Handler),
+} // extern "C"
+
+namespace
+{
+
+/// The exceptions of an Armv7-M or Armv8-M core, after the reset value of the stack pointer.
+constexpr std::size_t exceptions = 15;
+
+/// The vector table: the initial stack pointer, then the exception handlers.
+struct vector_table
+{
+	std::uint32_t const* stack;
+	std::array<void (*)(), exceptions> handlers;
 };
 
-void Reset_Handler()
+} // namespace
+
+__attribute__((section(".isr_vector"), used))
+constexpr vector_table vectors{
+	&_estack,
+	{
+		&Reset_Handler,
+		&Default_Handler,   // NMI
+		&Default_Handler,   // HardFault
+		&Default_Handler,   // MemManage
+		&Default_Handler,   // BusFault
+		&Default_Handler,   // UsageFault
+		&Default_Handler,   // SecureFault (v8-M)
+		nullptr,
+		nullptr,
+		nullptr,
+		&Default_Handler,   // SVCall
+		&Default_Handler,   // DebugMonitor
+		nullptr,
+		&Default_Handler,   // PendSV
+		&SysTick_Handler,
+	},
+};
+
+extern "C" void Reset_Handler()
 {
-	const std::uint32_t* source = &_sidata;
+	// The linker symbols bound the sections; to the compiler each is a single
+	// word, and it knows nothing of what lies past it.
+	// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic,clang-analyzer-security.ArrayBound)
+	std::uint32_t const* source = &_sidata;
 	for (std::uint32_t* destination = &_sdata; destination < &_edata; ++destination, ++source)
 		*destination = *source;
 	for (std::uint32_t* destination = &_sbss; destination < &_ebss; ++destination)
 		*destination = 0;
+	// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic,clang-analyzer-security.ArrayBound)
 	bench_main();
 }
-
-} // extern "C"

@@ -22,7 +22,7 @@
 
 #include <cstdint>
 
-#if defined(__ARM_ARCH_6M__)
+#ifdef __ARM_ARCH_6M__
 #error "kymo::type_id needs MOVW, which ARMv6-M (Cortex-M0, M0+) lacks"
 #endif
 
@@ -44,7 +44,7 @@ struct anchor
 template<typename Event>
 [[gnu::always_inline]] inline std::uint32_t type_id_word()
 {
-	std::uint32_t id;
+	std::uint32_t id = 0;
 	asm(".ifndef %c1.kymo_id\n\t"
 	    ".pushsection .kymo.ids,\"G\",%%progbits,%c1.kymo_id,comdat\n\t"
 	    ".weak %c1.kymo_id\n"

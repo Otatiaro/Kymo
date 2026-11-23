@@ -1,0 +1,18 @@
+---
+# The target's checks, less those that do not fit test programs:
+#
+# - readability-magic-numbers, cppcoreguidelines-avoid-magic-numbers: the
+#   literals of a test are its data (seeds, sizes, expected values); a name
+#   for each would say nothing the line does not.
+# - cppcoreguidelines-avoid-non-const-global-variables: a test shares its
+#   state with the interrupt handlers that preempt it, which take no
+#   arguments.
+# - misc-use-internal-linkage: a test is a program as a user writes it; the
+#   host tests find its events and objects by name in the ELF.
+InheritParentConfig: true
+Checks: >
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -misc-use-internal-linkage
+...

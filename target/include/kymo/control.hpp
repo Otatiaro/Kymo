@@ -37,7 +37,8 @@
 #include <type_traits>
 
 #ifndef KYMO_CONTROL_DEFAULT
-#define KYMO_CONTROL_DEFAULT 0xffffff7fu
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): set per program, before any translation unit includes this file
+#define KYMO_CONTROL_DEFAULT 0xffffff7fU
 #endif
 
 namespace kymo
@@ -68,25 +69,26 @@ constexpr family family_of = family::application;
 template<typename Event>
 constexpr family family_of<Event, std::void_t<decltype(Event::kymo_family)>> = Event::kymo_family;
 
-/** @brief The bit of @p f in the control word. */
-constexpr std::uint32_t bit(family f)
+/** @brief The bit of @p which in the control word. */
+constexpr std::uint32_t bit(family which)
 {
-	return 1u << static_cast<unsigned>(f);
+	return 1U << static_cast<unsigned>(which);
 }
 
 /// The control word. The host finds it in the ELF.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): written by the program and by the host
 inline std::atomic<std::uint32_t> control{KYMO_CONTROL_DEFAULT};
 
-/** @brief Records the events of @p f. Safe from any priority, any context. */
-inline void enable(family f)
+/** @brief Records the events of @p which. Safe from any priority, any context. */
+inline void enable(family which)
 {
-	control.fetch_or(bit(f), std::memory_order_relaxed);
+	control.fetch_or(bit(which), std::memory_order_relaxed);
 }
 
-/** @brief Stops recording the events of @p f. Safe from any priority, any context. */
-inline void disable(family f)
+/** @brief Stops recording the events of @p which. Safe from any priority, any context. */
+inline void disable(family which)
 {
-	control.fetch_and(~bit(f), std::memory_order_relaxed);
+	control.fetch_and(~bit(which), std::memory_order_relaxed);
 }
 
 /** @brief Stops all recording. Safe from any priority, any context, a fault handler included. */

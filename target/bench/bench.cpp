@@ -20,6 +20,7 @@
 
 #include <kymo/ring.hpp>
 
+#include <atomic>
 #include <cstdint>
 
 #ifndef KYMO_BENCH_CORE_CLOCK_HZ
@@ -45,6 +46,7 @@ constexpr std::uint32_t tick_hz = 1000;
 
 volatile std::uint32_t& reg(std::uintptr_t address)
 {
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): a register at a fixed address
 	return *reinterpret_cast<volatile std::uint32_t*>(address);
 }
 
@@ -57,20 +59,28 @@ constexpr std::uintptr_t syst_cvr = 0xE000E018;
 constexpr std::uintptr_t itm_ter = 0xE0000E00;
 constexpr std::uintptr_t itm_tcr = 0xE0000E80;
 
+constexpr std::uint32_t demcr_trcena = 1U << 24;
+constexpr std::uint32_t dwt_ctrl_cyccntena = 1U;
+constexpr std::uint32_t syst_csr_enable = 1U;
+constexpr std::uint32_t syst_csr_tickint = 1U << 1;
+constexpr std::uint32_t syst_csr_clksource = 1U << 2;
+constexpr std::uint32_t itm_tcr_itmena = 1U;
+constexpr std::uint32_t itm_stimulus_fifoready = 1U;
+
 constexpr std::uint32_t swo_port = 1;
-constexpr std::uintptr_t swo_stimulus = 0xE0000000 + 4 * swo_port;
+constexpr std::uintptr_t swo_stimulus = 0xE0000000 + (4 * swo_port);
 
 bool swo_enabled()
 {
-	return (reg(itm_tcr) & 1u) != 0           // ITMENA
-		&& (reg(itm_ter) & (1u << swo_port)) != 0;
+	return (reg(itm_tcr) & itm_tcr_itmena) != 0
+		&& (reg(itm_ter) & (1U << swo_port)) != 0;
 }
 
 // A disabled port never reads FIFOREADY: the wait ends when the probe turns
 // ITM off, or the target would hang once it leaves.
 bool swo_write(std::uint32_t word)
 {
-	while ((reg(swo_stimulus) & 1u) == 0)    // FIFOREADY
+	while ((reg(swo_stimulus) & itm_stimulus_fifoready) == 0)
 	{
 		if (!swo_enabled())
 			return false;
@@ -126,13 +136,13 @@ void SysTick_Handler()
 
 [[noreturn]] void bench_main()
 {
-	reg(demcr) |= 1u << 24;   // TRCENA: DWT on
+	reg(demcr) |= demcr_trcena;   // DWT on
 	reg(dwt_cyccnt) = 0;
-	reg(dwt_ctrl) |= 1u;      // CYCCNTENA
+	reg(dwt_ctrl) |= dwt_ctrl_cyccntena;
 
-	reg(syst_rvr) = KYMO_BENCH_CORE_CLOCK_HZ / tick_hz - 1;
+	reg(syst_rvr) = (KYMO_BENCH_CORE_CLOCK_HZ / tick_hz) - 1;
 	reg(syst_cvr) = 0;
-	reg(syst_csr) = 0b111;    // core clock, interrupt, enable
+	reg(syst_csr) = syst_csr_clksource | syst_csr_tickint | syst_csr_enable;
 
 	for (;;)
 	{

@@ -7,6 +7,7 @@
 
 #include <kymo/kymo.hpp>
 
+#include <array>
 #include <cstdint>
 
 struct one
@@ -17,13 +18,13 @@ struct one
 struct two
 {
 	std::uint32_t index;
-	std::uint32_t words[3];
+	std::array<std::uint32_t, 3> words;
 };
 
 struct four
 {
 	std::uint32_t index;
-	std::uint32_t words[10];
+	std::array<std::uint32_t, 10> words;
 };
 
 /** @brief The type of the @p n th event: one, two and four in turn. */
@@ -57,8 +58,8 @@ inline void emit_numbered(std::uint32_t n, std::uint32_t index)
 	default:
 	{
 		four event{index, {}};
-		for (std::uint32_t k = 0; k < 10; ++k)
-			event.words[k] = index * 10 + k;
+		for (std::uint32_t k = 0; k < event.words.size(); ++k)
+			event.words[k] = (index * 10) + k;
 		kymo::emit(event);
 		break;
 	}
