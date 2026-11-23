@@ -123,6 +123,9 @@ foreach(cpu cortex-m33 cortex-m4)
 		# Lock-free writes: an interrupt that emits, at every instruction of an emit.
 		kymo_qemu_test(emit-preemption-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES emit/preemption.cpp qemu/preempt.cpp)
+		# A writer preempted for a full lap: what the host takes as intact is.
+		kymo_qemu_test(emit-lap-${cpu}-${level} ${cpu} ${level} ICOUNT
+			SOURCES emit/lap.cpp qemu/preempt.cpp)
 		# The control word: value from reset, filter by family, freeze, and
 		# enable() and disable() interrupted at every instruction.
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT

@@ -44,10 +44,51 @@ pub struct Recorder<'a> {
     copy: Vec<u8>,
     /// The loss held back, `from..to`.
     loss: Option<(u32, u32)>,
+    /// The indexes the last pass read unpublished, of an older lap: a writer
+    /// the ring laps after that may never have finished.
+    unpublished: Vec<u32>,
+    /// The indexes settled lost while read unpublished: their writers may be
+    /// under way, and a danger is raised if the ring laps them.
+    skipped: Vec<u32>,
+    /// The writers that may still write to slots the ring has reserved again.
+    dangers: Vec<Danger>,
+    raised: u32,
+    lifted: u32,
+    expired: u32,
+}
+
+/// The events `start..end`, read unpublished then lapped by the ring: their
+/// writers were preempted for a full lap, or may have been, and may still
+/// write their slots, now reserved again by newer events. `head` is the first
+/// of them not yet seen published; each event seen published is done.
+///
+/// The host cannot tell a writer still preempted from one that finished and
+/// whose first slot a newer event then overwrote: a danger expires once the
+/// write index reaches `expires`, a lap after it was raised.
+struct Danger {
+    start: u32,
+    head: u32,
+    end: u32,
+    expires: u32,
+    /// Every writer seen done: their slots may hold others' first slots
+    /// overwritten, but nothing is written to them any more.
+    done: bool,
+}
+
+impl Danger {
+    /// Whether the slots `from..end` cover a slot of the `count`-slot event at
+    /// `index`, guard zone included: slot positions are compared, not indexes.
+    fn covers(&self, from: u32, index: u32, count: u32, slots: u32) -> bool {
+        let length = self.end.wrapping_sub(from);
+        let mask = slots - 1;
+        (0..count).any(|slot| length > mask || (index.wrapping_add(slot).wrapping_sub(from) & mask) < length)
+    }
 }
 
 impl<'a> Recorder<'a> {
-    /// Starts at the current write index: events already in the ring are left out.
+    /// Starts at the current write index: events already in the ring are left
+    /// out, but their writers not yet done are watched, as they may write on
+    /// into the slots of the events recorded.
     pub fn start(target: &mut dyn Target, catalogue: &'a Catalogue, address: u32) -> Result<Self> {
         let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
         let physical = ring.slots + ring.max_event_slots - 1;
@@ -59,10 +100,46 @@ impl<'a> Recorder<'a> {
             read_end: 0,
             copy: vec![0; (physical * SLOT_BYTES) as usize],
             loss: None,
+            unpublished: Vec::new(),
+            skipped: Vec::new(),
+            dangers: Vec::new(),
+            raised: 0,
+            lifted: 0,
+            expired: 0,
         };
-        recorder.next = recorder.write_index(target)?;
-        recorder.read_end = recorder.next;
+        let write_index = recorder.write_index(target)?;
+        recorder.read(target, 0, physical)?;
+        let after = recorder.write_index(target)?;
+        // The last lap, its writers given up on: a ring not yet filled once has
+        // nothing before index 0.
+        recorder.read_end = write_index;
+        let mut index = write_index.wrapping_sub(write_index.min(ring.slots));
+        recorder.unpublished = recorder.unpublished_from(index);
+        while index != write_index {
+            index = recorder.give_up(index, after)?;
+        }
+        recorder.next = write_index;
         Ok(recorder)
+    }
+
+    /// What a failed test reports of the recorder.
+    #[cfg(test)]
+    pub fn state(&self) -> String {
+        let dangers: Vec<_> = self
+            .dangers
+            .iter()
+            .map(|d| (d.start, d.head, d.end, d.expires, d.done))
+            .collect();
+        format!(
+            "next {} read_end {} unpublished {:?} dangers {dangers:?}",
+            self.next, self.read_end, self.unpublished
+        )
+    }
+
+    /// The dangers raised, lifted, and expired unlifted, since recording started.
+    #[cfg(test)]
+    pub fn dangers(&self) -> (u32, u32, u32) {
+        (self.raised, self.lifted, self.expired)
     }
 
     /// The first index not yet settled: where recording started, before the
@@ -80,6 +157,7 @@ impl<'a> Recorder<'a> {
     pub fn pass(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<u32> {
         let write_index = self.write_index(target)?;
         self.settle(write_index, items)?;
+        self.lift(target, write_index)?;
         let slots = self.ring.slots;
         if write_index.wrapping_sub(self.next) > slots {
             self.lost(items, self.next, write_index.wrapping_sub(slots));
@@ -152,17 +230,40 @@ impl<'a> Recorder<'a> {
         }
     }
 
-    /// Settles the indexes the last pass read against `write_index`, read after them.
+    /// Settles the indexes the last pass read against `write_index`, read
+    /// after them. An event is lost if the ring went past it, if its slots do
+    /// not hold it whole, or if a writer may still write to them.
     fn settle(&mut self, write_index: u32, items: &mut Vec<Item<'a>>) -> Result<()> {
+        for index in std::mem::take(&mut self.skipped) {
+            if write_index.wrapping_sub(index) > self.ring.slots {
+                self.raise(index, write_index);
+            } else {
+                self.skipped.push(index);
+            }
+        }
         let mut index = self.next;
         while (self.read_end.wrapping_sub(index) as i32) > 0 {
             if write_index.wrapping_sub(index) > self.ring.slots {
-                self.lost(items, index, index.wrapping_add(1));
-                index = index.wrapping_add(1);
+                let to = self.give_up(index, write_index)?;
+                self.lost(items, index, to);
+                index = to;
                 continue;
             }
             let position = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
             match self.header(index) {
+                Header::Unwritten
+                    if self
+                        .dangers
+                        .iter()
+                        .any(|danger| danger.covers(danger.start, index, 1, self.ring.slots)) =>
+                {
+                    // Its first slot may have been overwritten by a writer the
+                    // ring lapped; or its own writer is under way, and is
+                    // watched until the ring laps it.
+                    self.lost(items, index, index.wrapping_add(1));
+                    self.skipped.push(index);
+                    index = index.wrapping_add(1);
+                }
                 Header::Unwritten => break,
                 Header::Tail => {
                     // A following slot of an event whose first slot was lost.
@@ -170,20 +271,144 @@ impl<'a> Recorder<'a> {
                     index = index.wrapping_add(1);
                 }
                 Header::Head => {
-                    let event =
-                        decode::event(self.catalogue, self.ring, index, &self.copy[position..])?.ok_or_else(|| {
-                            format!("event {index}: published, yet its following slots do not carry its header")
-                        })?;
-                    let count = decode::slots_for(event.event.size) as u32;
-                    let slots = self.copy[position..position + (count * SLOT_BYTES) as usize].to_vec();
-                    index = index.wrapping_add(count);
-                    self.flush(items);
-                    items.push(Item::Event(event, slots));
+                    let count = self.count(index)?;
+                    let event = decode::event(self.catalogue, self.ring, index, &self.copy[position..])?;
+                    let to = index.wrapping_add(count);
+                    match event {
+                        Some(event) if !self.endangered(index, count) => {
+                            let slots = self.copy[position..position + (count * SLOT_BYTES) as usize].to_vec();
+                            self.flush(items);
+                            items.push(Item::Event(event, slots));
+                        }
+                        _ => self.lost(items, index, to),
+                    }
+                    index = to;
                 }
             }
         }
+        self.unpublished = self.unpublished_from(index);
         self.next = index;
         self.read_end = index;
+        Ok(())
+    }
+
+    /// The indexes `from..read_end` read unpublished, of an older lap, by this
+    /// pass or an earlier one: not yet written, or written by a writer still
+    /// under way. A later read may show a newer event there instead.
+    fn unpublished_from(&self, from: u32) -> Vec<u32> {
+        let mut unpublished: Vec<u32> = self
+            .unpublished
+            .iter()
+            .copied()
+            .filter(|&index| (index.wrapping_sub(from) as i32) >= 0)
+            .collect();
+        let mut index = from;
+        while (self.read_end.wrapping_sub(index) as i32) > 0 {
+            if matches!(self.header(index), Header::Unwritten) && self.older(index) && !unpublished.contains(&index) {
+                unpublished.push(index);
+            }
+            index = index.wrapping_add(1);
+        }
+        unpublished
+    }
+
+    /// Gives up on `index`, read by the last pass and since lapped by the
+    /// ring, and returns the next index to settle. A first slot of an event
+    /// read unpublished means its writer had not finished: from there to the
+    /// next event read published, writers may still write, and a danger is
+    /// raised over those slots.
+    fn give_up(&mut self, index: u32, write_index: u32) -> Result<u32> {
+        Ok(match self.header(index) {
+            Header::Head => index.wrapping_add(self.count(index)?),
+            // Read unpublished by the last pass, which the copy holds, or by an earlier one.
+            Header::Unwritten if self.older(index) || self.unpublished.contains(&index) => {
+                self.raise(index, write_index)
+            }
+            _ => index.wrapping_add(1),
+        })
+    }
+
+    /// Raises a danger from `index`, read unpublished and since lapped, to the
+    /// next event read published, at most `max_event_slots`; returns its end.
+    fn raise(&mut self, index: u32, write_index: u32) -> u32 {
+        let mut end = index.wrapping_add(1);
+        let last = index.wrapping_add(self.ring.max_event_slots);
+        while end != self.read_end && end != last && !matches!(self.header(end), Header::Head) {
+            end = end.wrapping_add(1);
+        }
+        self.dangers.push(Danger {
+            start: index,
+            head: index,
+            end,
+            expires: write_index.wrapping_add(self.ring.slots),
+            done: false,
+        });
+        self.raised += 1;
+        end
+    }
+
+    /// Whether the copy holds, at `index`'s position, a slot of an older lap:
+    /// not yet reserved again when it was read.
+    fn older(&self, index: u32) -> bool {
+        let at = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
+        let word = u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes"));
+        let behind = decode::lap(index, self.ring).wrapping_sub(word >> 17) & 0x7fff;
+        behind != 0 && behind < 0x4000
+    }
+
+    /// The slots of the event whose first slot, published in the copy, is at `index`.
+    fn count(&self, index: u32) -> Result<u32> {
+        let at = ((index & (self.ring.slots - 1)) * SLOT_BYTES) as usize;
+        self.slots_of(
+            index,
+            u32::from_le_bytes(self.copy[at..at + 4].try_into().expect("four bytes")),
+        )
+    }
+
+    /// The slots of the event at `index` whose first slot's header is `word`.
+    fn slots_of(&self, index: u32, word: u32) -> Result<u32> {
+        let type_id = (word & 0xffff) as u16;
+        let event = self
+            .catalogue
+            .events
+            .get(&type_id)
+            .ok_or_else(|| format!("event {index}: type id {type_id} is not in the image"))?;
+        Ok(decode::slots_for(event.size) as u32)
+    }
+
+    /// Whether a writer may still write to a slot of the `count`-slot event at `index`.
+    fn endangered(&self, index: u32, count: u32) -> bool {
+        self.dangers
+            .iter()
+            .any(|danger| !danger.done && danger.covers(danger.head, index, count, self.ring.slots))
+    }
+
+    /// Reads the first slot of each danger's oldest writer: once published,
+    /// that writer is done. A danger with all its writers done is lifted.
+    /// Called before the slots are read, so a read never meets a writer that
+    /// was seen done. A danger expires a lap after it was raised.
+    fn lift(&mut self, target: &mut dyn Target, write_index: u32) -> Result<()> {
+        let mut dangers = std::mem::take(&mut self.dangers);
+        for danger in dangers.iter_mut().filter(|danger| !danger.done) {
+            while (danger.end.wrapping_sub(danger.head) as i32) > 0 {
+                let position = danger.head & (self.ring.slots - 1);
+                let word = target.read_word(self.address + self.ring.slots_offset as u32 + position * SLOT_BYTES)?;
+                if !matches!(decode::header(word, danger.head, self.ring), Header::Head) {
+                    break;
+                }
+                danger.head = danger.head.wrapping_add(self.slots_of(danger.head, word)?);
+            }
+            if (danger.end.wrapping_sub(danger.head) as i32) <= 0 {
+                danger.done = true;
+                self.lifted += 1;
+            }
+        }
+        dangers.retain(|danger| {
+            let live = (write_index.wrapping_sub(danger.expires) as i32) < 0;
+            self.expired += u32::from(!live && !danger.done);
+            live
+        });
+        self.dangers = dangers;
         Ok(())
     }
 
