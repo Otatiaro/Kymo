@@ -40,6 +40,11 @@ jobs:
           sudo apt-get install -y ninja-build qemu-system-arm
           qemu-system-arm --version | head -1
 
+      # The host's dependencies and build, kept between runs.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+
       # kymo events, kymo decode and kymo record, for the layout, decode,
       # record and symbols tests; then the host's own tests, its format and
       # its lints.
@@ -70,6 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
 
       - name: Build and test kymo-ui
         run: |
@@ -160,6 +169,12 @@ jobs:
 
       - name: Install Ninja and QEMU
         run: sudo apt-get update && sudo apt-get install -y ninja-build qemu-system-arm
+
+      # The same release build of the host in the four jobs: one cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+          shared-key: host-release
 
       # kymo record, for the suite's trace (target/opsy/tests/trace).
       - name: Build the host
