@@ -30,17 +30,24 @@ const SUSPECT: Color32 = Color32::from_rgba_premultiplied(115, 75, 15, 110);
 pub struct Timeline {
     catalogue: &'static Catalogue,
     trace: Trace<'static>,
+    /// The event types of the catalogue, a row each, in its order.
+    ids: Vec<u16>,
     rows: Vec<Row>,
+    /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
+    /// The losses and suspect lines after the last event, which the next
+    /// event closes.
+    pending: Vec<usize>,
+    /// The cycles of the last event, in the trace's order.
+    before: Option<i64>,
     /// The cycles of the first event, which the view counts from.
-    origin: i64,
-    /// The earliest and latest event, in cycles from `origin`.
-    first: f64,
-    last: f64,
-    /// The view: its left edge and its width, in cycles from `origin`.
+    origin: Option<i64>,
+    /// The earliest and latest event, in cycles.
+    bounds: Option<(i64, i64)>,
+    /// The view: its left edge and its width, in cycles from the origin.
     start: f64,
     span: f64,
-    /// The status line's counts, taken once: each is a pass over the trace.
+    /// The status line's counts, kept as elements are added.
     events: usize,
     losses: usize,
     suspects: u64,
@@ -58,6 +65,7 @@ struct Row {
 
 /// A loss or suspect line, between the cycles of the events recorded
 /// before and after it.
+#[derive(Clone, Copy)]
 struct Mark {
     from: i64,
     to: i64,
@@ -66,96 +74,115 @@ struct Mark {
 
 impl Timeline {
     pub fn new(catalogue: &'static Catalogue, trace: Trace<'static>, measure: bool) -> Self {
-        let ids: Vec<u16> = catalogue.events.keys().copied().collect();
-        let mut rows: Vec<Vec<(i64, usize)>> = vec![Vec::new(); ids.len()];
-        let (mut marks, mut pending, mut before) = (Vec::new(), Vec::new(), None);
-        let (mut lowest, mut highest) = (i64::MAX, i64::MIN);
-        for (n, element) in trace.elements.iter().enumerate() {
-            if let Element::Event { event, cycles, .. } = element {
-                let row = ids.binary_search(&event.event.id).expect("a type of the catalogue");
-                rows[row].push((*cycles, n));
-                for element in pending.drain(..) {
-                    let from = before.unwrap_or(*cycles);
-                    marks.push(Mark {
-                        from: from.min(*cycles),
-                        to: from.max(*cycles),
-                        element,
-                    });
-                }
-                before = Some(*cycles);
-                lowest = lowest.min(*cycles);
-                highest = highest.max(*cycles);
-            } else {
-                pending.push(n);
-            }
-        }
-        let after = before.unwrap_or_default();
-        marks.extend(pending.into_iter().map(|element| Mark {
-            from: after,
-            to: after,
-            element,
-        }));
-        marks.sort_by_key(|mark| mark.from);
-        let origin = trace
-            .elements
-            .iter()
-            .find_map(|element| match element {
-                Element::Event { cycles, .. } => Some(*cycles),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let rows = catalogue
-            .events
-            .values()
-            .zip(rows)
-            .map(|(event, mut events)| {
-                events.sort_by_key(|event| event.0);
-                Row {
-                    name: event.name.clone(),
-                    levels: Levels::new(events.iter().map(|event| event.0).collect()),
-                    elements: events.iter().map(|event| event.1).collect(),
-                }
-            })
-            .collect();
-        let (first, last) = if lowest <= highest {
-            ((lowest - origin) as f64, (highest - origin) as f64)
-        } else {
-            (0.0, 0.0)
-        };
-        let losses = trace
-            .elements
-            .iter()
-            .filter(|element| matches!(element, Element::Lost { .. }))
-            .count();
-        let (events, suspects) = (trace.events(), trace.suspects());
         let mut timeline = Self {
             catalogue,
             trace,
-            rows,
-            marks,
-            origin,
-            first,
-            last,
+            ids: catalogue.events.keys().copied().collect(),
+            rows: catalogue
+                .events
+                .values()
+                .map(|event| Row {
+                    name: event.name.clone(),
+                    levels: Levels::default(),
+                    elements: Vec::new(),
+                })
+                .collect(),
+            marks: Vec::new(),
+            pending: Vec::new(),
+            before: None,
+            origin: None,
+            bounds: None,
             start: 0.0,
             span: 0.0,
-            events,
-            losses,
-            suspects,
+            events: 0,
+            losses: 0,
+            suspects: 0,
             painted: 0.0,
             measure: measure.then(Measure::default),
         };
+        timeline.add(0);
         timeline.whole();
         timeline
     }
 
+    /// Takes in the trace's elements from `from` on. Each row's new events,
+    /// sorted, come after those it holds.
+    fn add(&mut self, from: usize) {
+        let mut added: Vec<Vec<(i64, usize)>> = vec![Vec::new(); self.rows.len()];
+        for (n, element) in self.trace.elements.iter().enumerate().skip(from) {
+            match element {
+                Element::Event { event, cycles, .. } => {
+                    let cycles = *cycles;
+                    let row = self
+                        .ids
+                        .binary_search(&event.event.id)
+                        .expect("a type of the catalogue");
+                    added[row].push((cycles, n));
+                    let before = self.before.unwrap_or(cycles);
+                    self.marks.extend(self.pending.drain(..).map(|element| Mark {
+                        from: before.min(cycles),
+                        to: before.max(cycles),
+                        element,
+                    }));
+                    self.before = Some(cycles);
+                    self.origin.get_or_insert(cycles);
+                    let (lowest, highest) = self.bounds.get_or_insert((cycles, cycles));
+                    *lowest = (*lowest).min(cycles);
+                    *highest = (*highest).max(cycles);
+                    self.events += 1;
+                }
+                Element::Lost { .. } => {
+                    self.losses += 1;
+                    self.pending.push(n);
+                }
+                Element::Suspect { writers, .. } => {
+                    self.suspects += u64::from(*writers);
+                    self.pending.push(n);
+                }
+            }
+        }
+        self.marks.sort_by_key(|mark| mark.from);
+        for (row, mut events) in self.rows.iter_mut().zip(added) {
+            events.sort_by_key(|event| event.0);
+            let cycles: Vec<i64> = events.iter().map(|event| event.0).collect();
+            row.levels.extend(&cycles);
+            row.elements.extend(events.iter().map(|event| event.1));
+        }
+    }
+
+    /// The marks, those after the last event at its cycles.
+    fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        let after = self.before.unwrap_or_default();
+        self.marks
+            .iter()
+            .copied()
+            .chain(self.pending.iter().map(move |&element| Mark {
+                from: after,
+                to: after,
+                element,
+            }))
+    }
+
+    fn origin(&self) -> i64 {
+        self.origin.unwrap_or_default()
+    }
+
+    /// The earliest and latest event, in cycles from the origin.
+    fn first(&self) -> f64 {
+        self.bounds.map_or(0.0, |(lowest, _)| (lowest - self.origin()) as f64)
+    }
+
+    fn last(&self) -> f64 {
+        self.bounds.map_or(0.0, |(_, highest)| (highest - self.origin()) as f64)
+    }
     /// Shows the whole capture.
     fn whole(&mut self) {
         self.span = self.widest() / 1.05;
-        self.start = self.first - (self.span * 0.025);
+        self.start = self.first() - (self.span * 0.025);
     }
 
     fn widest(&self) -> f64 {
-        ((self.last - self.first) * 1.05).max(NARROWEST)
+        ((self.last() - self.first()) * 1.05).max(NARROWEST)
     }
 
     /// Zooms by `factor` about the point `at` of the view's width, 0 to 1.
@@ -166,8 +193,8 @@ impl Timeline {
     }
 
     fn clamp(&mut self) {
-        let low = self.first - self.span / 2.0;
-        let high = (self.last - self.span / 2.0).max(low);
+        let low = self.first() - self.span / 2.0;
+        let high = (self.last() - self.span / 2.0).max(low);
         self.start = self.start.clamp(low, high);
     }
 
@@ -198,7 +225,7 @@ impl Timeline {
         self.clamp();
 
         let view = View {
-            origin: self.origin,
+            origin: self.origin(),
             start: self.start,
             span: self.span,
             left: area.left(),
@@ -248,8 +275,7 @@ impl Timeline {
         let bottom = (area.top() + self.rows.len() as f32 * ROW).min(area.bottom());
         for (kind, color) in [(false, LOSS), (true, SUSPECT)] {
             let marks = self
-                .marks
-                .iter()
+                .marks()
                 .filter(|mark| matches!(self.trace.elements[mark.element], Element::Suspect { .. }) == kind);
             for (from, to) in view.bands(marks) {
                 painter.rect_filled(
@@ -352,12 +378,7 @@ impl Timeline {
                 }
             }
         }
-        for mark in self
-            .marks
-            .iter()
-            .filter(|mark| mark.from <= high && mark.to >= low)
-            .take(8)
-        {
+        for mark in self.marks().filter(|mark| mark.from <= high && mark.to >= low).take(8) {
             if !text.is_empty() {
                 text.push('\n');
             }
@@ -444,7 +465,7 @@ impl View {
     }
 
     /// The marks in view, at least a pixel wide, merged where they touch.
-    fn bands<'m>(&self, marks: impl Iterator<Item = &'m Mark>) -> Vec<(f32, f32)> {
+    fn bands(&self, marks: impl Iterator<Item = Mark>) -> Vec<(f32, f32)> {
         let (low, high) = (
             self.cycles(self.left),
             self.origin + (self.start + self.span).ceil() as i64,
@@ -502,7 +523,7 @@ impl Timeline {
         if frame == 0 {
             self.whole();
         } else if frame == phase {
-            let middle = (self.first + self.last) / 2.0;
+            let middle = (self.first() + self.last()) / 2.0;
             self.span = NARROWEST;
             self.start = middle - NARROWEST / 2.0;
         } else if frame == 2 * phase {
