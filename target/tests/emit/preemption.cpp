@@ -109,7 +109,7 @@ std::uint32_t read_event(std::uint32_t index, std::uint16_t& type, event_bytes& 
 	for (std::uint32_t i = 1; i < count; ++i)
 	{
 		kymo::slot const& tail = trace_ring.slots[(index + i) & slot_mask];
-		if (tail.header.load(std::memory_order_acquire) != ring_type::header(type, index, false))
+		if (tail.header.load(std::memory_order_acquire) != ring_type::header(type, index + i, false))
 			fail("no complete continuation slot", index + i);
 		std::size_t const offset = kymo::head_payload + ((i - 1) * kymo::tail_payload);
 		std::size_t const left = size - offset;

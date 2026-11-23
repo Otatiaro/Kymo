@@ -1,12 +1,13 @@
 //! Offline decoding: the events a copy of the trace ring holds, read with the
 //! catalogue of the image that wrote it (events.rs).
 //!
-//! The copy is the bytes of `kymo::trace_ring`, as a debugger dumps them from
-//! a stopped target. The ring's rule (target/include/kymo/ring.hpp) decides
+//! The copy is the bytes of a `kymo::ring`, as a debugger dumps them from a
+//! stopped target. The ring's rule (target/include/kymo/ring.hpp) decides
 //! what it holds: an event is known intact while the write index has not gone
 //! a full ring past it, and complete when its first slot and every following
-//! slot carry its header. Older events, and events reserved but not yet
-//! published, are left out.
+//! slot carry its type and the lap of their own index. Older events, and
+//! events reserved but not yet published, are left out. An event that reaches
+//! the end of the ring goes on at its first slot.
 
 use crate::events::{Catalogue, Event, Kind, Ring, Type};
 use crate::symbols::Symbols;
@@ -40,7 +41,7 @@ pub fn slots_for(size: u64) -> u64 {
     }
 }
 
-/// The lap the headers of the event at `index` carry.
+/// The lap the header of the slot at `index` carries.
 pub fn lap(index: u32, ring: &Ring) -> u32 {
     ((index >> ring.slots.trailing_zeros()).wrapping_add(1)) & LAP_MASK
 }
@@ -49,7 +50,7 @@ pub fn lap(index: u32, ring: &Ring) -> u32 {
 pub enum Header {
     /// The first slot of an event at `index`.
     Head,
-    /// A following slot of an event that started before `index`, in its lap.
+    /// A following slot of an event that started before `index`.
     Tail,
     /// Nothing written at `index` yet: an older lap, or a slot never written.
     Unwritten,
@@ -68,8 +69,8 @@ pub fn header(word: u32, index: u32, ring: &Ring) -> Header {
 /// The event whose first slot is at `index`, read from `slots` (that slot and
 /// those after it, 16 bytes each), if they hold it whole: the first slot
 /// published in `index`'s lap, and as many following slots as the event
-/// takes, each carrying its header. A type the image does not have is an
-/// error.
+/// takes, each carrying its type and its own index's lap. A type the image
+/// does not have is an error.
 pub fn event<'a>(catalogue: &'a Catalogue, ring: &Ring, index: u32, slots: &[u8]) -> Result<Option<Decoded<'a>>> {
     let header = |slot: u64| word(slots, slot * SLOT_BYTES);
     let words = |slot: u64| &slots[(slot * SLOT_BYTES + 4) as usize..][..12];
@@ -86,8 +87,8 @@ pub fn event<'a>(catalogue: &'a Catalogue, ring: &Ring, index: u32, slots: &[u8]
     if count * SLOT_BYTES > slots.len() as u64 {
         return Ok(None);
     }
-    let tail = u32::from(type_id) | lap(index, ring) << LAP_SHIFT;
-    if (1..count).any(|slot| header(slot) != tail) {
+    let tail = |slot: u64| u32::from(type_id) | lap(index.wrapping_add(slot as u32), ring) << LAP_SHIFT;
+    if (1..count).any(|slot| header(slot) != tail(slot)) {
         return Ok(None);
     }
     let mut payload = words(0)[4..].to_vec();
@@ -103,32 +104,60 @@ pub fn event<'a>(catalogue: &'a Catalogue, ring: &Ring, index: u32, slots: &[u8]
     }))
 }
 
+/// The slots most events take, the most any event of the image takes.
+pub fn max_event_slots(catalogue: &Catalogue) -> u32 {
+    catalogue
+        .events
+        .values()
+        .map(|event| slots_for(event.size) as u32)
+        .max()
+        .unwrap_or(1)
+}
+
+/// The `count` slots from `index` on, out of the ring's `slots` (16 bytes
+/// each, by position): past the last position, they go on at the first.
+pub fn gather(slots: &[u8], ring: &Ring, index: u32, count: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity((count as u64 * SLOT_BYTES) as usize);
+    for n in 0..count {
+        let at = (u64::from(index.wrapping_add(n) & (ring.slots - 1)) * SLOT_BYTES) as usize;
+        bytes.extend_from_slice(&slots[at..at + SLOT_BYTES as usize]);
+    }
+    bytes
+}
+
+/// The event whose first slot is at `index` among the ring's `slots`, if they
+/// hold it whole, as `event` decides.
+pub fn event_at<'a>(catalogue: &'a Catalogue, ring: &Ring, slots: &[u8], index: u32) -> Result<Option<Decoded<'a>>> {
+    let head = word(slots, u64::from(index & (ring.slots - 1)) * SLOT_BYTES);
+    if head & HEAD_BIT == 0 || head >> LAP_SHIFT != lap(index, ring) {
+        return Ok(None);
+    }
+    let type_id = (head & TYPE_MASK) as u16;
+    let count = catalogue
+        .events
+        .get(&type_id)
+        .map_or(1, |event| slots_for(event.size).min(u64::from(ring.slots)) as u32);
+    event(catalogue, ring, index, &gather(slots, ring, index, count))
+}
+
 fn word(bytes: &[u8], offset: u64) -> u32 {
     let offset = offset as usize;
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
 }
 
-/// The write index of the copy, and its events, oldest first.
-pub fn decode<'a>(catalogue: &'a Catalogue, bytes: &[u8]) -> Result<(u32, Vec<Decoded<'a>>)> {
-    let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
+/// The write index of the copy of `ring`, and its events, oldest first.
+pub fn decode<'a>(catalogue: &'a Catalogue, ring: &Ring, bytes: &[u8]) -> Result<(u32, Vec<Decoded<'a>>)> {
     if bytes.len() as u64 != ring.size {
-        return Err(format!("the copy has {} bytes, kymo::trace_ring {}", bytes.len(), ring.size).into());
+        return Err(format!("the copy has {} bytes, {} {}", bytes.len(), ring.name, ring.size).into());
     }
-    let physical = u64::from(ring.slots + ring.max_event_slots - 1);
-    let slots = &bytes[ring.slots_offset as usize..(ring.slots_offset + physical * SLOT_BYTES) as usize];
+    let slots = &bytes[ring.slots_offset as usize..(ring.slots_offset + u64::from(ring.slots) * SLOT_BYTES) as usize];
     let write_index = word(bytes, ring.write_index_offset);
 
     let mut decoded = Vec::new();
     for position in 0..ring.slots.min(write_index) {
         // The one index of the last full ring that maps to this slot.
         let index = write_index - 1 - (write_index - 1 - position) % ring.slots;
-        let Some(event) = event(
-            catalogue,
-            ring,
-            index,
-            &slots[(u64::from(position) * SLOT_BYTES) as usize..],
-        )?
-        else {
+        let Some(event) = event_at(catalogue, ring, slots, index)? else {
             continue;
         };
         if u64::from(index) + slots_for(event.event.size) > u64::from(write_index) {

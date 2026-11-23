@@ -1,7 +1,7 @@
 //! The catalogue of event types, read from the target's ELF: each type id the
 //! linker assigned, the type it stands for, and that type's layout from the
-//! DWARF; and the geometry of the trace ring. Nothing about an event is known
-//! to the host in advance.
+//! DWARF; and every trace ring, each static object of type `kymo::ring<N>`.
+//! Nothing about an event is known to the host in advance.
 //!
 //! A type id is the offset of a symbol `kymo::anchor<Event>::name.kymo_id` in
 //! `.kymo.ids` (target/include/kymo/type_id.hpp). The DWARF has no trace of
@@ -19,7 +19,7 @@ use std::path::Path;
 const ID_SUFFIX: &str = ".kymo_id";
 const ANCHOR_PREFIX: &str = "kymo::anchor<";
 const ANCHOR_SUFFIX: &str = ">::name";
-const RING: &str = "kymo::trace_ring";
+const RING_PREFIX: &str = "kymo::ring<";
 
 /// A type as the DWARF describes it: how it reads in C++, its size when it
 /// has one, and what its bytes hold.
@@ -69,11 +69,13 @@ pub struct Event {
     pub fields: Vec<Field>,
 }
 
-/// `kymo::ring<Slots, MaxEventSlots>`, as the image instantiates it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A static object of type `kymo::ring<Slots>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ring {
+    /// The object's qualified name.
+    pub name: String,
+    pub address: u64,
     pub slots: u32,
-    pub max_event_slots: u32,
     pub size: u64,
     pub write_index_offset: u64,
     /// The writers lapped by the ring, the word right after the write index.
@@ -84,8 +86,8 @@ pub struct Ring {
 pub struct Catalogue {
     /// Every event type of the image, by id.
     pub events: BTreeMap<u16, Event>,
-    /// The trace ring, when the image has one.
-    pub ring: Option<Ring>,
+    /// The trace rings of the image, by name.
+    pub rings: Vec<Ring>,
     /// The functions and static objects pointer fields are named by.
     pub symbols: Symbols,
 }
@@ -114,9 +116,31 @@ pub fn read(path: &Path) -> Result<Catalogue> {
         .collect::<Result<_>>()?;
     Ok(Catalogue {
         events,
-        ring: debug.ring,
+        rings: debug.rings,
         symbols: Symbols::read(&file, &debug.bases),
     })
+}
+
+impl Catalogue {
+    /// The ring named `channel`, or else the image's only ring.
+    pub fn ring(&self, channel: Option<&str>) -> Result<&Ring> {
+        let names = || {
+            self.rings
+                .iter()
+                .map(|ring| ring.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (channel, self.rings.as_slice()) {
+            (_, []) => Err("the image has no kymo::ring".into()),
+            (None, [ring]) => Ok(ring),
+            (None, _) => Err(format!("the image has several rings, choose one with --channel: {}", names()).into()),
+            (Some(channel), rings) => rings
+                .iter()
+                .find(|ring| ring.name == channel)
+                .ok_or_else(|| format!("the image has no ring {channel}; its rings: {}", names()).into()),
+        }
+    }
 }
 
 /// The qualified name of the type behind each id.
@@ -157,13 +181,13 @@ type Names = HashMap<DebugInfoOffset, String>;
 
 struct DebugInfo {
     layouts: BTreeMap<String, Layout>,
-    ring: Option<Ring>,
+    rings: Vec<Ring>,
     /// The base class subobjects of each static object, by address.
     bases: BTreeMap<u64, Vec<(u64, String)>>,
 }
 
 /// The layout of each structure named in `wanted`, the same in every unit
-/// that defines it, the ring, and the base classes of static objects.
+/// that defines it, the rings, and the base classes of static objects.
 fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     let endian = if file.is_little_endian() {
         RunTimeEndian::Little
@@ -185,11 +209,12 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     }
 
     // Every structure, class and union by qualified name, the units that
-    // define each, and every static variable by address.
+    // define each, every static variable by address, and every variable by
+    // qualified name.
     let mut names = Names::new();
     let mut definitions: BTreeMap<String, Vec<DebugInfoOffset>> = BTreeMap::new();
     let mut variables = Vec::new();
-    let mut ring = None;
+    let mut variable_names = Names::new();
     for unit in &units {
         let mut scope: Vec<(isize, String)> = Vec::new();
         let mut entries = unit.entries();
@@ -227,9 +252,8 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
                 if let Some(address) = static_address(&dwarf, unit, entry)? {
                     variables.push((address, global));
                 }
-                if ring.is_none() && qualified.as_deref() == Some(RING) {
-                    let ty = type_of(entry)?.ok_or("kymo::trace_ring has no type")?;
-                    ring = Some(ring_layout(&dwarf, unit, ty)?);
+                if let Some(qualified) = qualified {
+                    variable_names.insert(global, qualified);
                 }
                 continue;
             }
@@ -271,20 +295,29 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     }
 
     let mut bases = BTreeMap::new();
+    let mut rings: Vec<Ring> = Vec::new();
     for (address, variable) in variables {
         let Some(ty) = variable_type(&units, variable)? else {
             continue;
         };
-        let Some(name) = names.get(&strip(&units, ty)?) else {
+        let ty = strip(&units, ty)?;
+        let Some(name) = names.get(&ty) else {
             continue;
         };
+        if name.starts_with(RING_PREFIX) && !rings.iter().any(|ring| ring.address == address) {
+            let object = variable_name(&units, &variable_names, variable)?
+                .ok_or_else(|| format!("a {name} at {address:#x} without a name"))?;
+            let (unit, offset) = locate(&units, ty)?;
+            rings.push(ring_layout(&dwarf, unit, offset, object, address)?);
+        }
         let mut found = Vec::new();
         base_classes(&units, &names, &definitions, name, 0, &mut found)?;
         if !found.is_empty() {
             bases.insert(address, found);
         }
     }
-    Ok(DebugInfo { layouts, ring, bases })
+    rings.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(DebugInfo { layouts, rings, bases })
 }
 
 fn global(unit: &Unit, offset: UnitOffset) -> Result<DebugInfoOffset> {
@@ -345,6 +378,26 @@ fn variable_type(units: &[Unit], mut offset: DebugInfoOffset) -> Result<Option<D
                 Some(next) => offset = next,
                 None => return Ok(None),
             },
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// The qualified name of the variable at `offset`, given by the entry that
+/// declares it when the one that defines it has none.
+fn variable_name(units: &[Unit], variable_names: &Names, mut offset: DebugInfoOffset) -> Result<Option<String>> {
+    for _ in 0..8 {
+        if let Some(name) = variable_names.get(&offset) {
+            return Ok(Some(name.clone()));
+        }
+        let (unit, local) = locate(units, offset)?;
+        let entry = unit.entry(local)?;
+        let origin = entry
+            .attr_value(gimli::DW_AT_abstract_origin)
+            .or_else(|| entry.attr_value(gimli::DW_AT_specification));
+        match origin.map(|value| reference(unit, value)).transpose()?.flatten() {
+            Some(next) => offset = next,
             None => return Ok(None),
         }
     }
@@ -418,13 +471,19 @@ fn base_classes(
     Ok(())
 }
 
-/// The geometry of `kymo::ring<Slots, MaxEventSlots>` at `offset`.
-fn ring_layout(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: UnitOffset) -> Result<Ring> {
+/// The ring `name` at `address`, of the type `kymo::ring<Slots>` at `offset`.
+fn ring_layout(
+    dwarf: &gimli::Dwarf<Slice>,
+    unit: &gimli::Unit<Slice>,
+    offset: UnitOffset,
+    name: String,
+    address: u64,
+) -> Result<Ring> {
     let entry = unit.entry(offset)?;
     let size = entry
         .attr_value(gimli::DW_AT_byte_size)
         .and_then(|value| value.udata_value())
-        .ok_or("kymo::trace_ring has no size")?;
+        .ok_or_else(|| format!("{name}: its type has no size"))?;
     let mut parameters = BTreeMap::new();
     let mut members = BTreeMap::new();
     let mut tree = unit.entries_tree(Some(offset))?;
@@ -455,25 +514,26 @@ fn ring_layout(dwarf: &gimli::Dwarf<Slice>, unit: &gimli::Unit<Slice>, offset: U
             _ => {}
         }
     }
-    let get = |map: &BTreeMap<String, u64>, name: &str| {
-        map.get(name)
+    let get = |map: &BTreeMap<String, u64>, wanted: &str| {
+        map.get(wanted)
             .copied()
-            .ok_or_else(|| format!("kymo::trace_ring: no {name} in the DWARF"))
+            .ok_or_else(|| format!("{name}: no {wanted} in the DWARF"))
     };
     let ring = Ring {
         slots: u32::try_from(get(&parameters, "Slots")?)?,
-        max_event_slots: u32::try_from(get(&parameters, "MaxEventSlots")?)?,
         size,
         lapped_offset: get(&members, "lapped")?,
         write_index_offset: get(&members, "write_index")?,
         slots_offset: get(&members, "slots")?,
+        name,
+        address,
     };
-    if !ring.slots.is_power_of_two()
-        || ring.max_event_slots == 0
-        || ring.max_event_slots > ring.slots
+    if ring.slots < 2
+        || !ring.slots.is_power_of_two()
         || ring.lapped_offset != ring.write_index_offset + 4
+        || ring.size < ring.slots_offset + u64::from(ring.slots) * 16
     {
-        return Err(format!("kymo::trace_ring: unexpected geometry {ring:?}").into());
+        return Err(format!("{}: unexpected geometry {ring:?}", ring.name).into());
     }
     Ok(ring)
 }

@@ -6,7 +6,7 @@
 
 use crate::capture::{self, Record};
 use crate::decode::{self, Decoded};
-use crate::events::Catalogue;
+use crate::events::{Catalogue, Ring};
 use crate::target::Result;
 use crate::time::Timeline;
 
@@ -39,10 +39,9 @@ pub enum Element<'a> {
 }
 
 impl<'a> Trace<'a> {
-    /// The capture `bytes`, its seconds at `clock` hertz, or the capture's,
-    /// or else at the frequency measured over the whole capture.
-    pub fn read(catalogue: &'a Catalogue, bytes: &[u8], clock: Option<u64>) -> Result<Self> {
-        let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
+    /// The capture `bytes` of `ring`, its seconds at `clock` hertz, or the
+    /// capture's, or else at the frequency measured over the whole capture.
+    pub fn read(catalogue: &'a Catalogue, ring: &Ring, bytes: &[u8], clock: Option<u64>) -> Result<Self> {
         let (header, records) = capture::read(bytes)?;
         let mut timeline = Timeline::new(clock.or(header.clock));
         let mut elements = Vec::new();

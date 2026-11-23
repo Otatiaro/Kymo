@@ -8,18 +8,21 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 usage: kymo events <elf>
-       kymo decode <elf> <ring or capture> [--clock <Hz>]
+       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.
 
-decode: lists the events a copy of the trace ring holds, oldest first; the
-copy is the bytes of kymo::trace_ring, dumped from a stopped target running
-the image. Given a capture made by kymo record --out, prints what kymo
-record printed while making it, but for the seconds: they are recomputed
-over the whole capture.
+decode: lists the events a copy of a trace ring holds, oldest first; the
+copy is the bytes of a kymo::ring object, dumped from a stopped target
+running the image. Given a capture made by kymo record --out, prints what
+kymo record printed while making it, but for the seconds: they are
+recomputed over the whole capture.
+
+The ring is the image's only kymo::ring object, or the one --channel names
+by its qualified name (e.g. app::trace_ring) when the image has several.
 
 Each event line reads: index, cycles (the cycle counter timestamp extended
 to 64 bits), seconds since the first event (- without a frequency), type,
@@ -34,6 +37,7 @@ index went from <from> to <to>, where the probe could not tell which events
 they wrote into: events recorded near it may hold their bytes.
 
 record options:
+  --channel <ring>   the kymo::ring object to drain, as for decode
   --probe-id, --chip, --speed as for bench; qemu: --probe-id <host>:<port>,
                      QEMU's monitor started with -qmp tcp:<host>:<port>,server=on,wait=off
   --duration <seconds>  stop after this long
@@ -80,18 +84,26 @@ fn run() -> Result<()> {
             return Ok(());
         }
         Some("decode") => {
-            let arguments: Vec<String> = arguments.collect();
-            let (elf, ring, clock) = match arguments.as_slice() {
-                [elf, ring] => (elf, ring, None),
-                [elf, ring, option, hz] if option == "--clock" => (elf, ring, Some(hz.parse()?)),
-                _ => return Err(USAGE.into()),
+            let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
+                return Err(USAGE.into());
             };
-            let catalogue = events::read(&PathBuf::from(elf))?;
-            let bytes = std::fs::read(ring).map_err(|error| format!("{ring}: {error}"))?;
-            if capture::is_capture(&bytes) {
-                return record::print_capture(&catalogue, &bytes, clock);
+            let mut channel = None;
+            let mut clock = None;
+            while let Some(option) = arguments.next() {
+                let value = arguments.next().ok_or_else(|| format!("{option} needs a value"))?;
+                match option.as_str() {
+                    "--channel" => channel = Some(value),
+                    "--clock" => clock = Some(value.parse()?),
+                    _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
+                }
             }
-            let (write_index, decoded) = decode::decode(&catalogue, &bytes)?;
+            let catalogue = events::read(&PathBuf::from(elf))?;
+            let ring = catalogue.ring(channel.as_deref())?;
+            let bytes = std::fs::read(&copy).map_err(|error| format!("{copy}: {error}"))?;
+            if capture::is_capture(&bytes) {
+                return record::print_capture(&catalogue, ring, &bytes, clock);
+            }
+            let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;
             decode::print(&catalogue, write_index, &decoded, clock);
             return Ok(());
         }
@@ -108,6 +120,7 @@ fn run() -> Result<()> {
     let mut duration = None;
     let mut out = None;
     let mut clock = None;
+    let mut channel = None;
     while let Some(option) = arguments.next() {
         let mut value = || arguments.next().ok_or_else(|| format!("{option} needs a value"));
         match option.as_str() {
@@ -125,6 +138,7 @@ fn run() -> Result<()> {
             "--duration" => duration = Some(Duration::from_secs_f64(value()?.parse()?)),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--clock" => clock = Some(value()?.parse()?),
+            "--channel" => channel = Some(value()?),
             _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
         }
     }
@@ -137,24 +151,9 @@ fn run() -> Result<()> {
     let elf_path = elf.ok_or(USAGE)?;
     if command.as_deref() == Some("record") {
         let catalogue = events::read(&elf_path)?;
-        let ring = catalogue.ring.as_ref().ok_or("the image has no kymo::trace_ring")?;
-        let symbol = elf::Elf::read(&elf_path)?.symbol("_ZN4kymo10trace_ringE")?;
-        if u64::from(symbol.size) != ring.size {
-            return Err(format!(
-                "kymo::trace_ring: {} bytes in the symbol table, {} in DWARF",
-                symbol.size, ring.size
-            )
-            .into());
-        }
+        let ring = catalogue.ring(channel.as_deref())?;
         let mut target = target::open(&connection)?;
-        return record::run(
-            target.as_mut(),
-            &catalogue,
-            symbol.address,
-            duration,
-            out.as_deref(),
-            clock,
-        );
+        return record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock);
     }
     let elf = elf::Elf::read(&elf_path)?;
     let settings = bench::Settings {

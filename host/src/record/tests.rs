@@ -70,9 +70,8 @@ struct Simulated {
 
 impl Simulated {
     fn new(seed: u64) -> Self {
-        let physical = SLOTS + MAX_EVENT_SLOTS - 1;
         Self {
-            memory: vec![0; ((SLOTS_OFFSET + physical * 16) / 4) as usize],
+            memory: vec![0; ((SLOTS_OFFSET + SLOTS * 16) / 4) as usize],
             stores: VecDeque::new(),
             written: BTreeMap::new(),
             write_index: 0,
@@ -141,8 +140,8 @@ impl Simulated {
             .flat_map(|word| (index << 8 | word).to_le_bytes())
             .collect();
         let timestamp = !index;
-        let lap = ((index / SLOTS) + 1) & 0x7fff;
-        let slot = |n: u32| ((SLOTS_OFFSET + ((index % SLOTS) + n) * 16) / 4) as usize;
+        let lap = |n: u32| (((index + n) / SLOTS) + 1) & 0x7fff;
+        let slot = |n: u32| ((SLOTS_OFFSET + ((index + n) % SLOTS) * 16) / 4) as usize;
         let word = |offset: u32| u32::from_le_bytes(payload[offset as usize..][..4].try_into().unwrap());
         self.stores.push_back((slot(0) + 1, timestamp));
         for offset in (0..size.min(8)).step_by(4) {
@@ -156,10 +155,10 @@ impl Simulated {
                     .push_back((slot(tail) + 1 + ((offset - from) / 4) as usize, word(offset)));
             }
             self.stores
-                .push_back((slot(tail), u32::from(type_id) | lap << LAP_SHIFT));
+                .push_back((slot(tail), u32::from(type_id) | lap(tail) << LAP_SHIFT));
         }
         self.stores
-            .push_back((slot(0), u32::from(type_id) | HEAD_BIT | lap << LAP_SHIFT));
+            .push_back((slot(0), u32::from(type_id) | HEAD_BIT | lap(0) << LAP_SHIFT));
         self.stores.push_back((READ_BACK, index));
         self.written.insert(
             index,
@@ -265,7 +264,6 @@ impl Target for Simulated {
 }
 
 fn catalogue() -> Catalogue {
-    let physical = SLOTS + MAX_EVENT_SLOTS - 1;
     Catalogue {
         events: TYPES
             .iter()
@@ -281,14 +279,15 @@ fn catalogue() -> Catalogue {
                 )
             })
             .collect(),
-        ring: Some(Ring {
+        rings: vec![Ring {
+            name: "trace_ring".into(),
+            address: u64::from(BASE),
             slots: SLOTS,
-            max_event_slots: MAX_EVENT_SLOTS,
-            size: u64::from(SLOTS_OFFSET + physical * 16),
+            size: u64::from(SLOTS_OFFSET + SLOTS * 16),
             write_index_offset: u64::from(WRITE_INDEX_OFFSET),
             lapped_offset: u64::from(LAPPED_OFFSET),
             slots_offset: u64::from(SLOTS_OFFSET),
-        }),
+        }],
         symbols: Default::default(),
     }
 }
@@ -296,7 +295,7 @@ fn catalogue() -> Catalogue {
 /// Every index from where recording starts to where it stops is either in
 /// an event read as written or in a loss, once; whenever the writer stops,
 /// two passes settle everything it wrote; and the run went through losses,
-/// every type, and events whose slots run into the guard zone.
+/// every type, and events whose slots run across the end of the ring.
 #[test]
 fn records_what_was_written_or_reports_it_lost() {
     records_with(false, true, 20);
@@ -353,9 +352,9 @@ impl Target for Scripted {
 #[test]
 fn credits_a_writer_read_unpublished_then_published_once_lapped() {
     let catalogue = catalogue();
-    let physical = SLOTS + MAX_EVENT_SLOTS - 1;
+    let ring = &catalogue.rings[0];
     let mut target = Scripted {
-        memory: vec![0; ((SLOTS_OFFSET + physical * 16) / 4) as usize],
+        memory: vec![0; ((SLOTS_OFFSET + SLOTS * 16) / 4) as usize],
         counter_reads: 0,
         at: 2,
         change: Vec::new(),
@@ -367,7 +366,7 @@ fn credits_a_writer_read_unpublished_then_published_once_lapped() {
     for position in 0..SLOTS {
         target.memory[((SLOTS_OFFSET + position * 16) / 4) as usize] = 1 | HEAD_BIT | 2 << LAP_SHIFT;
     }
-    let mut recorder = Recorder::start(&mut target, &catalogue, BASE).unwrap();
+    let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
     target.counter_reads = 0;
     // The writer reserves its slot; two passes read it unpublished.
     target.memory[(WRITE_INDEX_OFFSET / 4) as usize] = writer + 1;
@@ -406,6 +405,7 @@ fn credits_a_writer_read_unpublished_then_published_once_lapped() {
 #[test]
 fn a_capture_reads_back_as_the_recording_yielded_it() {
     let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
     let path = std::env::temp_dir().join(format!("kymo-model-{}.kcap", std::process::id()));
     let clock = 1_000_000;
     let (mut losses, mut suspects) = (0, 0);
@@ -413,7 +413,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
         let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         target.preempt = true;
         target.run(1000);
-        let mut recorder = Recorder::start(&mut target, &catalogue, BASE).unwrap();
+        let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
         let header = Header {
             first: recorder.next(),
             clock: Some(clock),
@@ -454,7 +454,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
         writer.finish().unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        let trace = Trace::read(&catalogue, &bytes, None).unwrap();
+        let trace = Trace::read(&catalogue, ring, &bytes, None).unwrap();
         assert_eq!(trace.first, header.first, "seed {seed}");
         assert_eq!(trace.end, Some(recorder.next()), "seed {seed}");
         assert_eq!(trace.frequency, Some(clock as f64), "seed {seed}");
@@ -508,6 +508,7 @@ fn slots(type_id: u16) -> u32 {
 
 fn records_with(preempt: bool, bursts: bool, seeds: u64) {
     let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
     let (mut all_suspects, mut silent) = (0, 0);
     for seed in 1..=seeds {
         let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
@@ -519,7 +520,7 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
         while preempt && target.preempted.is_empty() {
             target.run(1);
         }
-        let mut recorder = Recorder::start(&mut target, &catalogue, BASE).unwrap();
+        let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
         let mut expected = recorder.next();
         let mut items = Vec::new();
         let mut blocked = 0;
@@ -536,9 +537,8 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
                 // Accepted only within ADR-054's limits, a host fallen behind or
                 // a writer held past its danger's expiry: a lapped writer the
                 // host did not record overwrote the first slot at `next`, which
-                // waits for the ring to lap it. The slot is at `next`'s position,
-                // or in the guard zone, where the host looks for the following
-                // slot of an event that started near the end.
+                // waits for the ring to lap it: that writer's slot at `next`'s
+                // position carries `next`'s lap.
                 let header = |position: u32| target.memory[((SLOTS_OFFSET + position * 16) / 4) as usize];
                 let unseen = |index: u32| {
                     !items
@@ -547,9 +547,9 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
                 };
                 let stomped = target.stale.iter().any(|&(index, _, _)| {
                     (0..slots(target.written[&index].type_id)).any(|slot| {
-                        let position = index % SLOTS + slot;
-                        position % SLOTS == next % SLOTS
-                            && header(position) >> LAP_SHIFT == ((index / SLOTS) + 1) & 0x7fff
+                        let position = (index + slot) % SLOTS;
+                        position == next % SLOTS
+                            && header(position) >> LAP_SHIFT == (((index + slot) / SLOTS) + 1) & 0x7fff
                     }) && index < next
                         && unseen(index)
                         && !target.read_unpublished.contains(&index)
@@ -570,7 +570,7 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
             }
         }
         recorder.finish(&mut target, &mut items).unwrap();
-        let (mut events, mut lost, mut guard, mut dropped, mut shown, mut wrong) = ([0u32; 3], 0, 0, 0u32, 0u32, 0);
+        let (mut events, mut lost, mut across, mut dropped, mut shown, mut wrong) = ([0u32; 3], 0, 0, 0u32, 0u32, 0);
         let mut suspects = 0;
         let mut previous_lost = false;
         for item in &items {
@@ -612,7 +612,7 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
                         wrong += 1;
                     }
                     events[usize::from(written.type_id - 1)] += 1;
-                    guard += u32::from(event.index % SLOTS + count > SLOTS);
+                    across += u32::from(event.index % SLOTS + count > SLOTS);
                     shown += count;
                     expected = event.index + count;
                 }
@@ -620,8 +620,8 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
         }
         assert_eq!(expected, recorder.next(), "seed {seed}: end");
         assert!(
-            lost > 0 && guard > 0 && events.iter().all(|&count| count > 0),
-            "seed {seed}: coverage {events:?} {lost} {guard} dangers {:?}",
+            lost > 0 && across > 0 && events.iter().all(|&count| count > 0),
+            "seed {seed}: coverage {events:?} {lost} {across} dangers {:?}",
             recorder.dangers()
         );
         assert_eq!(preempt, target.preemptions > 0, "seed {seed}: preemptions");
