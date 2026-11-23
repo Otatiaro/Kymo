@@ -1,21 +1,10 @@
-//! Kymo host.
+//! Kymo command line.
 
-mod bench;
-mod capture;
-mod decode;
-mod elf;
-mod events;
-mod record;
-mod ring;
-mod swo;
-mod symbols;
-mod target;
-mod time;
-
+use kymo::target::{self, Backend, Connection, Result};
+use kymo::{bench, capture, decode, elf, events, record};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
-use target::{Backend, Connection, Result};
 
 const USAGE: &str = "\
 usage: kymo events <elf>
