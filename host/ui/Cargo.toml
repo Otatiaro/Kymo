@@ -1,0 +1,11 @@
+[package]
+name = "kymo-ui"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Kymo timeline: shows a capture made by kymo record"
+publish = false
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+kymo = { path = ".." }

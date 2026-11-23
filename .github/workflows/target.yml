@@ -63,6 +63,30 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
 
+  # The timeline, kymo-ui: its build, tests, format and lints, and the kymo
+  # binary held free of its graphics stack.
+  timeline:
+    name: Timeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and test kymo-ui
+        run: |
+          sudo apt-get update && sudo apt-get install -y libudev-dev
+          cargo build --release --manifest-path host/Cargo.toml -p kymo-ui
+          cargo test --release --manifest-path host/Cargo.toml -p kymo-ui
+          cargo fmt --check --manifest-path host/Cargo.toml -p kymo-ui
+          cargo clippy --all-targets --manifest-path host/Cargo.toml -p kymo-ui -- -D warnings
+
+      - name: The kymo binary pulls no graphics
+        run: |
+          set -euo pipefail
+          if cargo tree --manifest-path host/Cargo.toml -p kymo -e normal --prefix none | grep -E '^(egui|eframe|wgpu|winit) '; then
+            echo "kymo depends on a graphics crate" >&2
+            exit 1
+          fi
+
   # clang-tidy over the target code, with the .clang-tidy files under target/:
   # the library and its tests, the bench image, and the OpSy adapter with its
   # test, each as the Arm toolchain compiles it (target/tidy.py); each public

@@ -31,7 +31,8 @@ crash, and turns the recording into a timeline and metrics on the host.
 | Path | Content |
 |---|---|
 | `target/` | the target side, C++17: core and one adapter per RTOS ([OpSy](https://github.com/Otatiaro/OpSy) first) |
-| `host/` | the host side, Rust: acquisition (probe-rs, J-Link and ST-Link libraries), model, outputs (CLI, MCP, UI) |
+| `host/` | the host side, Rust: acquisition (probe-rs, J-Link and ST-Link libraries), model, the `kymo` CLI |
+| `host/ui/` | `kymo-ui`, the timeline of a capture (egui on wgpu), apart so the CLI pulls no graphics |
 
 Both sides evolve in the same commit: the event format is the contract between
 them.
