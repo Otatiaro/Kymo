@@ -162,6 +162,33 @@ foreach(test layout decode record symbols)
 	endforeach()
 endforeach()
 
+# - record-lap: writers held for more than a lap while the host records,
+#   which follows (it reads each held writer before the lap) or falls behind
+#   (the lap comes between two of its reads).
+foreach(cpu cortex-m33 cortex-m4)
+	foreach(lap follows behind)
+		if(lap STREQUAL follows)
+			set(hold_pause 1000000)
+		else()
+			set(hold_pause 0)
+		endif()
+		set(name record-lap-${lap}-${cpu}-Os)
+		kymo_qemu_image(${name} ${cpu} Os SOURCES record/lap.cpp qemu/preempt.cpp
+			DEFINITIONS KYMO_TEST_HOLD_PAUSE=${hold_pause})
+		if(KYMO_HOST)
+			kymo_qemu_command(${name}
+				${CMAKE_CURRENT_SOURCE_DIR}/record/record.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+				--image $<TARGET_FILE:${name}> --host ${KYMO_HOST} --lap ${lap} --icount-shift ${KYMO_ICOUNT_SHIFT})
+			# Whether the host follows depends on how fast it reads: alone,
+			# not slowed down by tests run alongside.
+			set_tests_properties(${name} PROPERTIES RUN_SERIAL ON)
+		else()
+			add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
+			set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+		endif()
+	endforeach()
+endforeach()
+
 # What an emit costs, in instructions executed under QEMU, against the
 # threshold: 50 for a one-slot event, 15 for each slot more. QEMU counts
 # instructions; cycles are measured on hardware. Optimised builds only: -O0

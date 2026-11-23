@@ -63,6 +63,11 @@ pub struct Recorder<'a> {
     skipped: Vec<u32>,
     /// The writers that may still write to slots the ring has reserved again.
     dangers: Vec<Danger>,
+    /// Writers read unpublished, then read published by a pass the ring
+    /// lapped them before it ended: done, but maybe lapped before they
+    /// published, and counted after. Each may account for one writer counted
+    /// lapped until the write index reaches its value, a lap on.
+    late: Vec<u32>,
     raised: u32,
     lifted: u32,
     expired: u32,
@@ -121,6 +126,7 @@ impl<'a> Recorder<'a> {
             unpublished: Vec::new(),
             skipped: Vec::new(),
             dangers: Vec::new(),
+            late: Vec::new(),
             raised: 0,
             lifted: 0,
             expired: 0,
@@ -345,10 +351,16 @@ impl<'a> Recorder<'a> {
     /// ring, and returns the next index to settle. A first slot of an event
     /// read unpublished means its writer had not finished: from there to the
     /// next event read published, writers may still write, and a danger is
-    /// raised over those slots.
+    /// raised over those slots. One read unpublished before, then published,
+    /// may have published once lapped: it is late.
     fn give_up(&mut self, index: u32, write_index: u32) -> Result<u32> {
         Ok(match self.header(index) {
-            Header::Head => index.wrapping_add(self.count(index)?),
+            Header::Head => {
+                if self.unpublished.contains(&index) {
+                    self.late.push(write_index.wrapping_add(self.ring.slots));
+                }
+                index.wrapping_add(self.count(index)?)
+            }
             // Read unpublished by the last pass, which the copy holds, or by an earlier one.
             Header::Unwritten if self.older(index) || self.unpublished.contains(&index) => {
                 self.raise(index, write_index)
@@ -439,13 +451,15 @@ impl<'a> Recorder<'a> {
             live
         });
         self.dangers = dangers;
+        self.late
+            .retain(|&expires| (write_index.wrapping_sub(expires) as i32) < 0);
         Ok(())
     }
 
     /// Matches the writers counted lapped since the last pass against the
-    /// dangers, oldest first, raised up to this pass; reports those left over.
-    /// A danger's credit goes when it expires: a writer counted after that
-    /// was held past it, out of the host's reach.
+    /// dangers, oldest first, raised up to this pass, then the late writers;
+    /// reports those left over. A credit goes when it expires: a writer
+    /// counted after that was held past it, out of the host's reach.
     fn account(&mut self, lapped: u32, write_index: u32, items: &mut Vec<Item<'a>>) {
         let mut writers = lapped.wrapping_sub(self.lapped);
         for danger in &mut self.dangers {
@@ -453,6 +467,9 @@ impl<'a> Recorder<'a> {
             danger.credit -= taken;
             writers -= taken;
         }
+        let taken = writers.min(self.late.len() as u32);
+        self.late.drain(..taken as usize);
+        writers -= taken;
         if writers > 0 {
             items.push(Item::Suspect {
                 from: self.pass_index,
@@ -588,7 +605,9 @@ pub fn run(
 fn suspect(writers: u64) -> String {
     match writers {
         0 => String::new(),
-        _ => format!(", {writers} lapped writers no danger accounts for: events near the suspect lines may hold their bytes"),
+        _ => format!(
+            ", {writers} lapped writers no danger accounts for: events near the suspect lines may hold their bytes"
+        ),
     }
 }
 

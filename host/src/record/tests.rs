@@ -316,6 +316,87 @@ fn reports_suspect_the_lapped_writers_a_host_fallen_behind_missed() {
     records_with(true, true, 200);
 }
 
+/// A ring whose memory a script changes when the host reads the write index
+/// for the `at`-th time since recording started, before its next read.
+struct Scripted {
+    memory: Vec<u32>,
+    counter_reads: u32,
+    at: u32,
+    change: Vec<(usize, u32)>,
+}
+
+impl Target for Scripted {
+    fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
+        let at = ((address - BASE) / 4) as usize;
+        if at != (WRITE_INDEX_OFFSET / 4) as usize && self.counter_reads == self.at {
+            for (word, value) in std::mem::take(&mut self.change) {
+                self.memory[word] = value;
+            }
+        }
+        if at == (WRITE_INDEX_OFFSET / 4) as usize {
+            self.counter_reads += 1;
+        }
+        words.copy_from_slice(&self.memory[at..at + words.len()]);
+        Ok(())
+    }
+
+    fn write_word(&mut self, _address: u32, _value: u32) -> Result<()> {
+        Err("read only".into())
+    }
+}
+
+/// A writer the host read unpublished, lapped while a pass read its slot,
+/// which it published before counting itself lapped: that pass reads it
+/// published, raises no danger, and the writer counted after is not suspect.
+#[test]
+fn credits_a_writer_read_unpublished_then_published_once_lapped() {
+    let catalogue = catalogue();
+    let physical = SLOTS + MAX_EVENT_SLOTS - 1;
+    let mut target = Scripted {
+        memory: vec![0; ((SLOTS_OFFSET + physical * 16) / 4) as usize],
+        counter_reads: 0,
+        at: 2,
+        change: Vec::new(),
+    };
+    // Recording starts at the third lap, the second written whole with
+    // one-slot events.
+    let writer = 2 * SLOTS;
+    target.memory[(WRITE_INDEX_OFFSET / 4) as usize] = writer;
+    for position in 0..SLOTS {
+        target.memory[((SLOTS_OFFSET + position * 16) / 4) as usize] = 1 | HEAD_BIT | 2 << LAP_SHIFT;
+    }
+    let mut recorder = Recorder::start(&mut target, &catalogue, BASE).unwrap();
+    target.counter_reads = 0;
+    // The writer reserves its slot; two passes read it unpublished.
+    target.memory[(WRITE_INDEX_OFFSET / 4) as usize] = writer + 1;
+    // During the second pass's read of the slots, the ring laps the writer
+    // and a newer event reserves its position; the writer publishes, then
+    // counts itself lapped.
+    let head = 1 | HEAD_BIT | (writer / SLOTS + 1) << LAP_SHIFT;
+    target.change = vec![
+        ((WRITE_INDEX_OFFSET / 4) as usize, writer + SLOTS + 2),
+        ((SLOTS_OFFSET / 4) as usize, head),
+        ((LAPPED_OFFSET / 4) as usize, 1),
+    ];
+    let mut items = Vec::new();
+    for _ in 0..3 {
+        recorder.pass(&mut target, &mut items).unwrap();
+    }
+    assert!(target.change.is_empty(), "the ring changed during the second pass");
+    assert_eq!(recorder.dangers().0, 0, "dangers raised: {}", recorder.state());
+    assert!(
+        !items.iter().any(|item| matches!(item, Item::Suspect { .. })),
+        "{}",
+        recorder.state()
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, Item::Event(event, _) if event.index == writer)),
+        "the writer was lapped, its slot may hold a newer event"
+    );
+}
+
 /// The slots of an event of type `type_id`.
 fn slots(type_id: u16) -> u32 {
     let size = TYPES.iter().find(|t| t.0 == type_id).expect("a type").1;

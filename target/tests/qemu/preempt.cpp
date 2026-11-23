@@ -66,12 +66,22 @@ extern "C" void preempt_systick(std::uint32_t const* frame)
 namespace preempt
 {
 
-[[gnu::noinline]] bool call(std::uint32_t delay, void (*function)(std::uint32_t), std::uint32_t argument)
+void arm(std::uint32_t delay)
 {
-	fired = false;
 	reg(syst_rvr) = delay;
 	reg(syst_cvr) = 0;
 	reg(syst_csr) = csr_enable_interrupt_processor_clock;
+}
+
+std::uint32_t interrupted()
+{
+	return interrupted_pc;
+}
+
+[[gnu::noinline]] bool call(std::uint32_t delay, void (*function)(std::uint32_t), std::uint32_t argument)
+{
+	fired = false;
+	arm(delay);
 	function(argument);
 	reg(syst_csr) = 0;
 	reg(icsr) = icsr_pendstclr;
