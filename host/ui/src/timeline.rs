@@ -3,12 +3,20 @@
 //! so a frame costs the same at any zoom (ADR-055). Losses and suspect lines
 //! are bands across the rows, between the events recorded before and after
 //! them.
+//!
+//! An image with the OpSy adapter shows its meaning above them: a row per
+//! task, the idle task, each interrupt handler and each mutex, drawn as
+//! spans; the rows of event types are then folded under one line.
 
 use crate::levels::Levels;
+use crate::meaning::Meaning;
+use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
 use kymo::decode;
 use kymo::events::Catalogue;
 use kymo::model::{Element, Trace};
+use kymo::opsy::{self, Edge, Span};
+use kymo::target::Result;
 use std::fmt::Write;
 use std::time::Instant;
 
@@ -26,6 +34,13 @@ const TICK: f64 = 110.0;
 const EVENT: Color32 = Color32::from_rgb(70, 130, 220);
 const LOSS: Color32 = Color32::from_rgba_premultiplied(110, 25, 25, 110);
 const SUSPECT: Color32 = Color32::from_rgba_premultiplied(115, 75, 15, 110);
+const RUN: Color32 = Color32::from_rgb(70, 130, 220);
+const IDLE: Color32 = Color32::from_rgb(125, 125, 125);
+const INTERRUPT: Color32 = Color32::from_rgb(225, 140, 40);
+const HOLD: Color32 = Color32::from_rgb(60, 160, 90);
+const WAIT: Color32 = Color32::from_rgba_premultiplied(25, 64, 36, 100);
+/// How many events a run's hover shows, the switch that ends it last.
+const SWITCH: usize = 4;
 
 pub struct Timeline {
     catalogue: &'static Catalogue,
@@ -33,6 +48,10 @@ pub struct Timeline {
     /// The event types of the catalogue, a row each, in its order.
     ids: Vec<u16>,
     rows: Vec<Row>,
+    /// OpSy's meaning, when the image has the adapter.
+    meaning: Option<Meaning>,
+    /// Whether the rows of event types are folded.
+    folded: bool,
     /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
     /// The losses and suspect lines after the last event, which the next
@@ -72,9 +91,26 @@ struct Mark {
     element: usize,
 }
 
+/// A line of the timeline, top to bottom.
+#[derive(Clone, Copy, PartialEq)]
+enum Line {
+    Section(&'static str),
+    /// The line that folds and unfolds the rows of event types.
+    Fold,
+    /// A task, or the idle task.
+    Task(Option<usize>),
+    Handler(usize),
+    Mutex(usize),
+    /// The row of an event type.
+    Event(usize),
+}
+
 impl Timeline {
-    pub fn new(catalogue: &'static Catalogue, trace: Trace<'static>, measure: bool) -> Self {
+    pub fn new(catalogue: &'static Catalogue, trace: Trace<'static>, measure: bool) -> Result<Self> {
+        let meaning = Meaning::new(catalogue, trace.first)?;
         let mut timeline = Self {
+            folded: meaning.is_some(),
+            meaning,
             catalogue,
             trace,
             ids: catalogue.events.keys().copied().collect(),
@@ -102,7 +138,7 @@ impl Timeline {
         };
         timeline.add(0);
         timeline.whole();
-        timeline
+        Ok(timeline)
     }
 
     /// Takes in the trace's elements from `from` on. Each row's new events,
@@ -147,6 +183,67 @@ impl Timeline {
             let cycles: Vec<i64> = events.iter().map(|event| event.0).collect();
             row.levels.extend(&cycles);
             row.elements.extend(events.iter().map(|event| event.1));
+        }
+        if let Some(meaning) = &mut self.meaning {
+            meaning.add(&self.trace.elements, from);
+        }
+    }
+
+    /// The lines: OpSy's sections, the tasks by priority, highest first,
+    /// then the rows of event types unless folded; those rows alone without
+    /// OpSy.
+    fn lines(&self) -> Vec<Line> {
+        let events = (0..self.rows.len()).map(Line::Event);
+        let Some(meaning) = &self.meaning else {
+            return events.collect();
+        };
+        let opsy = &meaning.opsy;
+        let mut tasks: Vec<usize> = (0..opsy.tasks.list.len()).collect();
+        tasks.sort_by_key(|&task| {
+            let task = &opsy.tasks.list[task];
+            (task.priority.is_none(), task.priority, &task.name)
+        });
+        let mut lines = vec![Line::Section("TASKS")];
+        lines.extend(tasks.into_iter().map(|task| Line::Task(Some(task))));
+        lines.push(Line::Task(None));
+        if !opsy.handlers.list.is_empty() {
+            lines.push(Line::Section("INTERRUPTS"));
+            lines.extend((0..opsy.handlers.list.len()).map(Line::Handler));
+        }
+        if !opsy.mutexes.list.is_empty() {
+            lines.push(Line::Section("MUTEXES"));
+            lines.extend((0..opsy.mutexes.list.len()).map(Line::Mutex));
+        }
+        lines.push(Line::Fold);
+        if !self.folded {
+            lines.extend(events);
+        }
+        lines
+    }
+
+    fn label(&self, line: Line) -> String {
+        let opsy = self.meaning.as_ref().map(|meaning| &meaning.opsy);
+        let subject = |n: usize| match (opsy, line) {
+            (Some(opsy), Line::Task(_)) => Some(&opsy.tasks.list[n]),
+            (Some(opsy), Line::Handler(_)) => Some(&opsy.handlers.list[n]),
+            (Some(opsy), Line::Mutex(_)) => Some(&opsy.mutexes.list[n]),
+            _ => None,
+        };
+        match line {
+            Line::Section(name) => name.to_owned(),
+            // After the triangle `timeline` draws: the font has no glyph for it.
+            Line::Fold => format!("    EVENTS ({} types)", self.rows.len()),
+            Line::Task(None) => "  idle".to_owned(),
+            Line::Task(Some(n)) | Line::Handler(n) | Line::Mutex(n) => match subject(n) {
+                Some(opsy::Subject {
+                    name,
+                    priority: Some(priority),
+                    ..
+                }) => format!("  {}  p{priority}", short(name)),
+                Some(subject) => format!("  {}", short(&subject.name)),
+                None => String::new(),
+            },
+            Line::Event(row) => self.rows[row].name.clone(),
         }
     }
 
@@ -223,6 +320,20 @@ impl Timeline {
             self.start -= f64::from(scroll.x) * self.span / width;
         }
         self.clamp();
+        let mut lines = self.lines();
+        if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && pointer.y >= area.top()
+            && lines.get(((pointer.y - area.top()) / ROW) as usize) == Some(&Line::Fold)
+        {
+            self.folded = !self.folded;
+            lines = self.lines();
+        }
+        let open = self
+            .meaning
+            .as_ref()
+            .map(|meaning| meaning.opsy.open())
+            .unwrap_or_default();
 
         let view = View {
             origin: self.origin(),
@@ -242,10 +353,18 @@ impl Timeline {
         ));
         let font = FontId::proportional(12.0);
 
-        // The events of all rows in one mesh: their rectangles sit on whole
-        // pixels and need none of the anti-aliasing a shape each would get.
-        let mut events = egui::Mesh::default();
-        for (n, row) in self.rows.iter().enumerate() {
+        // The events and spans of all rows in one mesh: their rectangles sit
+        // on whole pixels and need none of the anti-aliasing a shape each
+        // would get.
+        let mut mesh = egui::Mesh::default();
+        let mut bars = Bars {
+            mesh: &mut mesh,
+            view: &view,
+            area,
+        };
+        // A mutex's holders, named in their bars wide enough.
+        let mut owners: Vec<(f32, f32, f32, usize)> = Vec::new();
+        for (n, &line) in lines.iter().enumerate() {
             let top = area.top() + n as f32 * ROW;
             if top > area.bottom() {
                 break;
@@ -260,19 +379,124 @@ impl Timeline {
             labels.text(
                 egui::pos2(rect.left() + 4.0, top + ROW / 2.0),
                 Align2::LEFT_CENTER,
-                &row.name,
+                self.label(line),
                 font.clone(),
                 text,
             );
-            for (from, to) in row.levels.columns(&view) {
-                events.add_colored_rect(
-                    Rect::from_min_max(egui::pos2(from, top + 3.0), egui::pos2(to, top + ROW - 3.0)),
-                    EVENT,
-                );
+            if line == Line::Fold {
+                // Pointing right folded, down unfolded.
+                let (x, y) = (rect.left() + 9.0, top + ROW / 2.0);
+                let points = if self.folded {
+                    vec![
+                        egui::pos2(x - 3.0, y - 4.0),
+                        egui::pos2(x + 3.0, y),
+                        egui::pos2(x - 3.0, y + 4.0),
+                    ]
+                } else {
+                    vec![
+                        egui::pos2(x - 4.0, y - 3.0),
+                        egui::pos2(x + 4.0, y - 3.0),
+                        egui::pos2(x, y + 3.0),
+                    ]
+                };
+                labels.add(egui::Shape::convex_polygon(points, text, egui::Stroke::NONE));
+            }
+            let (high, low) = (top + 3.0, top + ROW - 3.0);
+            let meaning = self.meaning.as_ref();
+            match line {
+                Line::Section(_) | Line::Fold => {}
+                Line::Event(row) => {
+                    for (from, to) in self.rows[row].levels.columns(&view) {
+                        bars.mesh
+                            .add_colored_rect(Rect::from_min_max(egui::pos2(from, high), egui::pos2(to, low)), EVENT);
+                    }
+                }
+                Line::Task(task) => {
+                    let Some(meaning) = meaning else { continue };
+                    let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
+                    let open = open.runs.iter().filter(|run| run.task == task).map(|run| run.span);
+                    bars.paint(spans, open, high, low, if task.is_some() { RUN } else { IDLE });
+                }
+                Line::Handler(handler) => {
+                    let Some(meaning) = meaning else { continue };
+                    // Depth 0 fills the row; a nested handler, the half below.
+                    let middle = top + ROW / 2.0;
+                    let depths = meaning.interrupts.get(handler).map_or(&[][..], Vec::as_slice);
+                    let deepest = depths
+                        .len()
+                        .max(1 + open.interrupts.iter().map(|i| i.depth).max().unwrap_or(0));
+                    for depth in 0..deepest {
+                        let open = open
+                            .interrupts
+                            .iter()
+                            .filter(|interrupt| interrupt.handler == handler && interrupt.depth == depth)
+                            .map(|interrupt| interrupt.span);
+                        let high = if depth == 0 { high } else { middle };
+                        bars.paint(depths.get(depth), open, high, low, INTERRUPT);
+                    }
+                }
+                Line::Mutex(mutex) => {
+                    let Some(meaning) = meaning else { continue };
+                    let holders = open.holds.iter().filter(|hold| hold.mutex == mutex);
+                    for (task, waits) in meaning.waits.get(mutex).into_iter().flatten() {
+                        let open = holders
+                            .clone()
+                            .filter(|hold| hold.waiting && hold.task == *task)
+                            .map(|hold| hold.span);
+                        bars.paint(Some(waits), open, high, low, WAIT);
+                    }
+                    // Waiters not yet in a row: their waits are all open.
+                    for hold in holders.clone().filter(|hold| {
+                        hold.waiting
+                            && !meaning
+                                .waits
+                                .get(mutex)
+                                .is_some_and(|waits| waits.iter().any(|wait| wait.0 == hold.task))
+                    }) {
+                        bars.paint(None, std::iter::once(hold.span), high, low, WAIT);
+                    }
+                    let open: Vec<_> = holders.filter(|hold| !hold.waiting).collect();
+                    let closed = meaning.holds.get(mutex);
+                    let middle = top + ROW / 2.0;
+                    for band in bars.paint(closed, open.iter().map(|hold| hold.span), high, low, HOLD) {
+                        // A band of more spans than pixels is not walked, so
+                        // that a frame costs at most its width: a long hold
+                        // among them is named once zoomed in.
+                        if band.spans.len() as f32 > band.to - band.from {
+                            continue;
+                        }
+                        for n in band.spans {
+                            let (from, to, which) = closed.expect("bands come from spans").columns(n, &view);
+                            owners.push((from, to, middle, meaning.opsy.closed.holds[which].task));
+                        }
+                    }
+                    for hold in open {
+                        let (from, to) = open_columns(hold.span, &view);
+                        owners.push((from, to, middle, hold.task));
+                    }
+                }
             }
         }
-        painter.add(egui::Shape::mesh(events));
-        let bottom = (area.top() + self.rows.len() as f32 * ROW).min(area.bottom());
+        painter.add(egui::Shape::mesh(mesh));
+        if let Some(meaning) = &self.meaning {
+            // Small enough that the descenders stay inside the bar's 12 pixels.
+            let small = FontId::proportional(10.0);
+            for (from, to, y, owner) in owners {
+                let name = short(&meaning.opsy.tasks.list[owner].name);
+                let (from, to) = (from.max(area.left()), to.min(area.right()));
+                // An estimate of the name's width: a narrower bar stays bare.
+                if to - from >= 6.0 * name.chars().count() as f32 + 6.0 {
+                    painter.text(
+                        egui::pos2(from + 3.0, y - 1.0),
+                        Align2::LEFT_CENTER,
+                        name,
+                        small.clone(),
+                        Color32::WHITE,
+                    );
+                }
+            }
+        }
+        let bottom = (area.top() + lines.len() as f32 * ROW).min(area.bottom());
         for (kind, color) in [(false, LOSS), (true, SUSPECT)] {
             let marks = self
                 .marks()
@@ -289,7 +513,7 @@ impl Timeline {
         self.painted = began.elapsed().as_secs_f64() * 1e3;
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
-            && let Some(hovered) = self.hovered(&view, area, pointer)
+            && let Some(hovered) = self.hovered(&view, area, pointer, &lines, &open)
         {
             response.on_hover_ui_at_pointer(|ui| {
                 ui.label(egui::RichText::new(hovered).monospace());
@@ -355,16 +579,21 @@ impl Timeline {
         );
     }
 
-    /// What the pointer is over: the nearest event of its row, and the marks
-    /// at its column.
-    fn hovered(&self, view: &View, area: Rect, pointer: Pos2) -> Option<String> {
+    /// What the pointer is over: the nearest event of its row, or the span,
+    /// and the marks at its column.
+    fn hovered(&self, view: &View, area: Rect, pointer: Pos2, lines: &[Line], open: &opsy::Spans) -> Option<String> {
         if pointer.x < area.left() || pointer.y < area.top() {
             return None;
         }
         let low = view.cycles(pointer.x - HOVER);
         let high = view.cycles(pointer.x + HOVER);
         let mut text = String::new();
-        if let Some(row) = self.rows.get(((pointer.y - area.top()) / ROW) as usize) {
+        let line = lines.get(((pointer.y - area.top()) / ROW) as usize).copied();
+        if let (Some(meaning), Some(line)) = (&self.meaning, line) {
+            text = self.span_text(meaning, line, low, high, open);
+        }
+        if let Some(Line::Event(row)) = line {
+            let row = &self.rows[row];
             let cycles = row.levels.cycles();
             let from = cycles.partition_point(|&cycles| cycles < low);
             let to = cycles.partition_point(|&cycles| cycles <= high);
@@ -398,11 +627,155 @@ impl Timeline {
         (!text.is_empty()).then_some(text)
     }
 
+    /// The span of an OpSy `line` from `low` to `high` cycles, described;
+    /// empty when there is none.
+    fn span_text(&self, meaning: &Meaning, line: Line, low: i64, high: i64, open: &opsy::Spans) -> String {
+        let opsy = &meaning.opsy;
+        let closed = &opsy.closed;
+        let near = |span: &Span| span.from.cycles <= high && span.to.cycles >= low;
+        let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+        let mut text = String::new();
+        match line {
+            Line::Task(task) => {
+                let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
+                let found = spans
+                    .and_then(|spans| spans.at(low, high))
+                    .map(|which| (closed.runs[which], false))
+                    .or_else(|| {
+                        open.runs
+                            .iter()
+                            .find(|run| run.task == task && near(&run.span))
+                            .map(|&run| (run, true))
+                    });
+                if let Some((run, still)) = found {
+                    let _ = write!(text, "{}\n{}", named(run.task), self.extent(run.span, still));
+                    if !still && !run.span.to.lost {
+                        text.push_str("\nlast events, the switch last:");
+                        for line in self.events_before(run.span) {
+                            let _ = write!(text, "\n  {line}");
+                        }
+                    }
+                }
+            }
+            Line::Handler(handler) => {
+                let depths = meaning.interrupts.get(handler).map_or(&[][..], Vec::as_slice);
+                // The innermost of the handler's spans there.
+                let found = open
+                    .interrupts
+                    .iter()
+                    .filter(|interrupt| interrupt.handler == handler && near(&interrupt.span))
+                    .map(|&interrupt| (interrupt, true))
+                    .chain(
+                        depths
+                            .iter()
+                            .filter_map(|spans| spans.at(low, high))
+                            .map(|which| (closed.interrupts[which], false)),
+                    )
+                    .max_by_key(|(interrupt, _)| interrupt.depth);
+                if let Some((interrupt, still)) = found {
+                    let _ = write!(
+                        text,
+                        "{}, {} handlers below\n{}",
+                        opsy.handlers.list[handler].name,
+                        interrupt.depth,
+                        self.extent(interrupt.span, still)
+                    );
+                }
+            }
+            Line::Mutex(mutex) => {
+                let holds = meaning.holds.get(mutex).and_then(|spans| spans.at(low, high));
+                let waits = meaning.waits.get(mutex).into_iter().flatten();
+                let found = holds
+                    .into_iter()
+                    .chain(waits.filter_map(|(_, spans)| spans.at(low, high)))
+                    .map(|which| (closed.holds[which], false))
+                    .chain(
+                        open.holds
+                            .iter()
+                            .filter(|hold| hold.mutex == mutex && near(&hold.span))
+                            .map(|&hold| (hold, true)),
+                    );
+                for (hold, still) in found {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    let _ = write!(
+                        text,
+                        "{} {} by {}\n{}",
+                        opsy.mutexes.list[mutex].name,
+                        if hold.waiting { "waited for" } else { "held" },
+                        named(Some(hold.task)),
+                        self.extent(hold.span, still)
+                    );
+                }
+            }
+            Line::Section(_) | Line::Fold | Line::Event(_) => {}
+        }
+        text
+    }
+
+    /// Where `span` starts and ends, and how long it lasts: at a loss, the
+    /// cycles of the event before it, so that the duration is a bound.
+    fn extent(&self, span: Span, still: bool) -> String {
+        let at = |edge: Edge| {
+            let time = self.time((edge.cycles - self.origin()) as f64);
+            if edge.lost {
+                format!("a loss after {time}")
+            } else {
+                time
+            }
+        };
+        let duration = self.duration(span.to.cycles - span.from.cycles);
+        match (span.from.lost, span.to.lost || still) {
+            (false, false) => format!("from {} to {}: {duration}", at(span.from), at(span.to)),
+            (true, false) => format!("from {} to {}: at most {duration}", at(span.from), at(span.to)),
+            (false, true) if still => format!("from {}, open at the end: at least {duration}", at(span.from)),
+            (false, true) => format!("from {} to {}: at least {duration}", at(span.from), at(span.to)),
+            (true, true) => format!("from {} to {}", at(span.from), at(span.to)),
+        }
+    }
+
+    /// The last events of `span`, the one that ends it last, as kymo decode
+    /// prints them.
+    fn events_before(&self, span: Span) -> Vec<String> {
+        let mut lines: Vec<String> = self.trace.elements[span.from.element..=span.to.element]
+            .iter()
+            .rev()
+            .filter_map(|element| match element {
+                Element::Event { event, cycles, seconds } => {
+                    Some(decode::line(&self.catalogue.symbols, event, *cycles, *seconds))
+                }
+                _ => None,
+            })
+            .take(SWITCH)
+            .collect();
+        lines.reverse();
+        lines
+    }
+
+    /// `cycles` as a duration, in seconds when the frequency is known.
+    fn duration(&self, cycles: i64) -> String {
+        let Some(hz) = self.frequency() else {
+            return format!("{cycles} cycles");
+        };
+        let seconds = cycles as f64 / hz;
+        let (unit, suffix) = match seconds.abs() {
+            s if s < 1e-6 => (1e-9, "ns"),
+            s if s < 1e-3 => (1e-6, "µs"),
+            s if s < 1.0 => (1e-3, "ms"),
+            _ => (1.0, "s"),
+        };
+        format!("{:.3} {suffix} ({cycles} cycles)", seconds / unit)
+    }
+
     fn status(&self) -> String {
         let mut status = format!(
             "{} events, {} losses, {} suspect writers",
             self.events, self.losses, self.suspects
         );
+        if let Some(meaning) = &self.meaning {
+            let _ = write!(status, ", {} against OpSy's order", meaning.opsy.contradictions.len());
+        }
         match (self.frequency(), self.trace.measured) {
             (Some(hz), Some((measured, _))) if hz == measured => {
                 let _ = write!(status, ", {} Hz measured", hz.round());
@@ -459,6 +832,11 @@ impl View {
         self.left + ((cycles - self.start) / self.span * self.width) as f32
     }
 
+    /// The pixel column of `cycles`, absolute.
+    pub fn column(&self, cycles: i64) -> f32 {
+        self.x((cycles - self.origin) as f64).floor()
+    }
+
     /// The cycles, absolute, at pixel `x`.
     pub fn cycles(&self, x: f32) -> i64 {
         self.origin + (self.start + f64::from(x - self.left) / self.width * self.span).round() as i64
@@ -478,6 +856,65 @@ impl View {
                 Some(band) if from <= band.1 => band.1 = band.1.max(to),
                 _ => bands.push((from, to)),
             }
+        }
+        bands
+    }
+}
+
+/// The rectangles of a frame's rows, in one mesh.
+struct Bars<'a> {
+    mesh: &'a mut egui::Mesh,
+    view: &'a View,
+    area: Rect,
+}
+
+/// A subject's name in a row: the anonymous namespaces add nothing there,
+/// and the hover gives the name in full.
+fn short(name: &str) -> String {
+    name.replace("(anonymous namespace)::", "")
+}
+
+/// The pixel columns `from..to` of an open span.
+fn open_columns(span: Span, view: &View) -> (f32, f32) {
+    (
+        view.column(span.from.cycles),
+        view.column(span.to.cycles.max(span.from.cycles)) + 1.0,
+    )
+}
+
+impl Bars<'_> {
+    /// Paints a row's closed spans, then its `open` ones, which start after
+    /// them, from `high` to `low`; returns the closed spans' bands.
+    fn paint(
+        &mut self,
+        closed: Option<&Spans>,
+        open: impl Iterator<Item = Span>,
+        high: f32,
+        low: f32,
+        color: Color32,
+    ) -> Vec<Band> {
+        let view = self.view;
+        let bands = closed.map(|spans| spans.bands(view)).unwrap_or_default();
+        let mut painted: Vec<(f32, f32)> = bands.iter().map(|band| (band.from, band.to)).collect();
+        let right = view.left + view.width as f32;
+        for span in open {
+            let (from, to) = open_columns(span, view);
+            if to < view.left || from >= right {
+                continue;
+            }
+            match painted.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => painted.push((from, to)),
+            }
+        }
+        for (from, to) in painted {
+            self.mesh.add_colored_rect(
+                Rect::from_min_max(
+                    egui::pos2(from.max(self.area.left()), high),
+                    egui::pos2(to.min(self.area.right()), low),
+                ),
+                color,
+            );
         }
         bands
     }

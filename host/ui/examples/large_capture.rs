@@ -91,9 +91,11 @@ fn main() -> Result<()> {
                 })?;
             }
             let mut slots = events[n].1.to_vec();
-            for slot in slots.chunks_mut(SLOT_BYTES) {
+            // An event's slots follow each other: one past the ring's end is
+            // on the next lap.
+            for (k, slot) in (0u32..).zip(slots.chunks_mut(SLOT_BYTES)) {
                 let word = u32::from_le_bytes(slot[..4].try_into().expect("a header word"));
-                let word = word & ((1 << LAP_SHIFT) - 1) | decode::lap(index, ring) << LAP_SHIFT;
+                let word = word & ((1 << LAP_SHIFT) - 1) | decode::lap(index + k, ring) << LAP_SHIFT;
                 slot[..4].copy_from_slice(&word.to_le_bytes());
             }
             // Bursts of 500 events 100 to 200 cycles apart, then 500 events

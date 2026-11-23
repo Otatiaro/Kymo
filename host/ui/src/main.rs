@@ -2,6 +2,8 @@
 //! ELF of the image that made it.
 
 mod levels;
+mod meaning;
+mod spans;
 mod timeline;
 
 use eframe::egui;
@@ -19,6 +21,13 @@ Shows a capture made by kymo record --out: one row per event type of the
 image, the losses and suspect lines marked across the rows. Wheel: zoom at
 the pointer; drag or horizontal wheel: scroll; double click: the whole
 capture. Hovering an event shows its line as kymo decode prints it.
+
+An image with the OpSy adapter shows, above the event rows, folded then: a
+row per task with its priority, and the idle task, where it holds the core;
+a row per interrupt handler, a nested one in the lower half; a row per
+mutex, held, with its owner named where it fits, or waited for (lighter).
+Hovering a span shows its start, end and duration; a task's, the last
+events up to the switch that ends it.
 
   --clock <Hz>  the cycle counter's frequency, as for kymo decode
   --measure     prints the time to read the capture and build the timeline,
@@ -58,7 +67,7 @@ fn run() -> Result<()> {
     let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;
     let read = began.elapsed();
-    let timeline = timeline::Timeline::new(catalogue, trace, measure);
+    let timeline = timeline::Timeline::new(catalogue, trace, measure)?;
     if measure {
         println!(
             "capture read in {:.0} ms, timeline built in {:.0} ms",
