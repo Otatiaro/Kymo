@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""What an emit costs, counted under QEMU, against a threshold.
+"""What an emit costs, counted under QEMU, held against the record.
 
     cost.py --qemu Q --machine M --nm NM --size SIZE
-            --image I --baseline B [--max-event 50] [--max-slot 15]
+            --image I --baseline B --expected cost/cost-<cpu>-<level>.json
+            [--tolerance 2] [--json out.json]
 
 Runs both images of target/tests/cost (with Kymo, and the baseline whose
 functions do nothing) and counts the instructions each cost_* function
@@ -15,12 +16,15 @@ Each function is called once, from test_main; its count runs from its entry
 until execution is back in test_main, so what it calls counts too. Its cost
 is its count with Kymo less its count in the baseline: the call and building
 the payload are left out.
-The exit status is 1 when a one-slot event costs more than --max-event, or
-when a slot more costs more than --max-slot over the event one slot shorter.
+The expected costs, the disabled path included, are in the record of the CPU
+and level. The exit status is 1 when a case costs more than its record plus
+the tolerance, or when a case is missing from the record or from the image.
+A drop beyond the tolerance is reported, so that the record follows the gain.
 It also reports the flash of each function and the sections' growth.
 """
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -104,38 +108,49 @@ def main() -> int:
     parser.add_argument("--size", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--baseline", required=True)
-    parser.add_argument("--max-event", type=int, default=50, help="most instructions for a one-slot event")
-    parser.add_argument("--max-slot", type=int, default=15, help="most instructions for each slot more")
+    parser.add_argument("--expected", required=True, type=Path, help="the recorded cost of each case")
+    parser.add_argument("--tolerance", type=int, default=2, help="instructions")
+    parser.add_argument("--json", type=Path, help="write the measured costs here")
     args = parser.parse_args()
 
     kymo, kymo_sizes = counts(args.qemu, args.machine, args.nm, args.image)
     base, base_sizes = counts(args.qemu, args.machine, args.nm, args.baseline)
 
-    over = []
-    previous = None
+    expected = json.loads(args.expected.read_text())
+    unknown = sorted(set(expected) - set(CASES))
+    if unknown:
+        print(f"{args.expected}: records cases the image has not: {', '.join(unknown)}")
+        return 1
+
+    failed = False
+    measured = {}
     print(f"{'case':<16}{'instructions':>14}{'flash (bytes)':>15}")
     for name in CASES:
         if kymo[name] == 0 or base[name] == 0:
             print(f"{name} never ran")
             return 1
         cost = kymo[name] - base[name]
+        measured[name] = cost
         flash = kymo_sizes[name] - base_sizes[name]
-        print(f"{name.removeprefix('cost_'):<16}{cost:>14}{flash:>15}")
-        if name == "cost_slots_1" and cost > args.max_event:
-            over.append(f"{name}: {cost} > {args.max_event}")
-        elif name.startswith("cost_slots_") and previous is not None and cost - previous > args.max_slot:
-            over.append(f"{name}: a slot more costs {cost - previous} > {args.max_slot}")
-        previous = cost
+        line = f"{name.removeprefix('cost_'):<16}{cost:>14}{flash:>15}"
+        if name not in expected:
+            line += "  not recorded"
+            failed = True
+        else:
+            difference = cost - expected[name]
+            if difference > args.tolerance:
+                line += f"  GREW by {difference} over the recorded {expected[name]}"
+                failed = True
+            elif difference < -args.tolerance:
+                line += f"  dropped by {-difference} under the recorded {expected[name]}: update the record"
+        print(line)
 
     growth = [k - b for k, b in zip(sections(args.size, args.image), sections(args.size, args.baseline))]
     print(f"sections: text +{growth[0]}, data +{growth[1]}, bss +{growth[2]} bytes")
 
-    if over:
-        print("over the threshold: " + "; ".join(over))
-        return 1
-    print(f"within the threshold: {args.max_event} for one slot, {args.max_slot} for each slot more")
-    return 0
-
+    if args.json:
+        args.json.write_text(json.dumps(measured, indent=2) + "\n")
+    return 1 if failed else 0
 
 if __name__ == "__main__":
     sys.exit(main())

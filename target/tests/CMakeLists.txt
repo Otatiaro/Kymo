@@ -216,12 +216,11 @@ foreach(cpu cortex-m33 cortex-m4)
 	endforeach()
 endforeach()
 
-# What an emit costs, in instructions executed under QEMU, against the
-# threshold: 50 for a one-slot event, 15 for each slot more. QEMU counts
-# instructions; cycles are measured on hardware. The builds that ship: -Os and
-# -O2, not the debug build.
-set(KYMO_COST_EVENT 50 CACHE STRING "Most instructions a one-slot event may cost")
-set(KYMO_COST_SLOT 15 CACHE STRING "Most instructions each slot more may cost")
+# What an emit costs, in instructions executed under QEMU, held against the
+# record of each CPU and level (cost/cost-<cpu>-<level>.json), the disabled
+# path included. QEMU counts instructions; cycles are measured on hardware.
+# The builds that ship: -Os and -O2, not the debug build.
+set(KYMO_COST_TOLERANCE 2 CACHE STRING "Instructions a case may cost over its record")
 foreach(cpu cortex-m33 cortex-m4)
 	foreach(level Os O2)
 		kymo_qemu_image(cost-${cpu}-${level} ${cpu} ${level} SOURCES cost/cost.cpp)
@@ -232,6 +231,7 @@ foreach(cpu cortex-m33 cortex-m4)
 			--nm ${KYMO_NM} --size ${KYMO_SIZE}
 			--image $<TARGET_FILE:cost-${cpu}-${level}>
 			--baseline $<TARGET_FILE:cost-baseline-${cpu}-${level}>
-			--max-event ${KYMO_COST_EVENT} --max-slot ${KYMO_COST_SLOT})
+			--expected ${CMAKE_CURRENT_SOURCE_DIR}/cost/cost-${cpu}-${level}.json
+			--tolerance ${KYMO_COST_TOLERANCE})
 	endforeach()
 endforeach()
