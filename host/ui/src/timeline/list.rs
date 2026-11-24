@@ -116,22 +116,39 @@ impl Timeline {
             let shown = ui.available_height();
             area = area.vertical_scroll_offset(((height + spacing) * n as f32 - shown / 2.0).max(0.0));
         }
+        let font = font.resolve(ui.style());
         area.show_rows(ui, height, entries.len(), |ui, rows| {
+            // A line is a band as wide as the list: shaded when chosen or
+            // hovered, its text on top.
+            let visuals = ui.visuals().clone();
             for entry in &entries[rows] {
-                let text = egui::RichText::new(line(entry)).text_style(font.clone());
                 let chosen = self.chosen == Some(entry.element);
-                let button = ui.add(egui::Button::selectable(chosen, text).min_size(egui::vec2(0.0, height)));
-                let color = match self.trace.elements[entry.element] {
+                let color = if chosen {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.text_color()
+                };
+                let galley = ui.painter().layout_no_wrap(line(entry), font.clone(), color);
+                let width = ui.available_width().max(galley.size().x + MARK);
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+                if chosen {
+                    ui.painter().rect_filled(rect, 0.0, visuals.selection.bg_fill);
+                } else if response.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+                }
+                let mark = match self.trace.elements[entry.element] {
                     Element::Lost { .. } => Some(palette.loss),
                     Element::Suspect { .. } => Some(palette.suspect),
                     Element::Event { .. } => None,
                 };
-                if let Some(color) = color {
-                    let rect = button.rect;
+                if let Some(mark) = mark {
                     let bar = egui::Rect::from_min_size(rect.min, egui::vec2(MARK, rect.height()));
-                    ui.painter().rect_filled(bar, 0.0, color);
+                    ui.painter().rect_filled(bar, 0.0, mark);
                 }
-                if button.clicked() {
+                let top = rect.top() + (height - galley.size().y) / 2.0;
+                ui.painter().galley(egui::pos2(rect.left(), top), galley, color);
+                if response.clicked() {
                     clicked = Some(*entry);
                 }
             }

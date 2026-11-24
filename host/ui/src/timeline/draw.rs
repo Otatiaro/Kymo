@@ -4,7 +4,7 @@ use super::load::{self, Drawn};
 use super::rows::Line;
 use super::view::{View, ticks};
 use super::{LABELS, ROW, RULER, Timeline};
-use crate::palette::Palette;
+use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
 use kymo::load::Covered;
@@ -153,6 +153,8 @@ impl Timeline {
         let mut owners: Vec<(f32, f32, f32, usize)> = Vec::new();
         // The load drawn, by line: the bins the pointer reads.
         let mut drawn_rows: Vec<(usize, Vec<Drawn>)> = Vec::new();
+        // Whether each label shown was cut.
+        let mut elided: Vec<bool> = Vec::new();
         let capture = self.bounds.unwrap_or_default();
         let loaded = self
             .meaning
@@ -168,13 +170,13 @@ impl Timeline {
                 Line::Fold => (font.clone(), strong),
                 _ => (font.clone(), text),
             };
-            labels.text(
-                egui::pos2(rect.left() + 8.0 + self.indent(line), top + ROW / 2.0),
-                Align2::LEFT_CENTER,
-                self.label(line),
-                font,
-                color,
-            );
+            // Cut with an ellipsis at the column's edge.
+            let x = rect.left() + 8.0 + self.indent(line);
+            let mut job = egui::text::LayoutJob::simple_singleline(self.label(line), font, color);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(area.left() - 8.0 - x);
+            let galley = labels.layout_job(job);
+            elided.push(galley.elided);
+            labels.galley(egui::pos2(x, top + (ROW - galley.size().y) / 2.0), galley, color);
             if line == Line::Fold {
                 // Pointing right folded, down unfolded.
                 let (x, y) = (rect.left() + 13.0, top + ROW / 2.0);
@@ -323,6 +325,9 @@ impl Timeline {
                 }
             }
         }
+        // A loss or a suspect line: a light band over the rows, the data
+        // readable through it, and a solid mark in the ruler.
+        let mut flags = Vec::new();
         for (kind, color) in [(false, palette.loss), (true, palette.suspect)] {
             let marks = self
                 .marks()
@@ -331,8 +336,9 @@ impl Timeline {
                 painter.rect_filled(
                     Rect::from_min_max(egui::pos2(from, area.top()), egui::pos2(to, bottom)),
                     0.0,
-                    color,
+                    color.gamma_multiply(BAND),
                 );
+                flags.push(((from + to) / 2.0, color));
             }
         }
         // The range selected, shaded; the instance picked, framed: each at
@@ -377,7 +383,31 @@ impl Timeline {
             ],
             Stroke::new(1.0, grid),
         );
+        // Pointing down at the rule, over the ruler's labels.
+        let y = rect.top() + RULER;
+        for (x, color) in flags {
+            let points = vec![
+                egui::pos2(x - FLAG, y - FLAG),
+                egui::pos2(x + FLAG, y - FLAG),
+                egui::pos2(x, y),
+            ];
+            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        }
         self.painted = began.elapsed().as_secs_f64() * 1e3;
+        // A label cut or shortened, in full.
+        if !response.dragged()
+            && let Some(pointer) = response.hover_pos()
+            && pointer.x < area.left()
+            && pointer.y >= area.top()
+        {
+            let n = ((pointer.y - area.top()) / ROW) as usize;
+            if let Some(&line) = lines.get(n) {
+                let full = self.full_label(line);
+                if elided.get(n).copied().unwrap_or_default() || full != self.label(line) {
+                    response.clone().on_hover_text_at_pointer(full);
+                }
+            }
+        }
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
             && let Some((hovered, arrow)) = self.hovered(&view, area, pointer, &lines, &open, &drawn_rows)
@@ -406,6 +436,9 @@ impl Timeline {
         }
     }
 }
+
+/// Half the width, and the height, of a loss's mark in the ruler, in pixels.
+const FLAG: f32 = 4.0;
 
 /// The height of the bar of a task's time ready, in pixels.
 const READY: f32 = 3.0;

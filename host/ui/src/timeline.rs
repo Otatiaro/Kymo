@@ -41,6 +41,8 @@ use view::{clamped, whole, widest};
 const LABELS: f32 = 260.0;
 const RULER: f32 = 22.0;
 const ROW: f32 = 22.0;
+/// The bottom panel's least height at first, in pixels.
+const BOTTOM: f32 = 160.0;
 /// The narrowest view, in cycles.
 const NARROWEST: f64 = 100.0;
 /// How near the pointer, in pixels, an event or a mark is hovered.
@@ -61,6 +63,9 @@ pub struct Timeline {
     meaning: Option<Meaning>,
     /// Whether the rows of event types are folded.
     folded: bool,
+    /// Whether the bottom panel still takes the height the lines leave: until
+    /// it is resized by hand.
+    fit: bool,
     /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
     /// The losses and suspect lines after the last event, which the next
@@ -110,6 +115,7 @@ impl Timeline {
         let meaning = Meaning::new(catalogue, trace.first)?;
         let mut timeline = Self {
             folded: meaning.is_some(),
+            fit: true,
             meaning,
             catalogue,
             trace,
@@ -197,7 +203,7 @@ impl eframe::App for Timeline {
         }
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(self.status());
+                self.status(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     theme_choice(ui);
                     if self.meaning.is_some() {
@@ -207,10 +213,21 @@ impl eframe::App for Timeline {
                 });
             });
         });
+        // The timeline as tall as its lines, the panel the rest, until the
+        // panel is resized: its size egui keeps is dropped every frame before.
+        let lines = RULER + self.lines().len() as f32 * ROW + ROW;
+        let fitted = (ui.available_height() - lines).max(BOTTOM);
+        let id = ui.scope_id().with("bottom");
+        if self.fit {
+            ui.ctx().data_mut(|data| data.remove::<egui::PanelState>(id));
+        }
         egui::Panel::bottom("bottom")
             .resizable(true)
-            .default_size(260.0)
+            .default_size(fitted)
             .show(ui, |ui| self.bottom(ui));
+        if egui::PanelState::load(ui.ctx(), id).is_some_and(|state| (state.size().y - fitted).abs() > 0.5) {
+            self.fit = false;
+        }
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
         // The panel came before the view moved: it shows the new range next frame.
         if self.behind() {

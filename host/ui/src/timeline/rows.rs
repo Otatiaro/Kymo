@@ -137,6 +137,19 @@ impl Timeline {
         }
     }
 
+    /// A line's label in full: a subject's name as in the image, else the
+    /// label.
+    pub(super) fn full_label(&self, line: Line) -> String {
+        let opsy = self.meaning.as_ref().map(|meaning| &meaning.opsy);
+        let name = match (line, opsy) {
+            (Line::Task(Some(n)), Some(opsy)) => opsy.tasks.list.get(n),
+            (Line::Handler(n), Some(opsy)) => opsy.handlers.list.get(n),
+            (Line::Mutex(n), Some(opsy)) => opsy.mutexes.list.get(n),
+            _ => None,
+        };
+        name.map_or_else(|| self.label(line), |subject| subject.name.clone())
+    }
+
     /// How far a line's label is indented, in pixels: a section's lines
     /// under it, the fold's label after its triangle, and the rows of event
     /// types under the fold.

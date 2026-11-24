@@ -2,8 +2,8 @@
 
 use super::Timeline;
 use super::load::Mode;
+use crate::palette::Palette;
 use eframe::egui;
-use std::fmt::Write;
 
 impl Timeline {
     /// `cycles` as a duration, in seconds when the frequency is known.
@@ -21,37 +21,58 @@ impl Timeline {
         format!("{:.3} {suffix} ({cycles} cycles)", seconds / unit)
     }
 
-    pub(super) fn status(&self) -> String {
-        let mut status = format!(
-            "{}, {} ({} lost)",
-            counted(self.events as u64, "event", "events"),
+    /// The status bar's segments: the counts in weak text, what may be wrong
+    /// in the colour of its mark, then the view and the frame's cost.
+    pub(super) fn status(&self, ui: &mut egui::Ui) {
+        let palette = Palette::of(ui.visuals());
+        // `text` in `color` when `warn`, weak otherwise.
+        let segment = |ui: &mut egui::Ui, text: String, warn: bool, color| {
+            let text = egui::RichText::new(text);
+            ui.label(if warn { text.color(color) } else { text.weak() });
+        };
+        ui.label(counted(self.events as u64, "event", "events"));
+        ui.separator();
+        let gaps = format!(
+            "{} ({} lost)",
             counted(self.losses as u64, "gap", "gaps"),
             counted(self.lost, "slot", "slots")
         );
+        segment(ui, gaps, self.losses > 0, palette.loss);
         if self.suspects > 0 {
+            ui.separator();
             let writes = counted(self.suspects, "write", "writes");
-            let _ = write!(status, ", {writes} overrun: nearby events may be wrong");
+            segment(
+                ui,
+                format!("{writes} overrun: nearby events may be wrong"),
+                true,
+                palette.suspect,
+            );
         }
         if let Some(meaning) = &self.meaning {
-            let _ = write!(status, ", {} against OpSy's order", meaning.opsy.contradictions.len());
+            ui.separator();
+            let against = meaning.opsy.contradictions.len();
+            segment(
+                ui,
+                format!("{against} against OpSy's order"),
+                against > 0,
+                palette.suspect,
+            );
         }
-        match (self.frequency(), self.trace.measured) {
-            (Some(hz), Some((measured, _))) if hz == measured => {
-                let _ = write!(status, ", {} Hz measured", hz.round());
-            }
-            (Some(hz), _) => {
-                let _ = write!(status, ", {} Hz", hz.round());
-            }
-            (None, _) => status.push_str(", no frequency: in cycles"),
-        }
-        let _ = write!(
-            status,
-            "  |  view {} to {}  |  timeline laid out in {:.2} ms",
+        ui.separator();
+        let frequency = match (self.frequency(), self.trace.measured) {
+            (Some(hz), Some((measured, _))) if hz == measured => format!("{} Hz measured", hz.round()),
+            (Some(hz), _) => format!("{} Hz", hz.round()),
+            (None, _) => "no frequency: in cycles".to_owned(),
+        };
+        segment(ui, frequency, false, palette.loss);
+        ui.separator();
+        ui.label(format!(
+            "view {} to {}",
             self.time(self.start),
-            self.time(self.start + self.span),
-            self.painted
-        );
-        status
+            self.time(self.start + self.span)
+        ));
+        ui.separator();
+        segment(ui, format!("laid out in {:.2} ms", self.painted), false, palette.loss);
     }
 
     /// `cycles` from the origin, as seconds when the frequency is known.
