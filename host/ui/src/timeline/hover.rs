@@ -150,7 +150,7 @@ impl Timeline {
         let high = view.cycles(pointer.x + HOVER);
         let mut cards = Vec::new();
         let mut arrow = None;
-        let n = super::rows::at(&super::rows::tops(lines), pointer.y - area.top());
+        let n = super::rows::at(&super::rows::tops(lines, area.height()), pointer.y - area.top());
         let line = n.map(|n| lines[n]);
         let bins = drawn.iter().find(|(line, _)| Some(*line) == n).map(|(_, bins)| bins);
         if let (Some(meaning), Some(line)) = (&self.meaning, line) {
@@ -356,7 +356,7 @@ impl Timeline {
                     cards.push(card);
                 }
             }
-            Line::Section(_) | Line::Fold | Line::Cpu | Line::Event(_) => {}
+            Line::Section(_) | Line::Cpu | Line::Event(_) => {}
         }
         (cards, arrow)
     }
@@ -403,7 +403,7 @@ impl Timeline {
             Line::Task(task) => ("load", Some(Swatch::task(meaning, task))),
             Line::Handler(_) => ("load", Some(Swatch::Interrupt)),
             Line::Mutex(_) => ("held, load", Some(Swatch::Hold)),
-            Line::Section(_) | Line::Fold | Line::Event(_) => return None,
+            Line::Section(_) | Line::Event(_) => return None,
         };
         // The CPU's line has a colour per layer, and so no swatch.
         let mut card = match swatch {
@@ -510,7 +510,7 @@ impl Timeline {
                         .chain(still.map(|hold| (hold.span, true, Who::Holder(hold.task)))),
                 )
             }
-            Line::Section(_) | Line::Fold | Line::Event(_) => return None,
+            Line::Section(_) | Line::Event(_) => return None,
         };
         let (span, still, who) = candidates.max_by_key(|(span, ..)| span.to.cycles - span.from.cycles)?;
         let who = match who {

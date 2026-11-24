@@ -31,8 +31,9 @@ rows. Wheel: zoom at the pointer; drag or horizontal wheel: scroll; double
 click: the whole capture. Hovering an event shows its time, index and
 fields, a subject by the name its row shows.
 
-An image with the OpSy adapter shows, above the event rows, folded then: a
-row per task, by its last priority, and the idle task, where it holds the
+An image with the OpSy adapter shows, instead of the event rows (its events
+are in the event list), lines that fill the height the bottom panel leaves:
+a row per task, by its last priority, and the idle task, where it holds the
 core; a row per interrupt handler, a nested one in the lower half, the
 whole row from a loss to the next task switch, the nesting unknown; a row
 per mutex, held, with its owner named where it fits, or waited for

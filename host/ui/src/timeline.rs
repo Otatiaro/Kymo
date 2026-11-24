@@ -4,9 +4,10 @@
 //! are bands across the rows, between the events recorded before and after
 //! them.
 //!
-//! An image with the OpSy adapter shows its meaning above them: a row per
-//! task, the idle task, each interrupt handler and each mutex, drawn as
-//! spans; the rows of event types are then folded under one line.
+//! An image with the OpSy adapter shows its meaning instead: a row per task,
+//! the idle task, each interrupt handler and each mutex, drawn as spans; its
+//! events are in the event list below. The lines stretch to fill the height
+//! the bottom panel leaves.
 
 mod draw;
 mod hover;
@@ -44,8 +45,8 @@ const RULER: f32 = 22.0;
 const ROW: f32 = 22.0;
 const TASK: f32 = 30.0;
 const CPU: f32 = 60.0;
-/// The bottom panel's least height at first, in pixels.
-const BOTTOM: f32 = 160.0;
+/// The bottom panel's height at first, a share of the window's.
+const BOTTOM: f32 = 1.0 / 3.0;
 /// The narrowest view, in cycles.
 const NARROWEST: f64 = 100.0;
 /// How near the pointer, in pixels, an event or a mark is hovered.
@@ -66,11 +67,6 @@ pub struct Timeline {
     rows: Vec<Row>,
     /// OpSy's meaning, when the image has the adapter.
     meaning: Option<Meaning>,
-    /// Whether the rows of event types are folded.
-    folded: bool,
-    /// Whether the bottom panel still takes the height the lines leave: until
-    /// it is resized by hand.
-    fit: bool,
     /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
     /// The losses and suspect lines after the last event, which the next
@@ -122,8 +118,6 @@ impl Timeline {
         let meaning = Meaning::new(catalogue, trace.first)?;
         let mut timeline = Self {
             capture,
-            folded: meaning.is_some(),
-            fit: true,
             meaning,
             catalogue,
             trace,
@@ -220,21 +214,11 @@ impl eframe::App for Timeline {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| self.status(ui));
         });
-        // The timeline as tall as its lines, the panel the rest, until the
-        // panel is resized: its size egui keeps is dropped every frame before.
-        let lines = RULER + rows::tops(&self.lines()).last().copied().unwrap_or_default() + ROW;
-        let fitted = (ui.available_height() - lines).max(BOTTOM);
-        let id = ui.scope_id().with("bottom");
-        if self.fit {
-            ui.ctx().data_mut(|data| data.remove::<egui::PanelState>(id));
-        }
-        egui::Panel::bottom("bottom")
+        // A third of the window at first; the timeline's lines fill the rest.
+        egui::Panel::bottom("lower")
             .resizable(true)
-            .default_size(fitted)
+            .default_size(ui.available_height() * BOTTOM)
             .show(ui, |ui| self.bottom(ui));
-        if egui::PanelState::load(ui.ctx(), id).is_some_and(|state| (state.size().y - fitted).abs() > 0.5) {
-            self.fit = false;
-        }
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
         // The panel came before the view moved: it shows the new range next frame.
         if self.behind() {
