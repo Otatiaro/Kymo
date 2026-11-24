@@ -140,6 +140,17 @@ fn run() -> Result<()> {
         "kymo-ui",
         options,
         Box::new(move |context| {
+            let ctx = &context.egui_ctx;
+            for theme in [egui::Theme::Dark, egui::Theme::Light] {
+                ctx.set_visuals_of(theme, palette::visuals(theme));
+            }
+            ctx.all_styles_mut(|style| {
+                style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+                style.spacing.button_padding = egui::vec2(8.0, 3.0);
+                if let Some(body) = style.text_styles.get_mut(&egui::TextStyle::Body) {
+                    body.size = 13.0;
+                }
+            });
             if let Some(theme) = theme {
                 context.egui_ctx.set_theme(theme);
             }

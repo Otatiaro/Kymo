@@ -122,19 +122,30 @@ impl Timeline {
     pub(super) fn label(&self, line: Line) -> String {
         let shown = |kind: usize, n: usize| {
             let meaning = self.meaning.as_ref().expect("a subject's line has OpSy's meaning");
-            &meaning.names[kind][n]
+            meaning.names[kind][n].clone()
         };
         match line {
             Line::Section(name) => name.to_owned(),
             Line::Cpu => "CPU".to_owned(),
-            // After the triangle `timeline` draws: the font has no glyph for it.
-            Line::Fold => format!("    EVENTS ({} types)", self.rows.len()),
-            Line::Task(None) => "  idle".to_owned(),
+            Line::Fold => format!("EVENTS ({} types)", self.rows.len()),
+            Line::Task(None) => "idle".to_owned(),
             // No priority: it changes over the capture, with inheritance.
-            Line::Task(Some(n)) => format!("  {}", shown(0, n)),
-            Line::Handler(n) => format!("  {}", shown(1, n)),
-            Line::Mutex(n) => format!("  {}", shown(2, n)),
+            Line::Task(Some(n)) => shown(0, n),
+            Line::Handler(n) => shown(1, n),
+            Line::Mutex(n) => shown(2, n),
             Line::Event(row) => self.rows[row].name.clone(),
+        }
+    }
+
+    /// How far a line's label is indented, in pixels: a section's lines
+    /// under it, the fold's label after its triangle, and the rows of event
+    /// types under the fold.
+    pub(super) fn indent(&self, line: Line) -> f32 {
+        match line {
+            Line::Section(_) | Line::Cpu => 0.0,
+            Line::Fold => 16.0,
+            Line::Event(_) if self.meaning.is_none() => 0.0,
+            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) | Line::Event(_) => 12.0,
         }
     }
 

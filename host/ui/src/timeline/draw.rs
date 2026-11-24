@@ -91,7 +91,54 @@ impl Timeline {
             egui::pos2(rect.left(), area.top()),
             egui::pos2(area.left() - 4.0, rect.bottom()),
         ));
-        let font = FontId::proportional(12.0);
+        let font = FontId::proportional(13.0);
+        let heading = FontId::proportional(11.0);
+        let strong = visuals.strong_text_color();
+        let shown = lines.len().min(((area.height() / ROW).ceil() as usize).max(1));
+        let bottom = (area.top() + lines.len() as f32 * ROW).min(area.bottom());
+
+        // The backgrounds first: the column of names and the headers on the
+        // surface, every other data row striped; then the grid, under the data.
+        painter.rect_filled(
+            Rect::from_min_max(rect.min, egui::pos2(area.left(), rect.bottom())),
+            0.0,
+            palette.surface,
+        );
+        for (n, &line) in lines.iter().enumerate().take(shown) {
+            let top = area.top() + n as f32 * ROW;
+            let header = matches!(line, Line::Section(_) | Line::Fold);
+            if header || n % 2 == 1 {
+                painter.rect_filled(
+                    Rect::from_min_max(egui::pos2(area.left(), top), egui::pos2(area.right(), top + ROW)),
+                    0.0,
+                    if header { palette.surface } else { faint },
+                );
+            }
+            if header {
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left(), top + ROW - 0.5),
+                        egui::pos2(area.right(), top + ROW - 0.5),
+                    ],
+                    Stroke::new(1.0, grid),
+                );
+            }
+        }
+        let ticks = ticks(view.start, view.span, view.width, self.frequency());
+        for (at, _) in &ticks {
+            let x = view.x(*at);
+            painter.line_segment(
+                [egui::pos2(x, rect.top() + RULER - 6.0), egui::pos2(x, bottom)],
+                Stroke::new(1.0, grid),
+            );
+        }
+        painter.line_segment(
+            [
+                egui::pos2(area.left() - 0.5, rect.top()),
+                egui::pos2(area.left() - 0.5, rect.bottom()),
+            ],
+            Stroke::new(1.0, grid),
+        );
 
         // The events and spans of all rows in one mesh: their rectangles sit
         // on whole pixels and need none of the anti-aliasing a shape each
@@ -116,23 +163,21 @@ impl Timeline {
             if top > area.bottom() {
                 break;
             }
-            if n % 2 == 1 {
-                painter.rect_filled(
-                    Rect::from_min_max(egui::pos2(rect.left(), top), egui::pos2(area.right(), top + ROW)),
-                    0.0,
-                    faint,
-                );
-            }
+            let (font, color) = match line {
+                Line::Section(_) => (heading.clone(), strong),
+                Line::Fold => (font.clone(), strong),
+                _ => (font.clone(), text),
+            };
             labels.text(
-                egui::pos2(rect.left() + 4.0, top + ROW / 2.0),
+                egui::pos2(rect.left() + 8.0 + self.indent(line), top + ROW / 2.0),
                 Align2::LEFT_CENTER,
                 self.label(line),
-                font.clone(),
-                text,
+                font,
+                color,
             );
             if line == Line::Fold {
                 // Pointing right folded, down unfolded.
-                let (x, y) = (rect.left() + 9.0, top + ROW / 2.0);
+                let (x, y) = (rect.left() + 13.0, top + ROW / 2.0);
                 let points = if self.folded {
                     vec![
                         egui::pos2(x - 3.0, y - 4.0),
@@ -146,9 +191,9 @@ impl Timeline {
                         egui::pos2(x, y + 3.0),
                     ]
                 };
-                labels.add(egui::Shape::convex_polygon(points, text, egui::Stroke::NONE));
+                labels.add(egui::Shape::convex_polygon(points, strong, egui::Stroke::NONE));
             }
-            let (high, low) = (top + 3.0, top + ROW - 3.0);
+            let (high, low) = (top + 4.0, top + ROW - 4.0);
             let meaning = self.meaning.as_ref();
             if let Some(meaning) = meaning {
                 let rows = &meaning.load;
@@ -261,8 +306,8 @@ impl Timeline {
         }
         painter.add(egui::Shape::mesh(mesh));
         if let Some(meaning) = &self.meaning {
-            // Small enough that the descenders stay inside the bar's 12 pixels.
-            let small = FontId::proportional(10.0);
+            // Small enough that the descenders stay inside the bar's 14 pixels.
+            let small = FontId::proportional(11.0);
             for (from, to, y, owner) in owners {
                 let name = &meaning.names[0][owner];
                 let (from, to) = (from.max(area.left()), to.min(area.right()));
@@ -278,7 +323,6 @@ impl Timeline {
                 }
             }
         }
-        let bottom = (area.top() + lines.len() as f32 * ROW).min(area.bottom());
         for (kind, color) in [(false, palette.loss), (true, palette.suspect)] {
             let marks = self
                 .marks()
@@ -315,7 +359,24 @@ impl Timeline {
                 egui::StrokeKind::Inside,
             );
         }
-        self.ruler(&painter, &view, area, rect.top(), bottom, text, grid);
+        // The ruler's labels, over the bands and the selection.
+        let small = FontId::proportional(11.0);
+        for (at, label) in ticks {
+            painter.text(
+                egui::pos2(view.x(at) + 3.0, rect.top() + 2.0),
+                Align2::LEFT_TOP,
+                label,
+                small.clone(),
+                visuals.weak_text_color(),
+            );
+        }
+        painter.line_segment(
+            [
+                egui::pos2(area.left(), rect.top() + RULER),
+                egui::pos2(area.right(), rect.top() + RULER),
+            ],
+            Stroke::new(1.0, grid),
+        );
         self.painted = began.elapsed().as_secs_f64() * 1e3;
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
@@ -343,41 +404,6 @@ impl Timeline {
                 ui.label(egui::RichText::new(hovered).monospace());
             });
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn ruler(
-        &self,
-        painter: &egui::Painter,
-        view: &View,
-        area: Rect,
-        top: f32,
-        bottom: f32,
-        text: Color32,
-        grid: Color32,
-    ) {
-        let font = FontId::proportional(11.0);
-        for (at, label) in ticks(view.start, view.span, view.width, self.frequency()) {
-            let x = view.x(at);
-            painter.line_segment(
-                [egui::pos2(x, top + RULER - 6.0), egui::pos2(x, bottom)],
-                Stroke::new(1.0, grid),
-            );
-            painter.text(
-                egui::pos2(x + 3.0, top + 2.0),
-                Align2::LEFT_TOP,
-                label,
-                font.clone(),
-                text,
-            );
-        }
-        painter.line_segment(
-            [
-                egui::pos2(area.left(), top + RULER),
-                egui::pos2(area.right(), top + RULER),
-            ],
-            Stroke::new(1.0, grid),
-        );
     }
 }
 
