@@ -193,11 +193,22 @@ pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f
         None => line.push('-'),
     }
     let _ = write!(line, " {}", decoded.event.name);
-    for field in &decoded.event.fields {
-        let _ = write!(line, " {}=", field.name);
-        value(&mut line, symbols, &field.ty, &decoded.payload[field.offset as usize..]);
+    if !decoded.event.fields.is_empty() {
+        line.push(' ');
+        fields(&mut line, symbols, decoded);
     }
     line
+}
+
+/// Each field of the event as `name=value`, separated by spaces.
+pub fn fields(out: &mut String, symbols: &Symbols, decoded: &Decoded) {
+    for (n, field) in decoded.event.fields.iter().enumerate() {
+        if n > 0 {
+            out.push(' ');
+        }
+        let _ = write!(out, "{}=", field.name);
+        value(out, symbols, &field.ty, &decoded.payload[field.offset as usize..]);
+    }
 }
 
 /// The value of `ty` at the start of `bytes`: integers in decimal, booleans

@@ -10,6 +10,7 @@
 
 mod draw;
 mod hover;
+mod list;
 mod load;
 mod measure;
 mod rows;
@@ -20,6 +21,7 @@ pub use status::counted;
 pub use view::View;
 
 use crate::levels::Levels;
+use crate::listing::Events;
 use crate::meaning::Meaning;
 use crate::panel::Panel;
 use eframe::egui;
@@ -28,6 +30,7 @@ use kymo::model::Trace;
 use kymo::opsy;
 use kymo::stats;
 use kymo::target::Result;
+use list::Tab;
 use load::Mode;
 use measure::Measure;
 use rows::{Mark, Row};
@@ -92,6 +95,14 @@ pub struct Timeline {
     moving: bool,
     /// How OpSy's rows are drawn.
     mode: Mode,
+    /// The event list's lines, the range it shows, the element clicked in
+    /// it and the one to scroll to.
+    list: Events,
+    listed: Option<(i64, i64)>,
+    chosen: Option<usize>,
+    reveal: Option<usize>,
+    /// The bottom panel's tab.
+    tab: Tab,
 }
 
 impl Timeline {
@@ -131,6 +142,11 @@ impl Timeline {
             picked: None,
             moving: false,
             mode: Mode::Auto,
+            list: Events::default(),
+            listed: None,
+            chosen: None,
+            reveal: None,
+            tab: Tab::Events,
         };
         timeline.add(0);
         timeline.panel = timeline
@@ -191,17 +207,13 @@ impl eframe::App for Timeline {
                 });
             });
         });
-        if self.panel.is_some() {
-            egui::Panel::bottom("stats")
-                .resizable(true)
-                .default_size(260.0)
-                .show(ui, |ui| self.statistics(ui));
-        }
+        egui::Panel::bottom("bottom")
+            .resizable(true)
+            .default_size(260.0)
+            .show(ui, |ui| self.bottom(ui));
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
         // The panel came before the view moved: it shows the new range next frame.
-        if let Some(panel) = &self.panel
-            && panel.range() != Some(self.range())
-        {
+        if self.behind() {
             ui.ctx().request_repaint();
         }
     }
@@ -240,16 +252,7 @@ impl Timeline {
         }
         let shown = panel.range().expect("a report computed");
         let (from, to) = (shown.from.unwrap_or_default(), shown.to.unwrap_or_default());
-        let title = format!(
-            "{} {} to {}",
-            if self.selection == Some((from, to)) {
-                "Selection"
-            } else {
-                "View (shift-drag to select, Esc to clear)"
-            },
-            self.time((from - self.origin()) as f64),
-            self.time((to - self.origin()) as f64)
-        );
+        let title = self.range_title(from, to);
         let picked = panel.show(ui, &title);
         self.panel = Some(panel);
         if let Some(instance) = picked {

@@ -67,6 +67,12 @@ pub(super) fn clamped(start: f64, span: f64, first: f64, last: f64) -> f64 {
     start.clamp(first, (last - span / 2.0).max(first))
 }
 
+/// The view of `span` cycles centred on `at`, within the bounds of
+/// `clamped`: its left edge and its width, the same.
+pub(super) fn centred(at: f64, span: f64, first: f64, last: f64) -> (f64, f64) {
+    (clamped(at - span / 2.0, span, first, last), span)
+}
+
 /// The ruler's ticks in a view from `start` over `span` cycles, `width`
 /// pixels wide: each one's cycles and label, in seconds when the frequency is
 /// known, else in cycles.
@@ -122,6 +128,18 @@ mod tests {
             assert_eq!(clamped(start, 1000.0, 0.0, 1e6), 0.0);
         }
         assert_eq!(clamped(5e5, 1000.0, 0.0, 1e6), 5e5);
+    }
+
+    /// Going to an event keeps the zoom and centres the view on it, or
+    /// shows it at an end of the capture.
+    #[test]
+    fn going_to_an_event_centres_it_at_the_same_zoom() {
+        assert_eq!(centred(5e5, 1000.0, 0.0, 1e6), (5e5 - 500.0, 1000.0));
+        for at in [0.0, 100.0, 1e6] {
+            let (start, span) = centred(at, 1000.0, 0.0, 1e6);
+            assert_eq!(span, 1000.0);
+            assert!(start <= at && at <= start + span, "{at}: {start} {span}");
+        }
     }
 
     /// A tick at the origin reads 0, not -0, from a view starting just
