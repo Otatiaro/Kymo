@@ -231,7 +231,12 @@ impl Timeline {
         };
         let range = self.range();
         if !self.moving || panel.range().is_none() {
-            panel.report(&self.trace, &meaning.opsy.contradictions, range);
+            panel.report(
+                &self.trace,
+                &meaning.opsy.contradictions,
+                &meaning.load.cpu.known,
+                range,
+            );
         }
         let shown = panel.range().expect("a report computed");
         let (from, to) = (shown.from.unwrap_or_default(), shown.to.unwrap_or_default());

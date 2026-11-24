@@ -18,7 +18,11 @@
 //! a linear histogram and the worst instances. The histogram's bins are
 //! 1, 2 or 5 × 10ⁿ cycles wide, the narrowest that gives at most 32 bins
 //! between the min and the max, their bounds multiples of the width.
+//!
+//! A share is over the time known in the range: the adapter says when the
+//! state of what it measures is known (`Opsy::known` for OpSy).
 
+use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
 use std::collections::HashMap;
 
@@ -135,7 +139,7 @@ pub struct Report {
     pub to: i64,
     /// The cycles of the first event, where the seconds start.
     pub origin: i64,
-    /// The range less what its losses hid.
+    /// The cycles of the range in which the adapter knows the state.
     pub known: i64,
     pub losses: usize,
     pub suspects: u64,
@@ -261,10 +265,22 @@ impl Places {
     }
 }
 
-/// The statistics of `instances` over `range` of `trace`, `contradictions`
-/// the elements the adapter found against its order, the `worst` highest
-/// instances kept for each group.
-pub fn compute(trace: &Trace, instances: &[Instance], contradictions: &[usize], range: Range, worst: usize) -> Report {
+/// What the adapter found in a trace: its instances, the elements against
+/// its order and the time in which it knows the state.
+pub struct Found<'a> {
+    pub instances: &'a [Instance],
+    pub contradictions: &'a [usize],
+    pub known: &'a Covered,
+}
+
+/// The statistics of what the adapter `found` over `range` of `trace`, the
+/// `worst` highest instances kept for each group.
+pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Report {
+    let Found {
+        instances,
+        contradictions,
+        known,
+    } = found;
     let places = Places::new(trace);
     let events: Vec<i64> = trace
         .elements
@@ -280,22 +296,12 @@ pub fn compute(trace: &Trace, instances: &[Instance], contradictions: &[usize], 
     let high = range.to.unwrap_or(i64::MAX);
     let (from, to) = (low.max(origin), high.min(last).max(low.max(origin)));
     let inside = |cycles: i64| cycles >= low && cycles < high;
-    // A loss hides the time between the events around it.
-    let mut losses = usize::from(trace.first != 0 && low <= origin);
-    let mut hidden = 0;
-    for &loss in &places.losses {
-        let before = places.cycles[loss];
-        if inside(before) {
-            losses += 1;
-        }
-        let after = trace.elements[loss..].iter().find_map(|element| match element {
-            Element::Event { cycles, .. } => Some(*cycles),
-            _ => None,
-        });
-        if let Some(after) = after {
-            hidden += (after.min(to) - before.max(from)).max(0);
-        }
-    }
+    let losses = usize::from(trace.first != 0 && low <= origin)
+        + places
+            .losses
+            .iter()
+            .filter(|&&loss| inside(places.cycles[loss]))
+            .count();
     let suspects = trace
         .elements
         .iter()
@@ -360,7 +366,7 @@ pub fn compute(trace: &Trace, instances: &[Instance], contradictions: &[usize], 
         from,
         to,
         origin,
-        known: (to - from - hidden).max(0),
+        known: known.until(to) - known.until(from),
         losses,
         suspects,
         contradictions,

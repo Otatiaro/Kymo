@@ -65,7 +65,9 @@ and the period, from a task_ready to the next. For each handler: gross and
 net duration, period. For each mutex: holds and waits, by task and in total.
 A line each: the count, the min, the percentiles 50, 90 and 99 by nearest
 rank, the max, the mean; the jitter of a period, max - min; the share of the
-time known that a net execution takes. An instance that touches a loss or
+time known that a net execution takes, the time known being when the task on
+the core is: a loss hides it until the next task_started or enter_idle. An
+instance that touches a loss or
 covers an overrun write is excluded and counted: the high values are then a
 lower bound, marked >=. One cut by the range, or open at the end, is counted
 as cut. --json prints the same, with each histogram and the --worst
@@ -251,13 +253,12 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         from: cycles(from)?,
         to: cycles(to)?,
     };
-    Ok(stats::compute(
-        &trace,
-        &opsy::instances(&opsy),
-        &opsy.contradictions,
-        range,
-        worst,
-    ))
+    let found = stats::Found {
+        instances: &opsy::instances(&opsy),
+        contradictions: &opsy.contradictions,
+        known: &opsy.known(),
+    };
+    Ok(stats::compute(&trace, found, range, worst))
 }
 
 /// The catalogue of the image at `path`, its warnings printed.

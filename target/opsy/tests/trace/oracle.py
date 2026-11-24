@@ -299,12 +299,8 @@ def report(decoded: str, low: int | None, high: int | None, worst: int) -> dict:
         place.append(before)
     lost = [n for n, item in enumerate(items) if item["kind"] == "lost"]
     losses = int(first != 0 and low <= origin) + sum(inside(place[n][0]) for n in lost)
-    hidden = 0
-    for n in lost:
-        after = next((item["cycles"] for item in items[n:] if item["kind"] == "event"), None)
-        if after is not None:
-            hidden += max(min(after, end) - max(place[n][0], start), 0)
-    known = max(end - start - hidden, 0)
+    # The time known: while the task on the core is, in a run.
+    known = sum(max(min(to[1], end) - max(since[1], start), 0) for _, since, to, _ in found["runs"])
     suspects = sum(item["writers"] for n, item in enumerate(items)
                    if item["kind"] == "suspect" and inside(place[n][0]))
     overruns = [(item["from"], item["to"]) for item in items if item["kind"] == "suspect"]

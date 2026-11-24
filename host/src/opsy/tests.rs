@@ -487,7 +487,12 @@ fn report(steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
         pieces.add(&trace.elements, split);
         assert_eq!(super::instances(&pieces), instances, "split at {split}");
     }
-    let report = stats::compute(&trace, &instances, &whole.contradictions, range, 100);
+    let found = stats::Found {
+        instances: &instances,
+        contradictions: &whole.contradictions,
+        known: &whole.known(),
+    };
+    let report = stats::compute(&trace, found, range, 100);
     crate::stats::tests::check_schema(&stats::json(&report));
     report
 }
@@ -620,13 +625,54 @@ fn an_instance_that_touches_a_loss_is_excluded() {
             .iter()
             .all(|group| group.lower_bound() == (group.excluded_loss > 0))
     );
-    // The loss hides 20 to 40.
-    assert_eq!((report.losses, report.known), (1, 70));
+    // The task on the core is unknown from the loss, after 20, to the
+    // enter_idle at 50: the task_sleep at 40 does not say what runs next.
+    assert_eq!((report.losses, report.known), (1, 60));
     let text = stats::text(&report).join("\n");
     assert!(
         text.contains("task 0x20000100 response: 1, min 20 cycles at #8, p50 20 cycles, p90 ≥ 20 cycles"),
         "{text}"
     );
+}
+
+/// A net execution's share is over the time known in the range: a range that
+/// starts in the unknown after a loss counts only from the next switch.
+#[test]
+fn a_share_is_over_the_time_known_in_the_range() {
+    let report = report(
+        &[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("lost", &[]),
+            ("tick", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+        ],
+        stats::Range {
+            from: Some(50),
+            to: Some(130),
+        },
+    );
+    // Unknown from the loss, after 40, to the task_started at 80; A runs
+    // 80 to 90 and 120 to 130. The loss sits at 40, before the range, which
+    // does not count it but still lacks what it hid.
+    assert_eq!((report.from, report.to, report.known, report.losses), (50, 130, 50, 0));
+    let net = report
+        .groups
+        .iter()
+        .find(|group| group.kind == "task" && group.metric.name == "net")
+        .unwrap();
+    assert_eq!(net.count, 2);
+    assert_eq!(net.share(report.known), Some(20.0 / 50.0));
 }
 
 #[test]
