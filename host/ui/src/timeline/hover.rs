@@ -4,7 +4,7 @@ use super::load::{self, Drawn, percent};
 use super::rows::Line;
 use super::status::counted;
 use super::view::View;
-use super::{HOVER, ROW, SWITCH, Timeline};
+use super::{HOVER, SWITCH, Timeline};
 use crate::meaning::{self, Meaning};
 use crate::palette::{Palette, Shade};
 use eframe::egui::{self, Pos2, Rect};
@@ -150,9 +150,9 @@ impl Timeline {
         let high = view.cycles(pointer.x + HOVER);
         let mut cards = Vec::new();
         let mut arrow = None;
-        let n = ((pointer.y - area.top()) / ROW) as usize;
-        let line = lines.get(n).copied();
-        let bins = drawn.iter().find(|(line, _)| *line == n).map(|(_, bins)| bins);
+        let n = super::rows::at(&super::rows::tops(lines), pointer.y - area.top());
+        let line = n.map(|n| lines[n]);
+        let bins = drawn.iter().find(|(line, _)| Some(*line) == n).map(|(_, bins)| bins);
         if let (Some(meaning), Some(line)) = (&self.meaning, line) {
             match bins {
                 Some(bins) => {
