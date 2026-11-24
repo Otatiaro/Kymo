@@ -369,6 +369,31 @@ fn a_task_keeps_its_last_priority() {
 }
 
 #[test]
+fn a_priority_is_unknown_until_given_and_from_a_loss() {
+    let catalogue = catalogue();
+    // At cycles 0, 10, 20 and 30; the loss at the cycles before it, 30;
+    // then 50 and 60.
+    let trace = trace(
+        &catalogue,
+        0,
+        &[
+            ("tick", &[]),
+            ("task_added", &[A, 3]),
+            ("task_priority_changed", &[A, 1]),
+            ("tick", &[]),
+            ("lost", &[]),
+            ("tick", &[]),
+            ("task_priority_changed", &[A, 3]),
+        ],
+    );
+    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    opsy.add(&trace.elements, 0);
+    let task = &opsy.tasks.list[0];
+    let at = [0, 10, 20, 25, 30, 50, 60, 70].map(|cycles| task.priority_at(cycles));
+    assert_eq!(at, [None, Some(3), Some(1), Some(1), None, None, Some(3), Some(3)]);
+}
+
+#[test]
 fn a_hook_without_a_field_the_host_reads_is_refused() {
     let mut catalogue = catalogue();
     let exit = catalogue

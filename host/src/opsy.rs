@@ -82,6 +82,18 @@ pub struct Subject {
     pub name: String,
     /// A task's priority, the last one an event gave: lower is higher.
     pub priority: Option<u8>,
+    /// A task's priority over the trace, each from its edge on: `None` where
+    /// it is unknown, from a loss to the next event that gives it.
+    pub priorities: Vec<(Edge, Option<u8>)>,
+}
+
+impl Subject {
+    /// A task's priority at `cycles`: `None` before the first event that
+    /// gives it, or since a loss.
+    pub fn priority_at(&self, cycles: i64) -> Option<u8> {
+        let after = self.priorities.partition_point(|(edge, _)| edge.cycles <= cycles);
+        after.checked_sub(1).and_then(|last| self.priorities[last].1)
+    }
 }
 
 #[derive(Default)]
@@ -103,6 +115,7 @@ impl Subjects {
                 address,
                 name,
                 priority: None,
+                priorities: Vec::new(),
             });
             self.list.len() - 1
         })
@@ -293,7 +306,9 @@ impl<'a> Opsy<'a> {
         match hook {
             Hook::TaskAdded { task, priority } | Hook::TaskPriorityChanged { task, priority } => {
                 let task = self.tasks.index(symbols, task, payload);
-                self.tasks.list[task].priority = Some(priority.read(payload) as u8);
+                let task = &mut self.tasks.list[task];
+                task.priority = Some(priority.read(payload) as u8);
+                task.priorities.push((edge, task.priority));
             }
             Hook::TaskTerminated { task } => {
                 // A task killed while it waits for a mutex waits no more.
@@ -393,6 +408,12 @@ impl<'a> Opsy<'a> {
         self.held.clear();
         self.waiting.clear();
         self.loss = Some(edge);
+        // A change may be among what the loss hides.
+        for task in &mut self.tasks.list {
+            if task.priorities.last().is_some_and(|(_, priority)| priority.is_some()) {
+                task.priorities.push((edge, None));
+            }
+        }
     }
 
     /// The spans open, ended at `edge`: the innermost handler first.

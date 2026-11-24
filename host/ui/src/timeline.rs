@@ -611,6 +611,11 @@ impl Timeline {
                     });
                 if let Some((run, still)) = found {
                     let _ = write!(text, "{}\n{}", named(run.task), self.extent(run.span, still));
+                    // Left out where no event has given it yet, or since a loss.
+                    let at = low + (high - low) / 2;
+                    if let Some(priority) = run.task.and_then(|task| opsy.tasks.list[task].priority_at(at)) {
+                        let _ = write!(text, "\npriority {priority} there, lower is higher");
+                    }
                     if !still && !run.span.to.lost {
                         text.push_str("\nlast events, the switch last:");
                         for line in self.events_before(run.span) {
