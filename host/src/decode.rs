@@ -274,6 +274,7 @@ fn value(out: &mut String, names: Names, ty: &Type, bytes: &[u8]) {
             value(out, names, count, bytes);
             unit(out, *num, *den);
         }
+        Kind::Array(element, lengths) if lengths.len() == 1 && is_char(element) => text(out, bytes),
         Kind::Array(element, lengths) => array(out, names, element, lengths, bytes),
         Kind::Record(fields) => {
             out.push('{');
@@ -305,6 +306,35 @@ fn array(out: &mut String, names: Names, element: &Type, lengths: &[u64], bytes:
     out.push(']');
 }
 
+/// Whether `ty` is `char`, whose arrays hold text; not `signed char` nor
+/// `unsigned char`, which `std::int8_t` and `std::uint8_t` stand for.
+fn is_char(ty: &Type) -> bool {
+    matches!(
+        ty.kind,
+        Kind::Base(gimli::DW_ATE_signed_char | gimli::DW_ATE_unsigned_char)
+    ) && ty.size == Some(1)
+        && ty.name == "char"
+}
+
+/// A `char` array as a string, in quotes, up to its first NUL: printable
+/// ASCII as is but `"` and `\` escaped, any other byte as `\xNN`.
+fn text(out: &mut String, bytes: &[u8]) {
+    out.push('"');
+    for &byte in bytes.iter().take_while(|&&byte| byte != 0) {
+        match byte {
+            b'"' | b'\\' => {
+                out.push('\\');
+                out.push(char::from(byte));
+            }
+            b' '..=b'~' => out.push(char::from(byte)),
+            _ => {
+                let _ = write!(out, "\\x{byte:02x}");
+            }
+        }
+    }
+    out.push('"');
+}
+
 /// The unit of a count lasting `num` / `den` seconds: its SI symbol, or else
 /// the ratio, `x(1/60)s`.
 fn unit(out: &mut String, num: u64, den: u64) {
@@ -332,5 +362,52 @@ fn hex(out: &mut String, bytes: &[u8]) {
     out.push_str("0x");
     for byte in bytes {
         let _ = write!(out, "{byte:02x}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn array_of(name: &str, encoding: gimli::DwAte, lengths: &[u64]) -> Type {
+        let element = Type {
+            name: name.to_owned(),
+            size: Some(1),
+            kind: Kind::Base(encoding),
+        };
+        Type {
+            name: format!("{name}[]"),
+            size: Some(lengths.iter().product()),
+            kind: Kind::Array(Box::new(element), lengths.to_vec()),
+        }
+    }
+
+    fn shown(ty: &Type, bytes: &[u8]) -> String {
+        let mut out = String::new();
+        value(&mut out, &|_, _| None, ty, bytes);
+        out
+    }
+
+    #[test]
+    fn a_char_array_reads_as_a_string_up_to_its_nul() {
+        let name = array_of("char", gimli::DW_ATE_unsigned_char, &[8]);
+        assert_eq!(shown(&name, b"IDLE\0xyz"), "\"IDLE\"");
+        assert_eq!(shown(&name, b"Tmr Svc!"), "\"Tmr Svc!\"");
+    }
+
+    #[test]
+    fn a_string_escapes_what_is_not_printable_ascii() {
+        let name = array_of("char", gimli::DW_ATE_signed_char, &[6]);
+        assert_eq!(shown(&name, b"a\"\\\t\xe9\0"), r#""a\"\\\x09\xe9""#);
+    }
+
+    #[test]
+    fn byte_arrays_and_arrays_of_strings_stay_arrays() {
+        let bytes = array_of("unsigned char", gimli::DW_ATE_unsigned_char, &[2]);
+        assert_eq!(shown(&bytes, b"AB"), "[65,66]");
+        let signed = array_of("signed char", gimli::DW_ATE_signed_char, &[2]);
+        assert_eq!(shown(&signed, b"A\xff"), "[65,-1]");
+        let names = array_of("char", gimli::DW_ATE_unsigned_char, &[2, 2]);
+        assert_eq!(shown(&names, b"AB\0D"), "[[65,66],[0,68]]");
     }
 }

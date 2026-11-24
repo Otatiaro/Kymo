@@ -20,7 +20,8 @@ that:
   on one, unless it is waiting, which the task waking it does for it: a
   waiter handed the mutex it was blocked on, or a task whose wait on a
   condition ends, taking back the mutex it waited with or blocking on it;
-- every isr_exit closes the last isr_enter still open, of the same handler;
+- every isr_enter carries a device interrupt's exception number, and every
+  isr_exit closes the last isr_enter still open, of the same handler;
 - every task_priority_changed moves the task's priority away from the last
   one task_added or task_priority_changed gave it, and the suite's mutex
   donations make the priority both rise and drop;
@@ -86,7 +87,7 @@ EVENTS = {
     "enter_service_call": ("kernel", []),
     "exit_service_call": ("kernel", ["task_switch"]),
     "enter_pend_sv": ("kernel", []),
-    "isr_enter": ("interrupts", ["handler"]),
+    "isr_enter": ("interrupts", ["handler", "exception"]),
     "isr_exit": ("interrupts", ["handler"]),
     "mutex_taken": ("exclusion", ["mutex", "owner"]),
     "mutex_released": ("exclusion", ["mutex", "owner"]),
@@ -100,6 +101,8 @@ RUNNING = {"task_sleep": "task", "task_wait": "task", "task_wait_timeout": "task
 RUNNING_OR_WAITING = {"mutex_taken": "owner", "mutex_blocked": "waiter"}
 # Where a task starts waiting: until it is put on the core again.
 WAITS = {"task_wait", "task_wait_timeout", "mutex_blocked"}
+# The exception number, IPSR's, of the first device interrupt.
+FIRST_IRQ = 16
 UNKNOWN = object()
 
 
@@ -188,6 +191,8 @@ def check(output: str) -> list[str]:
                 counts["priority_raised" if priority < previous else "priority_dropped"] += 1
             priorities[values["task"]] = priority
         if name == "isr_enter":
+            if int(values["exception"], 0) < FIRST_IRQ:
+                errors.append(f"{line}: exception {values['exception']} is not a device interrupt")
             open_isrs.append(values["handler"])
         elif name == "isr_exit":
             if open_isrs == [None]:
@@ -208,7 +213,7 @@ def check(output: str) -> list[str]:
         errors.append(f"the recording left a check unexercised: {counts}")
     return errors
 
-def spans(output: str) -> list[str]:
+def spans(output: str, names: dict[int, str]) -> list[str]:
     """OpSy's spans in the event lines of a recording, as kymo decode --opsy
     prints them, sorted.
 
@@ -216,7 +221,9 @@ def spans(output: str) -> list[str]:
     the next of either. A handler runs from its isr_enter to the isr_exit
     that closes it, at the depth of the handlers still open below it; the
     kernel's SysTick and SVCall handlers likewise, from their enter_ event to
-    their exit_ event. A mutex
+    their exit_ event. A handler's subject names its interrupt from `names`
+    (oracle.handler_subject); an exit closes the innermost handler entered,
+    of its address. A mutex
     is held from mutex_taken to mutex_released by the same task, and waited
     for from mutex_blocked to its waiter's mutex_taken, or the waiter's
     task_terminated. A loss ends whatever is open; an exit or a release seen
@@ -236,7 +243,7 @@ def spans(output: str) -> list[str]:
     lost = None  # the last loss, as an edge (position, label)
     nesting_known = True
     running = None  # (task, since), or None while unknown
-    isrs = []  # (handler, since, depth)
+    isrs = []  # (subject, since, depth, handler)
     held = {}  # mutex: (owner, since)
     waits = {}  # (mutex, waiter): since
     ready = {}  # task: since, of its activation open
@@ -255,9 +262,9 @@ def spans(output: str) -> list[str]:
     def cause(reason):
         if reason in ELAPSED:
             return "elapsed"
-        for handler, _, _ in reversed(isrs):
+        for subject, _, _, handler in reversed(isrs):
             if handler not in oracle.KERNEL.values():
-                return f"handler:{handler}"
+                return f"handler:{subject}"
         return "unknown" if running is None else f"task:{running[0]}"
 
     for n, (line, name, fields) in enumerate(parse(output)):
@@ -266,8 +273,8 @@ def spans(output: str) -> list[str]:
             if running is not None:
                 out.append(f"run from={running[1][1]} to=lost task={running[0]}")
                 runs.append((running[0], running[1], edge))
-            for handler, since, depth in isrs:
-                out.append(f"interrupt from={since} to=lost depth={depth} handler={handler}")
+            for subject, since, depth, _ in isrs:
+                out.append(f"interrupt from={since} to=lost depth={depth} handler={subject}")
             for mutex, (owner, since) in held.items():
                 out.append(f"hold from={since} to=lost mutex={mutex} task={owner}")
             for (mutex, waiter), since in waits.items():
@@ -299,17 +306,23 @@ def spans(output: str) -> list[str]:
         elif name in ("task_sleep", "task_wait", "task_wait_timeout"):
             end_activation(values["task"], last)
         elif name in ("isr_enter", "enter_systick", "enter_service_call"):
-            isrs.append((oracle.KERNEL.get(name) or values["handler"], at, len(isrs) if nesting_known else "unknown"))
+            depth = len(isrs) if nesting_known else "unknown"
+            if name == "isr_enter":
+                handler = values["handler"]
+                subject = oracle.handler_subject(handler, values["exception"], names)
+            else:
+                handler = subject = oracle.KERNEL[name]
+            isrs.append((subject, at, depth, handler))
         elif name in ("isr_exit", "exit_systick", "exit_service_call"):
             handler = oracle.KERNEL.get(name) or values["handler"]
-            if isrs and isrs[-1][0] == handler:
-                _, since, depth = isrs.pop()
+            if isrs and isrs[-1][3] == handler:
+                subject, since, depth, _ = isrs.pop()
             elif not isrs and lost is not None:
-                since, depth = "lost", "unknown"
+                subject, since, depth = handler, "lost", "unknown"
             else:
                 out.append(f"contradiction {at}")
                 continue
-            out.append(f"interrupt from={since} to={at} depth={depth} handler={handler}")
+            out.append(f"interrupt from={since} to={at} depth={depth} handler={subject}")
         elif name == "mutex_taken":
             mutex, owner = values["mutex"], values["owner"]
             if mutex in held:
@@ -369,9 +382,16 @@ def spans(output: str) -> list[str]:
     return sorted(out)
 
 
-def check_spans(output: str, decoded: str) -> list[str]:
+def interrupt_names(host: str, image: str) -> dict[int, str]:
+    """The device interrupts the image's DWARF names, as `kymo events` lists them."""
+    events = subprocess.run([host, "events", image], capture_output=True, text=True, encoding="utf-8",
+                            timeout=TIMEOUT_SECONDS, check=True).stdout
+    return oracle.interrupt_names(events)
+
+
+def check_spans(output: str, decoded: str, names: dict[int, str]) -> list[str]:
     """kymo decode --opsy's spans against those computed here, each kind seen."""
-    expected, got = spans(output), sorted(decoded.splitlines())
+    expected, got = spans(output, names), sorted(decoded.splitlines())
     kinds = {kind: sum(line.startswith(kind + " ") for line in expected)
              for kind in ("run", "interrupt", "hold", "wait", "wake", "ready")}
     causes = {cause: sum(line.startswith("wake ") and f" cause={cause}" in line for line in expected)
@@ -394,12 +414,13 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
     """kymo stats --json against oracle.py, on the whole capture and on its
     middle half, every kind of instance seen and some cut by the range."""
     def run(*arguments) -> str:
-        done = subprocess.run([host, *arguments], capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+        done = subprocess.run([host, *arguments], capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS)
         if done.returncode != 0:
             raise RuntimeError(f"kymo {arguments[0]} failed: {done.stderr.strip()}")
         return done.stdout
 
     try:
+        names = oracle.interrupt_names(run("events", image))
         # The whole capture without a frequency: no seconds.
         decoded = run("decode", image, capture)
         whole = json.loads(run("stats", image, capture, "--json", "--worst", str(WORST)))
@@ -420,8 +441,8 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
     except (RuntimeError, ValueError, KeyError, TypeError) as error:
         return [str(error)]
     errors = []
-    for name, got, expected in (("whole", whole, oracle.report(decoded, None, None, WORST)),
-                                ("middle", middle, oracle.report(clocked, low, high, WORST))):
+    for name, got, expected in (("whole", whole, oracle.report(decoded, None, None, WORST, names)),
+                                ("middle", middle, oracle.report(clocked, low, high, WORST, names))):
         errors += [f"stats {name}: {error}" for error in oracle.compare(expected, got)]
     kinds = {kind: sum(group["count"] for group in whole["groups"] if group["kind"] == kind)
              for kind in ("task", "handler", "mutex")}
@@ -446,7 +467,7 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
         path = os.path.join(folder, "rules.json")
         with open(path, "w", encoding="utf-8") as file:
             json.dump({"baseline": "baseline.json", "rules": rules}, file)
-        done = subprocess.run([host, "check", image, capture, path], capture_output=True, text=True,
+        done = subprocess.run([host, "check", image, capture, path], capture_output=True, text=True, encoding="utf-8",
                               timeout=TIMEOUT_SECONDS)
         if done.returncode not in (0, 3, 4):
             raise RuntimeError(f"kymo check failed ({done.returncode}): {done.stderr.strip()}")
@@ -469,12 +490,13 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
 
     try:
         baseline = subprocess.run([host, "stats", image, capture, "--json"], capture_output=True, text=True,
-                                  timeout=TIMEOUT_SECONDS, check=True).stdout
-        decoded = subprocess.run([host, "decode", image, capture], capture_output=True, text=True,
+                                  encoding="utf-8", timeout=TIMEOUT_SECONDS, check=True).stdout
+        decoded = subprocess.run([host, "decode", image, capture], capture_output=True, text=True, encoding="utf-8",
                                  timeout=TIMEOUT_SECONDS, check=True).stdout
+        names = interrupt_names(host, image)
     except subprocess.CalledProcessError as error:
         return [f"kymo {error.cmd[1]} failed: {error.stderr.strip()}"]
-    expected = oracle.report(decoded, None, None, WORST)
+    expected = oracle.report(decoded, None, None, WORST, names)
     groups = [{"kind": kind, "subject": subject, "metric": metric, "detail": detail} | group
               for (kind, subject, metric, detail), group in expected["groups"].items()]
     known = [group for group in groups if group["distribution"] and not group["lower_bound"]]
@@ -593,7 +615,7 @@ def main() -> int:
         record = subprocess.Popen(
             [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{record_port}",
              "--elf", args.image, "--out", capture],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         reader = threading.Thread(target=read, args=(record.stdout,))
         reader.start()
         if started.wait(TIMEOUT_SECONDS) and record.poll() is None:
@@ -619,11 +641,11 @@ def main() -> int:
         return 1
     errors = check(stdout)
     decoded = subprocess.run([args.host, "decode", args.image, capture, "--opsy"],
-                             capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+                             capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS)
     if decoded.returncode != 0:
         errors.append(f"kymo decode --opsy failed: {decoded.stderr.strip()}")
     else:
-        errors += check_spans(stdout, decoded.stdout)
+        errors += check_spans(stdout, decoded.stdout, interrupt_names(args.host, args.image))
     errors += check_stats(args.host, args.image, capture)
     errors += check_rules(args.host, args.image, capture)
     directory.cleanup()

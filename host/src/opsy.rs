@@ -53,6 +53,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
             },
             "isr_enter" => Hook::IsrEnter {
                 handler: field("handler")?,
+                exception: field("exception")?,
             },
             "isr_exit" => Hook::IsrExit {
                 handler: field("handler")?,

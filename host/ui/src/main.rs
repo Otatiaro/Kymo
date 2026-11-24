@@ -12,6 +12,7 @@ mod timeline;
 
 use eframe::egui;
 use kymo::events;
+use kymo::interrupts::Interrupts;
 use kymo::model::Trace;
 use kymo::target::Result;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "\
-usage: kymo-ui <elf> <capture> [--clock <Hz>] [--theme <theme>] [--measure]
+usage: kymo-ui <elf> <capture> [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
 
 Shows a capture made by kymo record --out: one row per event type of the
 image, the gaps (slots lost) and the overrun writes (a write interrupted for
@@ -70,6 +71,8 @@ capture. The theme follows the system's unless chosen in its menu; the
 choice is kept for the next runs.
 
   --clock <Hz>  the cycle counter's frequency, as for kymo decode
+  --svd <file>  names the interrupts the image's DWARF does not, as for
+                kymo decode
   --theme <theme>
                 system, light or dark, as chosen in the toolbar
   --measure     prints the time to read the capture and build the timeline,
@@ -92,10 +95,12 @@ fn run() -> Result<()> {
     let mut clock = None;
     let mut measure = false;
     let mut theme = None;
+    let mut svd = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--clock" => clock = Some(arguments.next().ok_or("--clock needs a value")?.parse()?),
+            "--svd" => svd = Some(PathBuf::from(arguments.next().ok_or("--svd needs a file")?)),
             "--measure" => measure = true,
             "--theme" => {
                 theme = Some(match arguments.next().as_deref() {
@@ -113,7 +118,11 @@ fn run() -> Result<()> {
         return Err(USAGE.into());
     };
     // The trace borrows the catalogue, which lives as long as the window.
-    let catalogue: &'static events::Catalogue = Box::leak(Box::new(events::read(elf)?));
+    let mut read_catalogue = events::read(elf)?;
+    if let Some(svd) = svd {
+        read_catalogue.interrupts = read_catalogue.interrupts.or(&Interrupts::from_svd(&svd)?);
+    }
+    let catalogue: &'static events::Catalogue = Box::leak(Box::new(read_catalogue));
     let bytes = std::fs::read(capture).map_err(|error| format!("{}: {error}", capture.display()))?;
     let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;

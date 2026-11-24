@@ -1,6 +1,7 @@
 """kymo stats recomputed from the event lines of kymo decode, apart from the host.
 
-    expected = oracle.report(decoded, low, high, worst)
+    names = oracle.interrupt_names(events)  # what `kymo events <elf>` prints
+    expected = oracle.report(decoded, low, high, worst, names)
     errors = oracle.compare(expected, json.loads(stats_json))
 
 `decoded` is what `kymo decode <elf> <capture>` prints: the record line, then
@@ -22,6 +23,9 @@ What makes an instance, from OpSy's events (ADR-062):
   running, `task:<name>` or `task:idle`; `unknown` from a loss to the next
   task_started or enter_idle;
 - a task's period runs from a task_ready to its next;
+- a handler's subject is `<interrupt> → <handler>`, the interrupt named by
+  its exception number; an exit closes the innermost handler entered, of
+  its address, or after a loss names the handler alone;
 - a handler's gross runs from its entry to its exit; its net is less the
   handlers nested one level within it; its period runs from an entry seen to
   the next;
@@ -46,6 +50,32 @@ ENDS = {"task_sleep", "task_wait", "task_wait_timeout"}
 ELAPSED = {"timed_out", "sleep_elapsed"}
 KERNEL = {"enter_systick": "systick", "exit_systick": "systick",
           "enter_service_call": "service_call", "exit_service_call": "service_call"}
+# The exceptions the architecture names, by number; the device's interrupts
+# start at FIRST_IRQ.
+ARCHITECTURE = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault",
+                7: "SecureFault", 11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
+FIRST_IRQ = 16
+
+
+def interrupt_names(events: str) -> dict[int, str]:
+    """The device interrupts `kymo events` lists, by exception number."""
+    return {int(words[1]): words[2] for words in (line.split() for line in events.splitlines())
+            if len(words) == 3 and words[0] == "interrupt"}
+
+
+def handler_subject(handler: str, exception: str, names: dict[int, str]) -> str:
+    """The subject of a handler entered for an exception: `<interrupt> → <handler>`,
+    or the handler alone when called from thread mode (0) or named after it."""
+    number = int(exception, 0)
+    if number == 0:
+        return handler
+    if number in ARCHITECTURE:
+        interrupt = ARCHITECTURE[number]
+    elif number < FIRST_IRQ:
+        interrupt = f"exception{number}"
+    else:
+        interrupt = names.get(number, f"IRQ{number - FIRST_IRQ}")
+    return handler if interrupt == handler else f"{interrupt} → {handler}"
 
 
 def elements(decoded: str) -> tuple[int, list[dict]]:
@@ -69,11 +99,12 @@ def elements(decoded: str) -> tuple[int, list[dict]]:
     return first, out
 
 
-def spans(first: int, items: list[dict]) -> dict:
-    """OpSy's activations, wakes, runs, interrupts, holds and contradictions."""
+def spans(first: int, items: list[dict], names: dict[int, str]) -> dict:
+    """OpSy's activations, wakes, runs, interrupts, holds and contradictions;
+    a handler's subject names its interrupt from `names` (handler_subject)."""
     found = {"activations": [], "wakes": [], "runs": [], "interrupts": [], "holds": [], "contradictions": []}
     running = None  # (task or None for idle, since), None while unknown
-    entered = []  # (handler, since), innermost last
+    entered = []  # (subject, since, handler), innermost last
     held = {}  # mutex: (task, since)
     waiting = {}  # (mutex, task): since
     ready = {}  # task: (since, reason, cause)
@@ -95,7 +126,7 @@ def spans(first: int, items: list[dict]) -> dict:
     def cause_of(reason):
         if reason in ELAPSED:
             return "elapsed"
-        handlers = [handler for handler, _ in entered if handler not in KERNEL.values()]
+        handlers = [subject for subject, _, handler in entered if handler not in KERNEL.values()]
         if handlers:
             return "handler:" + handlers[-1]
         if running is None:
@@ -105,8 +136,8 @@ def spans(first: int, items: list[dict]) -> dict:
     def close_all(edge, is_open):
         if running is not None:
             found["runs"].append((running[0], running[1], edge, is_open))
-        for depth, (handler, since) in enumerate(entered):
-            found["interrupts"].append((handler, depth, since, edge, is_open))
+        for depth, (subject, since, _) in enumerate(entered):
+            found["interrupts"].append((subject, depth, since, edge, is_open))
         for mutex, (task, since) in held.items():
             found["holds"].append((mutex, task, False, since, edge, is_open))
         for (mutex, task), since in waiting.items():
@@ -151,18 +182,22 @@ def spans(first: int, items: list[dict]) -> dict:
             for key in [key for key in waiting if key[1] == task]:
                 found["holds"].append((key[0], task, True, waiting.pop(key), edge, False))
             end_activation(task, edge)
-        elif name in ("isr_enter", "enter_systick", "enter_service_call"):
-            entered.append((KERNEL.get(name) or values["handler"], edge))
+        elif name == "isr_enter":
+            handler = values["handler"]
+            entered.append((handler_subject(handler, values["exception"], names), edge, handler))
+        elif name in ("enter_systick", "enter_service_call"):
+            entered.append((KERNEL[name], edge, KERNEL[name]))
         elif name in ("isr_exit", "exit_systick", "exit_service_call"):
+            # An exit closes the innermost handler entered, of its address.
             handler = KERNEL.get(name) or values["handler"]
-            if entered and entered[-1][0] == handler:
-                since = entered.pop()[1]
+            if entered and entered[-1][2] == handler:
+                subject, since, _ = entered.pop()
             elif not entered and loss is not None:
-                since = loss
+                subject, since = handler, loss
             else:
                 found["contradictions"].append(n)
                 continue
-            found["interrupts"].append((handler, len(entered), since, edge, False))
+            found["interrupts"].append((subject, len(entered), since, edge, False))
         elif name == "mutex_taken":
             mutex, task = values["mutex"], values["owner"]
             if mutex in held:
@@ -294,10 +329,11 @@ def histogram(values: list[int]) -> dict:
     return {"width": width, "first": low // width * width, "counts": counts}
 
 
-def report(decoded: str, low: int | None, high: int | None, worst: int) -> dict:
-    """What kymo stats --json gives over [low, high) in cycles, none for no bound."""
+def report(decoded: str, low: int | None, high: int | None, worst: int, names: dict[int, str]) -> dict:
+    """What kymo stats --json gives over [low, high) in cycles, none for no
+    bound; `names` names the interrupts (interrupt_names)."""
     first, items = elements(decoded)
-    found = spans(first, items)
+    found = spans(first, items, names)
     events = [item for item in items if item["kind"] == "event"]
     origin = events[0]["cycles"] if events else 0
     last = events[-1]["cycles"] if events else 0
