@@ -81,7 +81,8 @@ function(kymo_qemu_image name cpu level)
 	endif()
 	set(script ${script_${cpu}})
 	add_executable(${name} ${arg_SOURCES} qemu/startup.cpp)
-	set_target_properties(${name} PROPERTIES SUFFIX ".elf" LINK_DEPENDS ${script})
+	set_target_properties(${name} PROPERTIES SUFFIX ".elf"
+		LINK_DEPENDS "${script};${CMAKE_CURRENT_SOURCE_DIR}/qemu/sections.ld")
 	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 	target_compile_definitions(${name} PRIVATE ${arg_DEFINITIONS})
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
@@ -89,7 +90,8 @@ function(kymo_qemu_image name cpu level)
 		-ffunction-sections -fdata-sections
 		-fno-exceptions -fno-rtti -fno-threadsafe-statics ${lto})
 	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb ${lto}
-		-nostdlib -nostartfiles -Wl,--gc-sections -T ${script})
+		-nostdlib -nostartfiles -Wl,--gc-sections
+		-L${CMAKE_CURRENT_SOURCE_DIR}/qemu -T ${script})
 endfunction()
 
 # A test that runs a Python script, or fails saying what is missing:
