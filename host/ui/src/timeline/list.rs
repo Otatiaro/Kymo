@@ -9,6 +9,7 @@ use crate::listing::Entry;
 use crate::palette::Palette;
 use eframe::egui;
 use kymo::decode;
+use kymo::events::Pointee;
 use kymo::model::Element;
 
 /// The width of the bar that marks a loss or a suspect line, in pixels.
@@ -82,18 +83,34 @@ impl Timeline {
         let names = self.rows.iter().map(|row| row.name.len()).max().unwrap_or_default();
         // The widest time, the last event's.
         let time = self.time(self.last()).len();
-        let line = |entry: &Entry| -> String {
+        let symbols = &self.catalogue.symbols;
+        // A subject by the name its row shows, anything else as decode names it.
+        let shown = |pointee: &Pointee, address: u64| {
+            self.meaning
+                .as_ref()
+                .and_then(|meaning| meaning.shown_at(address))
+                .map(str::to_owned)
+                .or_else(|| symbols.name(pointee, address))
+        };
+        // The line, and its fields in full when they differ.
+        let line = |entry: &Entry| -> (String, Option<String>) {
             let at = self.time((entry.cycles - self.origin()) as f64);
             match &self.trace.elements[entry.element] {
                 Element::Event { event, .. } => {
                     let mut fields = String::new();
-                    decode::fields(&mut fields, &self.catalogue.symbols, event);
-                    format!(
+                    decode::fields_named(&mut fields, &shown, event);
+                    let mut full = String::new();
+                    decode::fields(&mut full, symbols, event);
+                    let line = format!(
                         "  {at:>time$}  {:>10}  {:<names$}  {fields}",
                         event.index, event.event.name
-                    )
+                    );
+                    (line, (full != fields).then_some(full))
                 }
-                other => format!("  {at:>time$}  {:>10}  {}", "", marked(other).unwrap_or_default()),
+                other => (
+                    format!("  {at:>time$}  {:>10}  {}", "", marked(other).unwrap_or_default()),
+                    None,
+                ),
             }
         };
         let font = egui::TextStyle::Monospace;
@@ -128,7 +145,8 @@ impl Timeline {
                 } else {
                     visuals.text_color()
                 };
-                let galley = ui.painter().layout_no_wrap(line(entry), font.clone(), color);
+                let (text, full) = line(entry);
+                let galley = ui.painter().layout_no_wrap(text, font.clone(), color);
                 let width = ui.available_width().max(galley.size().x + MARK);
                 let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
                 if chosen {
@@ -148,6 +166,10 @@ impl Timeline {
                 }
                 let top = rect.top() + (height - galley.size().y) / 2.0;
                 ui.painter().galley(egui::pos2(rect.left(), top), galley, color);
+                let response = match full {
+                    Some(full) => response.on_hover_text(full),
+                    None => response,
+                };
                 if response.clicked() {
                     clicked = Some(*entry);
                 }

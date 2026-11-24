@@ -2,11 +2,13 @@
 //! over a range, a table sorted by a column. A group's min, its max and its
 //! worst instances each lead to the instance on the timeline.
 
+use crate::meaning::Full;
 use crate::timeline::counted;
 use eframe::egui;
 use kymo::load::Covered;
 use kymo::model::Trace;
 use kymo::stats::{self, Group, Instance, Point, Range, Report};
+use std::collections::HashMap;
 
 /// The worst instances kept for each group, as kymo stats keeps by default.
 const WORST: usize = 10;
@@ -72,6 +74,9 @@ pub struct Panel {
     pub descending: bool,
     /// The group whose worst instances are listed.
     chosen: Option<Key>,
+    /// The names in full, by kind and name shown; a detail's under the kind
+    /// `detail`.
+    full: Full,
 }
 
 impl Panel {
@@ -82,6 +87,16 @@ impl Panel {
             sort: Column::Subject,
             descending: false,
             chosen: None,
+            full: HashMap::new(),
+        }
+    }
+
+    /// The panel, its instances named short, with ull their names in full
+    /// by kind and name shown.
+    pub fn named(instances: Vec<Instance>, full: Full) -> Self {
+        Self {
+            full,
+            ..Self::new(instances)
         }
     }
 
@@ -220,10 +235,22 @@ impl Panel {
                         for &n in &order {
                             let group = &report.groups[n];
                             let picked = chosen_group == Some(n);
-                            if ui.selectable_label(picked, &group.subject).clicked() {
+                            let subject = ui.selectable_label(picked, &group.subject);
+                            let subject = match self.full.get(&(group.kind, group.subject.clone())) {
+                                Some(full) => subject.on_hover_text(full),
+                                None => subject,
+                            };
+                            if subject.clicked() {
                                 chosen = Some(key(group));
                             }
-                            ui.label(metric(group));
+                            let detail = group
+                                .detail
+                                .as_ref()
+                                .and_then(|detail| self.full.get(&("detail", detail.clone())));
+                            let label = ui.label(metric(group));
+                            if let Some(full) = detail {
+                                label.on_hover_text(full);
+                            }
                             for column in &Column::ALL[2..] {
                                 let text = cell(group, *column, frequency);
                                 match point(group, *column) {

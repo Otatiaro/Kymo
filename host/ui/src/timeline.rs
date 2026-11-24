@@ -154,10 +154,10 @@ impl Timeline {
             tab: Tab::Events,
         };
         timeline.add(0);
-        timeline.panel = timeline
-            .meaning
-            .as_ref()
-            .map(|meaning| Panel::new(kymo::meaning::instances(&meaning.kernel)));
+        timeline.panel = timeline.meaning.as_ref().map(|meaning| {
+            let (instances, full) = meaning.shorten(kymo::meaning::instances(&meaning.kernel));
+            Panel::named(instances, full)
+        });
         timeline.whole();
         Ok(timeline)
     }
