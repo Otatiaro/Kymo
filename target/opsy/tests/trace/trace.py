@@ -203,26 +203,28 @@ def spans(output: str) -> list[str]:
     is held from mutex_taken to mutex_released by the same task, and waited
     for from mutex_blocked to its waiter's mutex_taken, or the waiter's
     task_terminated. A loss ends whatever is open; an exit or a release seen
-    after one, with nothing open to close, starts at it. An event against
-    that order is a contradiction.
+    after one, with nothing open to close, starts at it. From a loss to the
+    next task_started or enter_idle with no handler open, the depth is
+    unknown. An event against that order is a contradiction.
     """
     out = []
     lost = False
+    nesting_known = True
     running = None  # (task, since), or None while unknown
-    isrs = []  # (handler, since)
+    isrs = []  # (handler, since, depth)
     held = {}  # mutex: (owner, since)
     waits = {}  # (mutex, waiter): since
     for line, name, fields in parse(output):
         if name is None:
             if running is not None:
                 out.append(f"run from={running[1]} to=lost task={running[0]}")
-            for depth, (handler, since) in enumerate(isrs):
+            for handler, since, depth in isrs:
                 out.append(f"interrupt from={since} to=lost depth={depth} handler={handler}")
             for mutex, (owner, since) in held.items():
                 out.append(f"hold from={since} to=lost mutex={mutex} task={owner}")
             for (mutex, waiter), since in waits.items():
                 out.append(f"wait from={since} to=lost mutex={mutex} task={waiter}")
-            lost, running, isrs, held, waits = True, None, [], {}, {}
+            lost, nesting_known, running, isrs, held, waits = True, False, None, [], {}, {}
             continue
         at = line.split(" ")[1]
         name = name[len(PREFIX):] if name.startswith(PREFIX) else name
@@ -232,18 +234,20 @@ def spans(output: str) -> list[str]:
             if running is not None:
                 out.append(f"run from={running[1]} to={at} task={running[0]}")
             running = (task, at)
+            if not isrs:
+                nesting_known = True
         elif name == "isr_enter":
-            isrs.append((values["handler"], at))
+            isrs.append((values["handler"], at, len(isrs) if nesting_known else "unknown"))
         elif name == "isr_exit":
             handler = values["handler"]
             if isrs and isrs[-1][0] == handler:
-                since = isrs.pop()[1]
+                _, since, depth = isrs.pop()
             elif not isrs and lost:
-                since = "lost"
+                since, depth = "lost", "unknown"
             else:
                 out.append(f"contradiction {at}")
                 continue
-            out.append(f"interrupt from={since} to={at} depth={len(isrs)} handler={handler}")
+            out.append(f"interrupt from={since} to={at} depth={depth} handler={handler}")
         elif name == "mutex_taken":
             mutex, owner = values["mutex"], values["owner"]
             if mutex in held:
@@ -273,7 +277,7 @@ def spans(output: str) -> list[str]:
                 out.append(f"wait from={waits.pop((mutex, waiter))} to={at} mutex={mutex} task={waiter}")
     if running is not None:
         out.append(f"run from={running[1]} to=open task={running[0]}")
-    for depth, (handler, since) in enumerate(isrs):
+    for handler, since, depth in isrs:
         out.append(f"interrupt from={since} to=open depth={depth} handler={handler}")
     for mutex, (owner, since) in held.items():
         out.append(f"hold from={since} to=open mutex={mutex} task={owner}")

@@ -407,17 +407,17 @@ impl Timeline {
                 }
                 Line::Handler(handler) => {
                     let Some(meaning) = meaning else { continue };
-                    // Depth 0 fills the row; a nested handler, the half below.
+                    // Depth 0, or unknown, fills the row; a nested handler,
+                    // the half below.
                     let middle = top + ROW / 2.0;
                     let depths = meaning.interrupts.get(handler).map_or(&[][..], Vec::as_slice);
-                    let deepest = depths
-                        .len()
-                        .max(1 + open.interrupts.iter().map(|i| i.depth).max().unwrap_or(0));
+                    let row = |interrupt: &kymo::opsy::Interrupt| interrupt.depth.unwrap_or(0);
+                    let deepest = depths.len().max(1 + open.interrupts.iter().map(row).max().unwrap_or(0));
                     for depth in 0..deepest {
                         let open = open
                             .interrupts
                             .iter()
-                            .filter(|interrupt| interrupt.handler == handler && interrupt.depth == depth)
+                            .filter(|interrupt| interrupt.handler == handler && row(interrupt) == depth)
                             .map(|interrupt| interrupt.span);
                         let high = if depth == 0 { high } else { middle };
                         bars.paint(depths.get(depth), open, high, low, INTERRUPT);
@@ -646,11 +646,14 @@ impl Timeline {
                     )
                     .max_by_key(|(interrupt, _)| interrupt.depth);
                 if let Some((interrupt, still)) = found {
+                    let below = interrupt.depth.map_or_else(
+                        || "handlers below unknown since a loss".to_owned(),
+                        |depth| format!("{depth} handlers below"),
+                    );
                     let _ = write!(
                         text,
-                        "{}, {} handlers below\n{}",
+                        "{}, {below}\n{}",
                         opsy.handlers.list[handler].name,
-                        interrupt.depth,
                         self.extent(interrupt.span, still)
                     );
                 }

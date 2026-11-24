@@ -11,8 +11,11 @@
 //! A loss hides what happened during it. The spans open when it comes end at
 //! it, and the task on the core is unknown until the next task_started or
 //! enter_idle. An interrupt exit, or a mutex release, with no entry or
-//! taking seen since a loss starts its span at the loss. A recording that
-//! starts after the target's first event starts with such a loss.
+//! taking seen since a loss starts its span at the loss. Which handlers are
+//! open is unknown from a loss to the next task_started or enter_idle, which
+//! OpSy emits with none open: a handler that runs meanwhile has no depth. A
+//! recording that starts after the target's first event starts with such a
+//! loss.
 //!
 //! An event that contradicts the adapter's order makes no span: an interrupt
 //! exit that is not the last handler entered, a mutex taken while held,
@@ -50,11 +53,12 @@ pub struct Run {
     pub span: Span,
 }
 
-/// A handler running, `depth` handlers below it.
+/// A handler running, `depth` handlers below it: `None` where a loss hides
+/// which handlers were open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Interrupt {
     pub handler: usize,
-    pub depth: usize,
+    pub depth: Option<usize>,
     pub span: Span,
 }
 
@@ -232,8 +236,12 @@ pub struct Opsy<'a> {
     pub contradictions: Vec<usize>,
     /// The task on the core and since when; none while unknown.
     running: Option<(Option<usize>, Edge)>,
-    /// The handlers entered and not left, innermost last.
-    entered: Vec<(usize, Edge)>,
+    /// The handlers entered and not left, innermost last, each with its
+    /// depth.
+    entered: Vec<(usize, Edge, Option<usize>)>,
+    /// Whether every handler open is in `entered`: false from a loss to the
+    /// next task_started or enter_idle that comes with `entered` empty.
+    nesting_known: bool,
     /// By mutex: its owner and since when.
     held: BTreeMap<usize, (usize, Edge)>,
     /// By mutex and task: since when the task waits for it.
@@ -259,6 +267,7 @@ impl<'a> Opsy<'a> {
             contradictions: Vec::new(),
             running: None,
             entered: Vec::new(),
+            nesting_known: true,
             held: BTreeMap::new(),
             waiting: BTreeMap::new(),
             loss: None,
@@ -326,21 +335,22 @@ impl<'a> Opsy<'a> {
             Hook::EnterIdle => self.run(None, edge),
             Hook::IsrEnter { handler } => {
                 let handler = self.handlers.index(symbols, handler, payload);
-                self.entered.push((handler, edge));
+                let depth = self.nesting_known.then_some(self.entered.len());
+                self.entered.push((handler, edge, depth));
             }
             Hook::IsrExit { handler } => {
                 let handler = self.handlers.index(symbols, handler, payload);
-                let from = match (self.entered.last(), self.loss) {
-                    (Some(&(open, from)), _) if open == handler => {
+                let (from, depth) = match (self.entered.last(), self.loss) {
+                    (Some(&(open, from, depth)), _) if open == handler => {
                         self.entered.pop();
-                        from
+                        (from, depth)
                     }
-                    (None, Some(loss)) => loss,
+                    (None, Some(loss)) => (loss, None),
                     _ => return self.contradictions.push(edge.element),
                 };
                 self.closed.interrupts.push(Interrupt {
                     handler,
-                    depth: self.entered.len(),
+                    depth,
                     span: Span { from, to: edge },
                 });
             }
@@ -380,6 +390,11 @@ impl<'a> Opsy<'a> {
     }
 
     fn run(&mut self, task: Option<usize>, edge: Edge) {
+        // OpSy switches in PendSV, at the lowest priority: it runs with no
+        // handler open.
+        if self.entered.is_empty() {
+            self.nesting_known = true;
+        }
         if let Some((running, from)) = self.running.replace((task, edge)) {
             self.closed.runs.push(Run {
                 task: running,
@@ -405,6 +420,7 @@ impl<'a> Opsy<'a> {
         self.closed.holds.extend(open.holds);
         self.running = None;
         self.entered.clear();
+        self.nesting_known = false;
         self.held.clear();
         self.waiting.clear();
         self.loss = Some(edge);
@@ -430,9 +446,8 @@ impl<'a> Opsy<'a> {
             interrupts: self
                 .entered
                 .iter()
-                .enumerate()
                 .rev()
-                .map(|(depth, &(handler, from))| Interrupt {
+                .map(|&(handler, from, depth)| Interrupt {
                     handler,
                     depth,
                     span: Span { from, to },
@@ -489,7 +504,9 @@ pub fn lines(trace: &Trace, opsy: &Opsy) -> Vec<String> {
                 "interrupt from={} to={} depth={} handler={}",
                 edge(interrupt.span.from),
                 to(interrupt.span),
-                interrupt.depth,
+                interrupt
+                    .depth
+                    .map_or_else(|| "unknown".to_owned(), |depth| depth.to_string()),
                 opsy.handlers.list[interrupt.handler].name
             ));
         }

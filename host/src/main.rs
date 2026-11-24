@@ -23,9 +23,10 @@ kymo record printed while making it, but for the seconds: they are
 recomputed over the whole capture. With --opsy, prints instead OpSy's spans
 in a capture of an image built with Kymo's OpSy hooks: a line each for a task
 on the core (`run`, the idle task as `task=idle`), a handler running
-(`interrupt`, `depth` handlers below it), a mutex held (`hold`) or waited
-for (`wait`), from one event index to another; `lost` for an edge hidden by a
-loss, `to=open` for a span still open at the end. Then a line
+(`interrupt`, `depth` handlers below it, `unknown` from a loss to the next
+task switch), a mutex held (`hold`) or waited for (`wait`), from one event
+index to another; `lost` for an edge hidden by a loss, `to=open` for a span
+still open at the end. Then a line
 `contradiction <index>` for each event against the order OpSy's hooks keep.
 
 The ring of a copy is the image's only kymo::ring object, or the one

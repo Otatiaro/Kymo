@@ -208,7 +208,10 @@ fn an_exit_from_another_handler_than_the_innermost_contradicts() {
     // After a loss too: H, entered before it, cannot exit before G.
     assert_eq!(
         spans(0, &[("lost", &[]), ("isr_enter", &[G]), ("isr_exit", &[H])]),
-        ["interrupt from=3 to=open depth=0 handler=0x08000501", "contradiction 4"]
+        [
+            "interrupt from=3 to=open depth=unknown handler=0x08000501",
+            "contradiction 4"
+        ]
     );
 }
 
@@ -299,11 +302,47 @@ fn a_loss_ends_what_is_open_and_hides_what_ends_after() {
         [
             "run from=0 to=lost task=0x20000100",
             "interrupt from=3 to=lost depth=0 handler=0x08000401",
-            "interrupt from=lost to=7 depth=0 handler=0x08000401",
+            "interrupt from=lost to=7 depth=unknown handler=0x08000401",
             "hold from=1 to=lost mutex=0x20000300 task=0x20000100",
             "wait from=2 to=lost mutex=0x20000300 task=0x20000200",
             "hold from=lost to=8 mutex=0x20000300 task=0x20000100",
             "run from=10 to=open task=0x20000200",
+        ]
+    );
+}
+
+#[test]
+fn the_nesting_is_unknown_from_a_loss_to_a_switch_with_no_handler_open() {
+    // H, entered before the loss, may still be open below G: G's depth is
+    // unknown until a switch, which OpSy makes with no handler open. A
+    // switch while a handler entered since the loss is open does not end it.
+    assert_eq!(
+        spans(
+            0,
+            &[
+                ("isr_enter", &[H]),
+                ("lost", &[]),
+                ("isr_enter", &[G]),
+                ("isr_exit", &[G]),
+                ("isr_enter", &[G]),
+                ("task_started", &[A]),
+                ("isr_enter", &[H]),
+                ("isr_exit", &[H]),
+                ("isr_exit", &[G]),
+                ("enter_idle", &[]),
+                ("isr_enter", &[H]),
+                ("isr_enter", &[G]),
+            ]
+        ),
+        [
+            "run from=7 to=11 task=0x20000100",
+            "interrupt from=0 to=lost depth=0 handler=0x08000401",
+            "interrupt from=4 to=5 depth=unknown handler=0x08000501",
+            "interrupt from=8 to=9 depth=unknown handler=0x08000401",
+            "interrupt from=6 to=10 depth=unknown handler=0x08000501",
+            "run from=11 to=open task=idle",
+            "interrupt from=13 to=open depth=1 handler=0x08000501",
+            "interrupt from=12 to=open depth=0 handler=0x08000401",
         ]
     );
 }
@@ -337,7 +376,7 @@ fn a_recording_that_starts_late_starts_with_a_loss() {
             &[("isr_exit", &[H]), ("mutex_released", &[M, A]), ("task_started", &[A])]
         ),
         [
-            "interrupt from=lost to=40 depth=0 handler=0x08000401",
+            "interrupt from=lost to=40 depth=unknown handler=0x08000401",
             "hold from=lost to=41 mutex=0x20000300 task=0x20000100",
             "run from=42 to=open task=0x20000100",
         ]
