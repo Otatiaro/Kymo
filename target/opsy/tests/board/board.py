@@ -23,11 +23,14 @@ instances:
   gives, which checks Kymo's measure of the clock against the HSE, which the
   ST-Link derives from its crystal. That measure holds while the probe keeps
   up with the ring: at the default 24 MHz of SWD it repeats within 1e-7; at
-  4 MHz, where the ring overtakes the probe, it strays by up to 2.4e-4.
+  4 MHz, where the ring overtakes the probe, it strays by up to 2.4e-4;
+- that no slot is lost: at 24 MHz the probe reads several times what the
+  board writes, so a loss is the host falling behind.
 """
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -156,6 +159,9 @@ def main() -> int:
             return 1
         errors = (check(decode.stdout) + check_board(decode.stdout) + check_stats(args.host, args.image, capture)
                   + check_rules(args.host, args.image, capture))
+        lost = re.search(r"(\d+) slots lost", record.stderr)
+        if lost is None or int(lost.group(1)) != 0:
+            errors.append(f"slots lost while recording: {lost.group(1) if lost else 'no summary'}")
     for error in errors[:20]:
         print(error)
     print("RESULT:", "FAIL" if errors else "PASS")

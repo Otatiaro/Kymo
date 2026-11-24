@@ -1,7 +1,7 @@
 /**
  * @file    opsy_trace.hpp
- * @brief   The tracer of OpSy's traced images: every family to one ring of
- *          256 slots.
+ * @brief   The tracer of OpSy's traced images: every family to one ring, of
+ *          256 slots unless the image defines KYMO_TEST_RING_SLOTS.
  */
 #pragma once
 
@@ -10,7 +10,11 @@
 #include <cstdint>
 
 /// Slots of the images' ring.
+#ifdef KYMO_TEST_RING_SLOTS
+constexpr std::uint32_t ring_slots = KYMO_TEST_RING_SLOTS;
+#else
 constexpr std::uint32_t ring_slots = 256;
+#endif
 
 /// The ring the host drains.
 inline kymo::ring<ring_slots> trace_ring;
