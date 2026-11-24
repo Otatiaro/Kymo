@@ -2,6 +2,7 @@
 //! a row of spans each for a task, the idle task, a handler at each depth, a
 //! mutex's holders and each of its waiters. They grow with the trace.
 
+use crate::names;
 use crate::spans::Spans;
 use kymo::events::Catalogue;
 use kymo::model::Element;
@@ -21,6 +22,8 @@ pub struct Meaning {
     pub holds: Vec<Spans>,
     /// By mutex: each waiting task and its waits.
     pub waits: Vec<Vec<(usize, Spans)>>,
+    /// The names the rows show: tasks, handlers, mutexes.
+    pub names: Vec<Vec<String>>,
 }
 
 impl Meaning {
@@ -35,6 +38,7 @@ impl Meaning {
             interrupts: Vec::new(),
             holds: Vec::new(),
             waits: Vec::new(),
+            names: Vec::new(),
         }))
     }
 
@@ -70,6 +74,8 @@ impl Meaning {
             }
         }
         self.placed = [closed.runs.len(), closed.interrupts.len(), closed.holds.len()];
+        let opsy = &self.opsy;
+        self.names = names::shown(&[&opsy.tasks.list, &opsy.handlers.list, &opsy.mutexes.list]);
     }
 }
 
