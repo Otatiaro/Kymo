@@ -759,7 +759,8 @@ impl<'a> Meaning<'a> {
     }
 
     /// The CPU row: handlers at any depth and tasks other than idle, within
-    /// the time known. A handler still open runs to the end of the capture.
+    /// the time known, and each task where no handler runs. A handler still
+    /// open runs to the end of the capture.
     pub fn cpu(&self) -> Cpu {
         let span = |span: &Span| (span.from.cycles, span.to.cycles);
         let handlers = self.closed.interrupts.iter().map(|interrupt| span(&interrupt.span));
@@ -772,9 +773,27 @@ impl<'a> Meaning<'a> {
         let handler_open = self.entered.first().map(|&(_, from, _)| from.cycles);
         let task_open = self.running.and_then(|(task, from)| task.map(|_| from.cycles));
         let known = self.known();
+        let handlers_known = Covered::union(handlers.clone(), handler_open).within(&known);
+        let mut runs = vec![Vec::new(); self.tasks.list.len()];
+        for run in &self.closed.runs {
+            if let Some(task) = run.task {
+                runs[task].push(span(&run.span));
+            }
+        }
+        let each = runs
+            .into_iter()
+            .enumerate()
+            .map(|(task, runs)| {
+                let open = self
+                    .running
+                    .and_then(|(running, from)| (running == Some(task)).then_some(from.cycles));
+                Covered::union(runs, open).within(&known).without(&handlers_known)
+            })
+            .collect();
         Cpu {
-            handlers: Covered::union(handlers.clone(), handler_open).within(&known),
             busy: Covered::union(handlers.chain(tasks), handler_open.into_iter().chain(task_open).min()).within(&known),
+            handlers: handlers_known,
+            tasks: each,
             known,
         }
     }

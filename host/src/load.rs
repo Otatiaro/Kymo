@@ -112,6 +112,44 @@ impl Covered {
         }
         within
     }
+
+    /// The cycles `self` covers and `other` does not: a task's runs less the
+    /// time handlers interrupt it.
+    pub fn without(&self, other: &Covered) -> Covered {
+        let mut without = Covered::default();
+        let mut keep = |from: i64, to: i64| {
+            if to == i64::MAX {
+                without.open = Some(from);
+            } else if from < to {
+                without.push(from, to);
+            }
+        };
+        let mut cuts = other.spans().peekable();
+        for (mut from, to) in self.spans() {
+            while let Some(&(cut_from, cut_to)) = cuts.peek() {
+                if cut_to <= from {
+                    cuts.next();
+                    continue;
+                }
+                if cut_from >= to {
+                    break;
+                }
+                if cut_from > from {
+                    keep(from, cut_from);
+                }
+                if cut_to >= to {
+                    from = to;
+                    break;
+                }
+                from = cut_to;
+                cuts.next();
+            }
+            if from < to {
+                keep(from, to);
+            }
+        }
+        without
+    }
 }
 
 /// The cycles a bin lasts in a view of `per_pixel` cycles per pixel: the
@@ -177,39 +215,46 @@ pub fn bins(
 
 /// The CPU row: the time known and, within it, the time handlers run, at
 /// any depth, and the time busy, handlers or a task other than idle. Idle
-/// interrupted by a handler is busy.
+/// interrupted by a handler is busy. By task other than idle, the time it
+/// runs and no handler does: their sum is busy less handlers.
 #[derive(Default)]
 pub struct Cpu {
     pub known: Covered,
     pub handlers: Covered,
     pub busy: Covered,
+    pub tasks: Vec<Covered>,
 }
 
 /// A bin of the CPU row, from `from` to `to` cycles. Its stack, from the
-/// bottom: `handlers`, then `tasks` other than idle, then idle up to
-/// `known`; the rest of the bin is unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// bottom: `handlers`, then `tasks` other than idle, `each` of them by
+/// task, then idle up to `known`; the rest of the bin is unknown.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpuBin {
     pub from: i64,
     pub to: i64,
     pub known: i64,
     pub handlers: i64,
     pub tasks: i64,
+    pub each: Vec<i64>,
 }
 
 /// The CPU row's bins, as `bins` gives a row's.
 pub fn cpu_bins(cpu: &Cpu, width: i64, origin: i64, range: (i64, i64), capture: (i64, i64)) -> Vec<CpuBin> {
-    let handlers = bins(&cpu.handlers, &cpu.known, width, origin, range, capture);
-    let busy = bins(&cpu.busy, &cpu.known, width, origin, range, capture);
+    let bins = |covered| bins(covered, &cpu.known, width, origin, range, capture);
+    let handlers = bins(&cpu.handlers);
+    let busy = bins(&cpu.busy);
+    let each: Vec<Vec<Bin>> = cpu.tasks.iter().map(bins).collect();
     handlers
         .into_iter()
         .zip(busy)
-        .map(|(handlers, busy)| CpuBin {
+        .enumerate()
+        .map(|(n, (handlers, busy))| CpuBin {
             from: handlers.from,
             to: handlers.to,
             known: handlers.known,
             handlers: handlers.covered,
             tasks: busy.covered - handlers.covered,
+            each: each.iter().map(|task| task[n].covered).collect(),
         })
         .collect()
 }

@@ -1,8 +1,8 @@
 //! The load view (ADR-061): in each bin of time, the share of the time known
 //! a row covers, as the height of a bar; the time unknown hatched above it;
 //! a line at the largest share of a sub-bin, which a burst reaches and the
-//! bin's share smooths out. The CPU row stacks handlers, then tasks other
-//! than idle. The pointer reads the bin the frame drew.
+//! bin's share smooths out. The CPU row stacks handlers, then each task
+//! other than idle. The pointer reads the bin the frame drew.
 
 use super::view::View;
 use crate::meaning::Meaning;
@@ -50,16 +50,16 @@ pub(super) fn busiest(meaning: &Meaning, view: &View) -> usize {
 
 /// A bin as drawn: its pixel columns `left..right`, its cycles `from..to`
 /// within the capture, and their counts.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Drawn {
     pub left: f32,
     pub right: f32,
     pub from: i64,
     pub to: i64,
     pub known: i64,
-    /// The cycles covered, from the bottom: a row's, then nothing; or the
-    /// CPU's handlers, then its tasks other than idle.
-    pub stack: [i64; 2],
+    /// The cycles covered, from the bottom: a row's; or the CPU's handlers,
+    /// then each task other than idle, in the order `cpu` is given.
+    pub stack: Vec<i64>,
     /// The largest share of a sub-bin, covered over known; none where no
     /// sub-bin is known.
     pub max: Option<f64>,
@@ -67,7 +67,7 @@ pub(super) struct Drawn {
 
 impl Drawn {
     pub(super) fn covered(&self) -> i64 {
-        self.stack[0] + self.stack[1]
+        self.stack.iter().sum()
     }
 }
 
@@ -93,7 +93,7 @@ pub(super) fn below(width: i64) -> i64 {
 }
 
 /// A bin's cycles and counts: `from`, `to`, `known`, `stack`.
-type Counted = (i64, i64, i64, [i64; 2]);
+type Counted = (i64, i64, i64, Vec<i64>);
 
 /// The bins of `view`, from the sub-bins `count` counts over a range at a
 /// width: each with its columns and the largest share of its sub-bins. A
@@ -103,12 +103,14 @@ fn drawn(view: &View, count: impl Fn(i64, (i64, i64)) -> Vec<Counted>) -> Vec<Dr
     let bin = |cycles: i64| (cycles - view.origin).div_euclid(width);
     let mut drawn: Vec<Drawn> = Vec::new();
     for (from, to, known, stack) in count(below(width), range(view, width)) {
-        let share = (known > 0).then(|| (stack[0] + stack[1]) as f64 / known as f64);
+        let share = (known > 0).then(|| stack.iter().sum::<i64>() as f64 / known as f64);
         match drawn.last_mut() {
             Some(last) if bin(last.from) == bin(from) => {
                 last.to = to;
                 last.known += known;
-                last.stack = [last.stack[0] + stack[0], last.stack[1] + stack[1]];
+                for (layer, cycles) in last.stack.iter_mut().zip(stack) {
+                    *layer += cycles;
+                }
                 last.max = match (last.max, share) {
                     (Some(max), Some(share)) => Some(max.max(share)),
                     (max, share) => max.or(share),
@@ -137,17 +139,23 @@ pub(super) fn row(view: &View, capture: (i64, i64), covered: &Covered, known: &C
     drawn(view, |width, range| {
         load::bins(covered, known, width, view.origin, range, capture)
             .into_iter()
-            .map(|bin| (bin.from, bin.to, bin.known, [bin.covered, 0]))
+            .map(|bin| (bin.from, bin.to, bin.known, vec![bin.covered]))
             .collect()
     })
 }
 
-/// The bins of the CPU row, as `row` gives a row's.
-pub(super) fn cpu(view: &View, capture: (i64, i64), cpu: &Cpu) -> Vec<Drawn> {
+/// The bins of the CPU row, as `row` gives a row's: handlers, then the tasks
+/// in `order`, every task other than idle once.
+pub(super) fn cpu(view: &View, capture: (i64, i64), cpu: &Cpu, order: &[usize]) -> Vec<Drawn> {
     drawn(view, |width, range| {
         load::cpu_bins(cpu, width, view.origin, range, capture)
             .into_iter()
-            .map(|bin| (bin.from, bin.to, bin.known, [bin.handlers, bin.tasks]))
+            .map(|bin| {
+                let stack = std::iter::once(bin.handlers)
+                    .chain(order.iter().map(|&task| bin.each[task]))
+                    .collect();
+                (bin.from, bin.to, bin.known, stack)
+            })
             .collect()
     })
 }
@@ -163,14 +171,15 @@ pub(super) fn at(bins: &[Drawn], x: f32) -> Option<&Drawn> {
 /// the line of its max.
 #[derive(Debug, PartialEq)]
 pub(super) struct Heights {
-    pub stack: [f32; 2],
+    pub stack: Vec<f32>,
     pub known: f32,
     pub max: Option<f32>,
 }
 
 pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
     let scale = f64::from(height) / (bin.to - bin.from) as f64;
-    // Cycles counted, however few, are a pixel high at least.
+    // Cycles counted, however few, are a pixel high at least, and so is
+    // each layer that counts any.
     let pixels = |cycles: i64| {
         if cycles > 0 {
             ((cycles as f64 * scale).round() as f32).max(1.0)
@@ -178,25 +187,36 @@ pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
             0.0
         }
     };
-    let first = pixels(bin.stack[0]);
-    let second = pixels(bin.covered()).max(first + if bin.stack[1] > 0 { 1.0 } else { 0.0 });
-    let known = pixels(bin.known).max(second).min(height);
+    let (mut below, mut top) = (0, 0.0);
+    let mut stack: Vec<f32> = bin
+        .stack
+        .iter()
+        .map(|&layer| {
+            below += layer;
+            top = pixels(below).max(top + if layer > 0 { 1.0 } else { 0.0 });
+            top
+        })
+        .collect();
+    let known = pixels(bin.known).max(top).min(height);
+    for top in &mut stack {
+        *top = top.min(known);
+    }
     Heights {
-        stack: [first.min(known), second.min(known)],
+        stack,
         known,
         max: bin.max.map(|max| (max * f64::from(known)).round() as f32),
     }
 }
 
 /// Paints `bins` in `mesh` within `area`, bars from `high` to `low`: the
-/// layers of their stack in `colors`, their max line in the top layer's,
-/// the time unknown hatched in `unknown`.
+/// layers of their stack in `colors`, one each, their max line in the
+/// colour of the top layer drawn, the time unknown hatched in `unknown`.
 pub(super) fn paint(
     mesh: &mut egui::Mesh,
     bins: &[Drawn],
     area: Rect,
     (high, low): (f32, f32),
-    colors: [Color32; 2],
+    colors: &[Color32],
     unknown: Color32,
 ) {
     let height = low - high;
@@ -207,17 +227,17 @@ pub(super) fn paint(
         }
         let heights = heights(bin, height);
         let rect = |bottom: f32, top: f32| Rect::from_min_max(pos2(left, low - top), pos2(right, low - bottom));
-        let [first, second] = heights.stack;
-        if first > 0.0 {
-            mesh.add_colored_rect(rect(0.0, first), colors[0]);
-        }
-        if second > first {
-            mesh.add_colored_rect(rect(first, second), colors[1]);
+        let (mut below, mut color) = (0.0, colors.last().copied().unwrap_or(unknown));
+        for (&top, &layer) in heights.stack.iter().zip(colors) {
+            if top > below {
+                mesh.add_colored_rect(rect(below, top), layer);
+                (below, color) = (top, layer);
+            }
         }
         if let Some(max) = heights.max
-            && max > second
+            && max > below
         {
-            mesh.add_colored_rect(rect(max - 1.0, max), colors[1]);
+            mesh.add_colored_rect(rect(max - 1.0, max), color);
         }
         if heights.known < height {
             hatch(mesh, rect(heights.known, height), unknown);

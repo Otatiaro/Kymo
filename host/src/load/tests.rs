@@ -345,28 +345,60 @@ fn a_union_covers_the_cycles_any_span_covers() {
     );
 }
 
+/// Short runs, touching or apart, dealt at random to one to four tasks,
+/// which never run at once, one of them maybe still running at the end.
+fn tasks(state: &mut u64, capture: (i64, i64)) -> Vec<Row> {
+    let count = 1 + (random(state) % 4) as usize;
+    let mut tasks: Vec<Row> = (0..count)
+        .map(|_| Row {
+            closed: Vec::new(),
+            open: None,
+        })
+        .collect();
+    let mut at = capture.0 - (random(state) % 20) as i64;
+    while at < capture.1 {
+        at += (random(state) % 30) as i64;
+        let to = at + (random(state) % 60) as i64;
+        tasks[random(state) as usize % count].closed.push((at, to));
+        at = to;
+    }
+    if random(state).is_multiple_of(2) {
+        let from = at - (random(state) % 500) as i64;
+        for task in &mut tasks {
+            task.closed.retain(|&(_, to)| to <= from);
+        }
+        tasks[random(state) as usize % count].open = Some(from);
+    }
+    tasks
+}
+
 /// Every CPU bin is the oracle's: handlers, then tasks other than idle
-/// where no handler runs, both within the time known, never above it.
+/// where no handler runs, all of them and each, within the time known,
+/// never above it; the tasks' parts add up to the tasks'.
 #[test]
 fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
     let mut state = 0x0bad_5eed_1234_5678;
-    let (mut both, mut stacked) = (0, 0);
+    let (mut both, mut stacked, mut several) = (0, 0, 0);
     for _ in 0..1000 {
         let capture = (0, 1 + (random(&mut state) % 3000) as i64);
         let (known, handlers, tasks) = (
             row(&mut state, capture),
             rows(&mut state, capture),
-            rows(&mut state, capture),
+            self::tasks(&mut state, capture),
         );
         let known_covered = known.covered();
-        let handlers_covered = union(&handlers);
+        let handlers_covered = union(&handlers).within(&known_covered);
         let busy = Covered::union(
             handlers.iter().chain(&tasks).flat_map(|row| row.closed.iter().copied()),
             handlers.iter().chain(&tasks).filter_map(|row| row.open).min(),
         );
         let cpu = Cpu {
-            handlers: handlers_covered.within(&known_covered),
             busy: busy.within(&known_covered),
+            tasks: tasks
+                .iter()
+                .map(|task| task.covered().within(&known_covered).without(&handlers_covered))
+                .collect(),
+            handlers: handlers_covered,
             known: known_covered,
         };
         let width = 1 + (random(&mut state) % 200) as i64;
@@ -380,6 +412,7 @@ fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
                 known: 0,
                 handlers: 0,
                 tasks: 0,
+                each: vec![0; tasks.len()],
             };
             for cycle in from..to {
                 let any = |rows: &[Row]| rows.iter().any(|row| row.covers(cycle));
@@ -389,15 +422,20 @@ fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
                         bin.handlers += 1;
                     } else if any(&tasks) {
                         bin.tasks += 1;
+                        for (each, task) in bin.each.iter_mut().zip(&tasks) {
+                            *each += i64::from(task.covers(cycle));
+                        }
                     }
                 }
             }
             both += usize::from(bin.handlers > 0 && bin.tasks > 0);
+            several += usize::from(bin.each.iter().filter(|&&each| each > 0).count() > 1);
             expected.push(bin);
         }
         assert_eq!(found, expected, "width {width} capture {capture:?}");
         for bin in &found {
             assert!(bin.handlers + bin.tasks <= bin.known, "{bin:?}");
+            assert_eq!(bin.each.iter().sum::<i64>(), bin.tasks, "{bin:?}");
         }
         stacked += usize::from(handlers.iter().any(|h| {
             tasks
@@ -406,7 +444,8 @@ fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
         }));
     }
     assert!(
-        both > 1000 && stacked > 500,
-        "{both} bins with handlers and tasks, {stacked} cases with a handler over a task"
+        both > 1000 && stacked > 500 && several > 500,
+        "{both} bins with handlers and tasks, {stacked} cases with a handler over a task, \
+         {several} bins with several tasks"
     );
 }

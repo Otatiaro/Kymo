@@ -162,7 +162,6 @@ fn data(palette: &Palette) -> Vec<(&'static str, Color32)> {
     let tasks = TASKS.into_iter().zip(palette.tasks);
     [
         ("event", palette.event),
-        ("run", palette.run),
         ("idle", palette.idle),
         ("interrupt", palette.interrupt),
         ("hold", palette.hold),

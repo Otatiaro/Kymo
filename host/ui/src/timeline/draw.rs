@@ -201,10 +201,17 @@ impl Timeline {
                 let rows = &meaning.load;
                 let known = &rows.cpu.known;
                 let row = |covered: Option<&Covered>, color: Color32| {
-                    covered.map(|covered| (load::row(&view, capture, covered, known), [color; 2]))
+                    covered.map(|covered| (load::row(&view, capture, covered, known), vec![color]))
                 };
                 let drawn = match line {
-                    Line::Cpu => Some((load::cpu(&view, capture, &rows.cpu), [palette.interrupt, palette.run])),
+                    Line::Cpu => {
+                        // The first task's line on top, as the lines list them.
+                        let order: Vec<usize> = super::rows::tasks(meaning).into_iter().rev().collect();
+                        let colors = std::iter::once(palette.interrupt)
+                            .chain(order.iter().map(|&task| meaning.task_color(Some(task), &palette)))
+                            .collect();
+                        Some((load::cpu(&view, capture, &rows.cpu, &order), colors))
+                    }
                     Line::Task(task) if loaded => row(
                         task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),
                         meaning.task_color(task, &palette),
@@ -214,7 +221,7 @@ impl Timeline {
                     _ => None,
                 };
                 if let Some((bins, colors)) = drawn {
-                    load::paint(bars.mesh, &bins, area, (high, low), colors, palette.unknown);
+                    load::paint(bars.mesh, &bins, area, (high, low), &colors, palette.unknown);
                     drawn_rows.push((n, bins));
                     continue;
                 }
