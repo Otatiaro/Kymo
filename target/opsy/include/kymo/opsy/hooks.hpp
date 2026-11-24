@@ -15,7 +15,12 @@
  * Not recorded: task_stopped (the next task_started or enter_idle says the
  * same), the lock hooks (masked sections come later), mutex_stored_for_task
  * and mutex_restored_for_task, condition_variable_start_waiting (task_wait
- * says it), task_name_changed. idle_wait is left to OpSy.
+ * says it), task_name_changed.
+ *
+ * idle_wait is a NOP, where OpSy's default is a WFI in a build with NDEBUG:
+ * on some parts (the STM32H5 measured) the probe reads the whole system bus
+ * as zeros while the core sleeps, the ring included, so a traced program
+ * keeps its idle awake. The cost is the idle's power draw while traced.
  *
  * The events go through the application's tracer (kymo.hpp), which routes
  * each family to its channel. OpSy takes its hooks from the program's
@@ -247,6 +252,8 @@ struct hooks
 	static void task_terminated(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_terminated{&task}); }
 	static void task_started(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_started{&task}); }
 	static void enter_idle() { Trace::emit(kymo::opsy::enter_idle{}); }
+	/** @brief The idle task's wait: awake, so that the probe reads the ring at any time */
+	static void idle_wait() { asm volatile("nop"); }
 	static void task_priority_changed(auto& task)
 	{
 		Trace::emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.current_priority())});
