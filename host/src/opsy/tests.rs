@@ -755,3 +755,66 @@ fn an_activation_still_open_at_the_end_is_cut() {
     assert_eq!(group(&report, "task 0x20000100 response"), (0, 0, 0, 1, vec![]));
     assert_eq!(group(&report, "task 0x20000100 wake_latency"), (0, 0, 0, 1, vec![]));
 }
+
+/// The time the task on the core is known: none before the first
+/// task_started or enter_idle of a recording that starts late, none from a
+/// loss to the next, the last run to the end of the capture. A handler run
+/// while it is unknown counts in no bin's share.
+#[test]
+fn the_task_on_the_core_is_known_between_losses_and_the_next_switch() {
+    use crate::load::{Bin, bins};
+    let catalogue = catalogue();
+    let trace = trace(
+        &catalogue,
+        5,
+        &[
+            ("tick", &[]),
+            ("task_started", &[A]),
+            ("tick", &[]),
+            ("lost", &[]),
+            ("isr_enter", &[H]),
+            ("isr_exit", &[H]),
+            ("task_started", &[B]),
+            ("enter_idle", &[]),
+            ("tick", &[]),
+        ],
+    );
+    let mut opsy = Opsy::new(&catalogue, 5).unwrap();
+    opsy.add(&trace.elements, 0);
+    let known = opsy.known();
+    // From the first switch to the loss, then from the next switch on.
+    assert_eq!(
+        [10, 20, 30, 60, 70, 80].map(|at| known.until(at)),
+        [0, 10, 10, 10, 20, 30]
+    );
+    let mut handler = Covered::default();
+    let span = opsy.closed.interrupts[0].span;
+    handler.push(span.from.cycles, span.to.cycles);
+    let mut task = Covered::default();
+    let span = opsy.closed.runs.iter().find(|run| run.task == Some(0)).unwrap().span;
+    task.push(span.from.cycles, span.to.cycles);
+    let bin = |from, to, covered, known| Bin {
+        from,
+        to,
+        covered,
+        known,
+    };
+    assert_eq!(
+        bins(&handler.within(&known), &known, 20, 0, (0, 80), (0, 80)),
+        [
+            bin(0, 20, 0, 10),
+            bin(20, 40, 0, 0),
+            bin(40, 60, 0, 0),
+            bin(60, 80, 0, 20)
+        ]
+    );
+    assert_eq!(
+        bins(&task.within(&known), &known, 20, 0, (0, 80), (0, 80)),
+        [
+            bin(0, 20, 10, 10),
+            bin(20, 40, 0, 0),
+            bin(40, 60, 0, 0),
+            bin(60, 80, 0, 20)
+        ]
+    );
+}
