@@ -72,7 +72,7 @@ using handler_t = void (*)();
  */
 inline std::uint32_t exception()
 {
-	std::uint32_t ipsr;
+	std::uint32_t ipsr{};
 	asm volatile("mrs %0, ipsr" : "=r"(ipsr));
 	return ipsr;
 }
