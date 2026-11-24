@@ -231,13 +231,8 @@ impl Timeline {
             // After the triangle `timeline` draws: the font has no glyph for it.
             Line::Fold => format!("    EVENTS ({} types)", self.rows.len()),
             Line::Task(None) => "  idle".to_owned(),
-            Line::Task(Some(n)) => {
-                let meaning = self.meaning.as_ref().expect("a task's line has OpSy's meaning");
-                match meaning.opsy.tasks.list[n].priority {
-                    Some(priority) => format!("  {}  prio {priority}", shown(0, n)),
-                    None => format!("  {}", shown(0, n)),
-                }
-            }
+            // No priority: it changes over the capture, with inheritance.
+            Line::Task(Some(n)) => format!("  {}", shown(0, n)),
             Line::Handler(n) => format!("  {}", shown(1, n)),
             Line::Mutex(n) => format!("  {}", shown(2, n)),
             Line::Event(row) => self.rows[row].name.clone(),
