@@ -15,6 +15,7 @@ mod load;
 mod measure;
 mod rows;
 mod status;
+mod toolbar;
 mod view;
 
 pub use status::counted;
@@ -33,7 +34,6 @@ use list::Tab;
 use load::Mode;
 use measure::Measure;
 use rows::{Mark, Row};
-use status::{mode_choice, theme_choice};
 use view::{clamped, whole, widest};
 
 /// The width of the column of row names.
@@ -53,6 +53,8 @@ const TICK: f64 = 110.0;
 const SWITCH: usize = 4;
 
 pub struct Timeline {
+    /// The capture's file name.
+    capture: String,
     catalogue: &'static Catalogue,
     trace: Trace<'static>,
     /// The event types of the catalogue, a row each, in its order.
@@ -110,9 +112,10 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    pub fn new(catalogue: &'static Catalogue, trace: Trace<'static>, measure: bool) -> Result<Self> {
+    pub fn new(capture: String, catalogue: &'static Catalogue, trace: Trace<'static>, measure: bool) -> Result<Self> {
         let meaning = Meaning::new(catalogue, trace.first)?;
         let mut timeline = Self {
+            capture,
             folded: meaning.is_some(),
             fit: true,
             meaning,
@@ -200,17 +203,10 @@ impl eframe::App for Timeline {
         if self.measure.is_some() {
             self.measure_frame(ui.ctx(), frame.info().cpu_usage.unwrap_or_default());
         }
+        let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
+        egui::Panel::top("toolbar").frame(frame).show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                self.status(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme_choice(ui);
-                    if self.meaning.is_some() {
-                        ui.separator();
-                        mode_choice(ui, &mut self.mode);
-                    }
-                });
-            });
+            ui.horizontal(|ui| self.status(ui));
         });
         // The timeline as tall as its lines, the panel the rest, until the
         // panel is resized: its size egui keeps is dropped every frame before.
