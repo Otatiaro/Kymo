@@ -96,6 +96,26 @@ jobs:
             exit 1
           fi
 
+  # The host on Linux ARM64, the platform of a recorder at the bench (a
+  # Raspberry Pi): kymo and kymo-ui built, tested and linted there. Format
+  # does not depend on the platform and is checked above.
+  arm64:
+    name: Host on Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+
+      - name: Build and test kymo and kymo-ui
+        run: |
+          sudo apt-get update && sudo apt-get install -y libudev-dev
+          cargo build --release --workspace --manifest-path host/Cargo.toml
+          cargo test --release --workspace --manifest-path host/Cargo.toml
+          cargo clippy --all-targets --workspace --manifest-path host/Cargo.toml -- -D warnings
+
   # clang-tidy over the target code, with the .clang-tidy files under target/:
   # the library and its tests, the bench image, and the OpSy adapter with its
   # test, each as the Arm toolchain compiles it (target/tidy.py); each public
