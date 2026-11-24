@@ -108,6 +108,7 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
         first,
         elements,
         end: Some(index),
+        cut: None,
         frequency: None,
         measured: None,
     }
