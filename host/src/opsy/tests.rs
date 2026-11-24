@@ -812,7 +812,10 @@ fn a_recording_that_joined_late_is_not_a_loss() {
     assert_eq!(net(&from_zero), (1, 0, 0, 0, vec![10]));
     assert_eq!(net(&joined), (1, 1, 0, 0, vec![10]));
     let text = stats::text(&joined).join("\n");
-    assert!(text.contains(", 0 losses, 0 suspect writers, 0 contradictions, joined at index 5\n"), "{text}");
+    assert!(
+        text.contains(", 0 losses, 0 suspect writers, 0 contradictions, joined at index 5\n"),
+        "{text}"
+    );
     let json = stats::json(&joined);
     assert!(json.contains(r#""joined":5,"losses":0,"#), "{json}");
     assert!(stats::json(&from_zero).contains(r#""joined":null,"#));

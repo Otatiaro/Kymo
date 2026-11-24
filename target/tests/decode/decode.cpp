@@ -138,6 +138,10 @@ void emitted(char const* type, Event const& event, Fields fields)
 	qemu::write_unsigned(kymo::slots_for<Event>);
 	qemu::write(" event ");
 	qemu::write_unsigned(index);
+	if constexpr (kymo::slots_for<Event> > 1) {
+		qemu::write("-");
+		qemu::write_unsigned(index + kymo::slots_for<Event> - 1);
+	}
 	qemu::write(" ");
 	qemu::write_unsigned(timestamp);
 	qemu::write(" - ");
