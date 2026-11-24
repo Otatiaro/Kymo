@@ -141,6 +141,7 @@ fn run() -> Result<()> {
         options,
         Box::new(move |context| {
             let ctx = &context.egui_ctx;
+            ctx.set_fonts(fonts());
             for theme in [egui::Theme::Dark, egui::Theme::Light] {
                 ctx.set_visuals_of(theme, palette::visuals(theme));
             }
@@ -158,4 +159,36 @@ fn run() -> Result<()> {
         }),
     )?;
     Ok(())
+}
+
+/// Inter (SIL Open Font License, `fonts/Inter-LICENSE.txt`) first for the
+/// proportional text; egui's fonts after it for the glyphs it lacks, and for
+/// the monospace text.
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "Inter".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/Inter-Regular.ttf")).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Inter".to_owned());
+    fonts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inter_is_first_for_proportional_text_only() {
+        let fonts = fonts();
+        let family = |family| &fonts.families[&family];
+        assert_eq!(family(egui::FontFamily::Proportional)[0], "Inter");
+        // egui's fonts follow, for the glyphs Inter lacks.
+        assert!(family(egui::FontFamily::Proportional).len() > 1);
+        assert!(!family(egui::FontFamily::Monospace).contains(&"Inter".to_owned()));
+    }
 }
