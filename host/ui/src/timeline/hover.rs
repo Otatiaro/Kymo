@@ -6,7 +6,7 @@ use super::status::counted;
 use super::view::View;
 use super::{HOVER, ROW, SWITCH, Timeline};
 use crate::meaning::{self, Meaning};
-use crate::palette::Palette;
+use crate::palette::{Palette, Shade};
 use eframe::egui::{self, Pos2, Rect};
 use kymo::meaning::{Cause, Edge, Span};
 use kymo::model::Element;
@@ -47,7 +47,9 @@ impl Card {
 #[derive(Clone, Copy, Debug)]
 enum Swatch {
     Event,
+    /// The CPU line's.
     Run,
+    Task(Shade),
     Idle,
     Ready,
     Interrupt,
@@ -58,10 +60,16 @@ enum Swatch {
 }
 
 impl Swatch {
+    /// The swatch of `task`'s runs, the idle task's for None.
+    fn task(meaning: &Meaning, task: Option<usize>) -> Self {
+        task.map_or(Self::Idle, |task| Self::Task(meaning.shades[task]))
+    }
+
     fn color(self, palette: &Palette) -> egui::Color32 {
         match self {
             Self::Event => palette.event,
             Self::Run => palette.run,
+            Self::Task(shade) => palette.task(shade),
             Self::Idle => palette.idle,
             Self::Ready => palette.ready,
             Self::Interrupt => palette.interrupt,
@@ -282,8 +290,7 @@ impl Timeline {
                     cards.push(card);
                 }
                 if let Some((run, still)) = found {
-                    let swatch = if run.task.is_some() { Swatch::Run } else { Swatch::Idle };
-                    let mut card = self.card(line, "run", swatch);
+                    let mut card = self.card(line, "run", Swatch::task(meaning, run.task));
                     card.facts.extend(self.extent(run.span, still).facts());
                     if let Some(which) = meaning::before_run(&meaning.readies, ready, run.span.from) {
                         arrow = self.woken(meaning, which, &mut card);
@@ -395,8 +402,8 @@ impl Timeline {
     /// time known, how much is known, and the longest span reaching into it.
     fn load_card(&self, meaning: &Meaning, line: Line, bin: &Drawn, open: &kymo::meaning::Spans) -> Option<Card> {
         let (kind, swatch) = match line {
-            Line::Cpu | Line::Task(Some(_)) => ("load", Swatch::Run),
-            Line::Task(None) => ("load", Swatch::Idle),
+            Line::Cpu => ("load", Swatch::Run),
+            Line::Task(task) => ("load", Swatch::task(meaning, task)),
             Line::Handler(_) => ("load", Swatch::Interrupt),
             Line::Mutex(_) => ("held, load", Swatch::Hold),
             Line::Section(_) | Line::Fold | Line::Event(_) => return None,

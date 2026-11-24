@@ -83,8 +83,83 @@ fn the_warnings_read_on_the_panel() {
     assert_eq!(below(4.5, pairs), Vec::<String>::new());
 }
 
-/// The colours the data is drawn with, by name.
-fn data(palette: &Palette) -> [(&'static str, Color32); 11] {
+/// The tasks' colours, written as names in the list, read on the rows by
+/// 4.5:1 at least: every shade, not a sample.
+#[test]
+fn the_tasks_read_on_the_rows() {
+    let pairs = themes().into_iter().flat_map(|(theme, visuals)| {
+        let palette = Palette::of(&visuals);
+        backgrounds(&visuals)
+            .into_iter()
+            .enumerate()
+            .flat_map(move |(row, background)| {
+                palette.tasks.into_iter().enumerate().map(move |(shade, color)| {
+                    (
+                        format!("{theme} task {shade} on row {row}"),
+                        contrast(over(color, background), background),
+                    )
+                })
+            })
+    });
+    assert_eq!(below(4.5, pairs), Vec::<String>::new());
+}
+
+/// A free task's shade comes from its name alone, the same from a run to
+/// the next, and names spread over the shades.
+#[test]
+fn a_task_shade_comes_from_its_name() {
+    let name = "app::(anonymous namespace)::g_logger";
+    assert_eq!(Shade::of(name, &[]), Shade::of(name, &[]));
+    // FNV-1a of "a" is 0xaf63dc4c8601ec8c.
+    assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+    assert_eq!(Shade::of("a", &[]), Shade::from(0xaf63_dc4c_8601_ec8c));
+    let shades: std::collections::HashSet<_> = (0..64).map(|n| Shade::of(&format!("app::task_{n}"), &[])).collect();
+    assert_eq!(shades.len(), Shade::COUNT);
+}
+
+/// A task whose shade is taken takes the one its hash hashed again picks,
+/// when free.
+#[test]
+fn a_taken_shade_hashes_again() {
+    let own = Shade::of("a", &[]);
+    let again = fnv1a(&0xaf63_dc4c_8601_ec8c_u64.to_le_bytes());
+    assert_ne!(Shade::from(again), own, "the test needs a second shade");
+    assert_eq!(Shade::of("a", &[own]), Shade::from(again));
+}
+
+/// Up to `Shade::COUNT` tasks, each has its own shade, the last one free
+/// included; past them, a task shares its name's.
+#[test]
+fn every_task_has_its_own_shade() {
+    let mut taken = Vec::new();
+    for n in 0..Shade::COUNT {
+        taken.push(Shade::of(&format!("app::task_{n}"), &taken));
+    }
+    let distinct: std::collections::HashSet<_> = taken.iter().collect();
+    assert_eq!(distinct.len(), Shade::COUNT);
+    let all_but = |free: usize| (0..Shade::COUNT).filter(|&n| n != free).map(Shade).collect::<Vec<_>>();
+    for free in 0..Shade::COUNT {
+        assert_eq!(Shade::of("a", &all_but(free)), Shade(free));
+    }
+    assert_eq!(Shade::of("a", &taken), Shade::of("a", &[]));
+}
+
+/// The tasks' colours differ from each other.
+#[test]
+fn the_tasks_differ() {
+    for palette in [LIGHT, DARK] {
+        let distinct: std::collections::HashSet<_> = palette.tasks.iter().collect();
+        assert_eq!(distinct.len(), Shade::COUNT);
+    }
+}
+
+/// The colours the data is drawn with, by name, the tasks' among them.
+fn data(palette: &Palette) -> Vec<(&'static str, Color32)> {
+    const TASKS: [&str; Shade::COUNT] = [
+        "task 0", "task 1", "task 2", "task 3", "task 4", "task 5", "task 6", "task 7", "task 8", "task 9", "task 10",
+        "task 11", "task 12", "task 13", "task 14", "task 15",
+    ];
+    let tasks = TASKS.into_iter().zip(palette.tasks);
     [
         ("event", palette.event),
         ("run", palette.run),
@@ -98,6 +173,9 @@ fn data(palette: &Palette) -> [(&'static str, Color32); 11] {
         ("loss", palette.loss),
         ("suspect", palette.suspect),
     ]
+    .into_iter()
+    .chain(tasks)
+    .collect()
 }
 
 /// The pairs below `minimum`, each with its ratio.
