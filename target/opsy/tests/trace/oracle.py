@@ -11,12 +11,16 @@ What makes an instance, from OpSy's events (ADR-062):
 
 - an activation runs from a task's task_ready to its task_sleep, task_wait,
   task_wait_timeout, mutex_blocked or task_terminated; its response time is
-  all of it; its wake latency, to the task's first run in it, in total and by
-  the reason of the task_ready; its gross execution, from that run to its
+  all of it; its wake latency, to the task's first run in it, in total, by the
+  reason of the task_ready and by its cause; its gross execution, from that run to its
   end; its net execution, its runs less the outermost handlers within them;
   the time preempted by tasks, the gross less the runs, and by handlers, the
   outermost handlers within the runs. An activation the task never runs in
   has only a response time;
+- a task_ready's cause is `elapsed` for a delay that ran out; else the
+  innermost handler open but the kernel's, `handler:<name>`; else the task
+  running, `task:<name>` or `task:idle`; `unknown` from a loss to the next
+  task_started or enter_idle;
 - a task's period runs from a task_ready to its next;
 - a handler's gross runs from its entry to its exit; its net is less the
   handlers nested one level within it; its period runs from an entry seen to
@@ -39,6 +43,7 @@ import re
 
 PREFIX = "kymo::opsy::"
 ENDS = {"task_sleep", "task_wait", "task_wait_timeout"}
+ELAPSED = {"timed_out", "sleep_elapsed"}
 KERNEL = {"enter_systick": "systick", "exit_systick": "systick",
           "enter_service_call": "service_call", "exit_service_call": "service_call"}
 
@@ -70,21 +75,31 @@ def spans(first: int, items: list[dict]) -> dict:
     entered = []  # (handler, since), innermost last
     held = {}  # mutex: (task, since)
     waiting = {}  # (mutex, task): since
-    ready = {}  # task: (since, reason)
+    ready = {}  # task: (since, reason, cause)
     seen = set()  # tasks whose activation is known since the last loss
     loss = None
     last = None
 
     def end_activation(task, edge):
         if task in ready:
-            since, reason = ready.pop(task)
+            since, reason, cause = ready.pop(task)
         elif loss is not None and task not in seen:
-            since, reason = loss, None
+            since, reason, cause = loss, None, None
         else:
             since = None
         seen.add(task)
         if since is not None:
-            found["activations"].append((task, reason, since, edge, False))
+            found["activations"].append((task, reason, cause, since, edge, False))
+
+    def cause_of(reason):
+        if reason in ELAPSED:
+            return "elapsed"
+        handlers = [handler for handler, _ in entered if handler not in KERNEL.values()]
+        if handlers:
+            return "handler:" + handlers[-1]
+        if running is None:
+            return "unknown"
+        return "task:" + (running[0] or "idle")
 
     def close_all(edge, is_open):
         if running is not None:
@@ -95,8 +110,8 @@ def spans(first: int, items: list[dict]) -> dict:
             found["holds"].append((mutex, task, False, since, edge, is_open))
         for (mutex, task), since in waiting.items():
             found["holds"].append((mutex, task, True, since, edge, is_open))
-        for task, (since, reason) in ready.items():
-            found["activations"].append((task, reason, since, edge, is_open))
+        for task, (since, reason, cause) in ready.items():
+            found["activations"].append((task, reason, cause, since, edge, is_open))
 
     for n, item in enumerate(items):
         if item["kind"] == "suspect":
@@ -125,7 +140,7 @@ def spans(first: int, items: list[dict]) -> dict:
             if task in ready:
                 found["contradictions"].append(n)
                 continue
-            ready[task] = (edge, values["reason"])
+            ready[task] = (edge, values["reason"], cause_of(values["reason"]))
             seen.add(task)
             found["wakes"].append((task, edge))
         elif name in ENDS:
@@ -213,7 +228,7 @@ def instances(found: dict) -> list[tuple]:
         return total
 
     run_ends = {task: [to[0] for _, to in spans] for task, spans in runs.items()}
-    for task, reason, since, to, is_open in found["activations"]:
+    for task, reason, cause, since, to, is_open in found["activations"]:
         def add(metric, value, detail=None):
             out.append(("task", task, metric, detail, value, since, to, is_open))
         add("response", to[1] - since[1])
@@ -231,6 +246,8 @@ def instances(found: dict) -> list[tuple]:
         add("wake_latency", latency)
         if reason is not None:
             add("wake_latency", latency, reason)
+        if cause is not None:
+            add("wake_latency", latency, cause)
         add("preempted_by_tasks", gross - ran)
         add("preempted_by_handlers", by_handlers)
         add("net", ran - by_handlers)

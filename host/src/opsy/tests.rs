@@ -726,6 +726,21 @@ const PREEMPTED: [(&str, &[u32]); 15] = [
 ];
 
 #[test]
+fn the_wake_latency_splits_by_reason_then_by_cause() {
+    let report = report(&PREEMPTED, stats::Range::default());
+    let details = |task: &str| -> Vec<Option<&str>> {
+        report
+            .groups
+            .iter()
+            .filter(|group| group.subject == task && group.metric.name == "wake_latency")
+            .map(|group| group.detail.as_deref())
+            .collect()
+    };
+    assert_eq!(details("0x20000100"), [None, Some("notified"), Some("task:idle")]);
+    assert_eq!(details("0x20000200"), [None, Some("timed_out"), Some("elapsed")]);
+}
+
+#[test]
 fn an_activation_splits_into_what_preempts_it() {
     let report = report(&PREEMPTED, stats::Range::default());
     let a = |metric| group(&report, &format!("task 0x20000100 {metric}"));
@@ -733,6 +748,7 @@ fn an_activation_splits_into_what_preempts_it() {
     // from 40 to 50 in it, the tick from 110 to 120.
     assert_eq!(a("wake_latency"), (1, 0, 0, 0, vec![10]));
     assert_eq!(a("wake_latency notified"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(a("wake_latency task:idle"), (1, 0, 0, 0, vec![10]));
     assert_eq!(a("gross"), (1, 0, 0, 0, vec![110]));
     assert_eq!(a("preempted_by_tasks"), (1, 0, 0, 0, vec![20]));
     assert_eq!(a("preempted_by_handlers"), (1, 0, 0, 0, vec![40]));
@@ -754,8 +770,9 @@ fn an_activation_splits_into_what_preempts_it() {
         .find(|group| group.subject == "0x20000100" && group.metric.name == "net");
     assert_eq!(net.unwrap().share(report.known), Some(50.0 / 140.0));
     assert_eq!(
-        names(&report)[..8],
+        names(&report)[..9],
         [
+            "task 0x20000100 wake_latency",
             "task 0x20000100 wake_latency",
             "task 0x20000100 wake_latency",
             "task 0x20000100 preempted_by_tasks",
