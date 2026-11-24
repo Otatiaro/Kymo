@@ -93,9 +93,9 @@ def main():
     # A header is checked with the configuration of the file it is checked
     # from, and misc-include-cleaner looks at that file alone: through a test,
     # a header would get the test's checks. Each header is checked as a file
-    # of its own, with the options of the first source of the build.
+    # of its own, with the options of the first C++ source of the build.
     if options.headers:
-        first = arguments(entries[0])
+        first = arguments(next(e for e in entries if Path(e["file"]).suffix in (".cpp", ".cc", ".cxx")))
         flags = kept(first)
         key = (first[0], tuple(f for f in flags if f.startswith(("-std=", "-mcpu="))))
         if key not in directories:

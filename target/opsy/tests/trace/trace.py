@@ -46,24 +46,17 @@ import json
 import math
 import os
 import re
-import socket
-import struct
 import subprocess
 import sys
 import tempfile
-import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "tests", "record"))
-from record import TIMEOUT_SECONDS, free_port, wait_for  # noqa: E402
+from record import EXIT, TIMEOUT_SECONDS, record_to_exit  # noqa: E402
 
 import oracle  # noqa: E402
 
 # The worst instances kymo stats keeps for each group, in the comparison.
 WORST = 5
-
-# Where the suite ends the emulation: qemu::exit(int), out of line at every
-# optimisation level.
-EXIT = "_ZN4qemu4exitEi"
 
 PREFIX = "kymo::opsy::"
 # The wake reasons of a delay that ran out, given in SysTick.
@@ -533,49 +526,6 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
     return errors
 
 
-def symbol(image: str, name: str) -> int:
-    """The address of a function of an ELF32 little-endian image, from its symbol table."""
-    with open(image, "rb") as file:
-        elf = file.read()
-    shoff, = struct.unpack_from("<I", elf, 0x20)
-    shentsize, shnum = struct.unpack_from("<HH", elf, 0x2E)
-    sections = [struct.unpack_from("<IIIIIIIIII", elf, shoff + i * shentsize) for i in range(shnum)]
-    for _, kind, _, _, offset, size, link, _, _, entsize in sections:
-        if kind != 2:  # SHT_SYMTAB
-            continue
-        strings = sections[link][4]
-        for at in range(offset, offset + size, entsize):
-            name_at, value = struct.unpack_from("<II", elf, at)
-            end = elf.index(b"\0", strings + name_at)
-            if elf[strings + name_at:end].decode() == name:
-                return value & ~1
-    raise LookupError(f"{image} has no symbol {name}")
-
-
-class Gdb:
-    """Just enough of GDB's remote protocol to break on an address and run to it."""
-
-    def __init__(self, port: int):
-        self.stream = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT_SECONDS)
-
-    def send(self, packet: str) -> str:
-        self.stream.sendall(f"${packet}#{sum(packet.encode()) % 256:02x}".encode())
-        reply = b""
-        while not re.fullmatch(rb"\+*\$[^#]*#[0-9a-f]{2}", reply):
-            chunk = self.stream.recv(4096)
-            if not chunk:
-                raise OSError("QEMU closed the GDB stub")
-            reply += chunk
-        self.stream.sendall(b"+")
-        return reply.decode().lstrip("+")[1:-3]
-
-    def run_to(self, address: int, timeout: float) -> str:
-        if self.send(f"Z0,{address:x},2") != "OK":
-            raise OSError("the GDB stub set no breakpoint")
-        self.stream.settimeout(timeout)
-        return self.send("c")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", required=True)
@@ -584,60 +534,14 @@ def main() -> int:
     parser.add_argument("--host", required=True)
     args = parser.parse_args()
 
-    exit_address = symbol(args.image, EXIT)
     directory = tempfile.TemporaryDirectory()
     capture = os.path.join(directory.name, "suite.kcap")
-    record_port, gdb_port = free_port(), free_port()
-    # -S: paused until kymo record runs. align=on: the guest's clock does not
-    # run ahead of the host's, so the passes keep up with it.
-    target = subprocess.Popen(
-        [args.qemu, "-machine", args.machine, "-kernel", args.image, "-nographic", "-S",
-         "-icount", "shift=5,align=on,sleep=on",
-         "-semihosting-config", "enable=on,target=native", "-monitor", "none", "-serial", "none",
-         "-qmp", f"tcp:127.0.0.1:{record_port},server=on,wait=off",
-         "-gdb", f"tcp:127.0.0.1:{gdb_port}"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    lines = []
-    started = threading.Event()
-
-    def read(stream) -> None:
-        for line in stream:
-            lines.append(line)
-            if line.startswith("record "):
-                started.set()
-        started.set()
-
-    stop = None
-    try:
-        wait_for(record_port)
-        wait_for(gdb_port)
-        gdb = Gdb(gdb_port)
-        record = subprocess.Popen(
-            [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{record_port}",
-             "--elf", args.image, "--out", capture],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-        reader = threading.Thread(target=read, args=(record.stdout,))
-        reader.start()
-        if started.wait(TIMEOUT_SECONDS) and record.poll() is None:
-            try:
-                # The guest halts at the suite's exit, where QEMU would leave:
-                # kymo record's last pass reads it all, then it is stopped.
-                stop = gdb.run_to(exit_address, TIMEOUT_SECONDS)
-            except (OSError, TimeoutError) as error:
-                print(f"the suite did not reach {EXIT}: {error}")
-        record.stdin.write("\n")
-        record.stdin.close()
-        record.wait(TIMEOUT_SECONDS)
-        reader.join(TIMEOUT_SECONDS)
-        stderr = record.stderr.read()
-    finally:
-        target.kill()
-        target.wait()
-    stdout = "".join(lines)
-    print(stderr.strip())
-    if record.returncode != 0 or stop is None:
+    recording = record_to_exit(args.qemu, args.machine, args.image, args.host, capture)
+    stdout = recording.stdout
+    print(recording.stderr.strip())
+    if recording.returncode != 0 or recording.exit_status is None:
         print(stdout[-2000:])
-        print("kymo record failed" if record.returncode != 0 else f"stopped short of {EXIT}")
+        print("kymo record failed" if recording.returncode != 0 else f"stopped short of {EXIT}")
         return 1
     errors = check(stdout)
     decoded = subprocess.run([args.host, "decode", args.image, capture, "--opsy"],

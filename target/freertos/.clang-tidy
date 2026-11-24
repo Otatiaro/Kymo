@@ -1,0 +1,18 @@
+---
+# The checks of target/, but for FreeRTOS's interface, which is C macros:
+#
+# - cppcoreguidelines-macro-usage allows the trace macros FreeRTOSConfig.h
+#   defines (trace.h) and the configuration itself (config*, INCLUDE_*).
+# - cppcoreguidelines-macro-to-enum, modernize-macro-to-enum: FreeRTOS reads
+#   its configuration in #if, where an enum has no value.
+# - misc-include-cleaner ignores FreeRTOS's inner headers: FreeRTOS.h and
+#   the headers of each object (task.h, queue.h...) are its interface, and
+#   pull in the configuration, the port and the definitions.
+InheritParentConfig: true
+Checks: >
+  -cppcoreguidelines-macro-to-enum,
+  -modernize-macro-to-enum
+CheckOptions:
+  cppcoreguidelines-macro-usage.AllowedRegexp: '^(trace[A-Z_]+|config[A-Za-z_]+|INCLUDE_[A-Za-z_]+)$'
+  misc-include-cleaner.IgnoreHeaders: 'FreeRTOSConfig\.h;projdefs\.h;portable\.h;portmacro\.h;portmacrocommon\.h;mpu_wrappers\.h'
+...
