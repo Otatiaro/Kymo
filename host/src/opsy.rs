@@ -36,7 +36,7 @@
 //! from the task_started it emits.
 
 use crate::events::{Catalogue, Kind, Pointee};
-use crate::load::Covered;
+use crate::load::{Covered, Cpu};
 pub use crate::model::Edge;
 use crate::model::{Element, Trace};
 use crate::stats::{Instance, Metric};
@@ -666,6 +666,27 @@ impl<'a> Opsy<'a> {
         }
         known.open(self.running.map(|(_, from)| from.cycles));
         known
+    }
+
+    /// The CPU row: handlers at any depth and tasks other than idle, within
+    /// the time known. A handler still open runs to the end of the capture.
+    pub fn cpu(&self) -> Cpu {
+        let span = |span: &Span| (span.from.cycles, span.to.cycles);
+        let handlers = self.closed.interrupts.iter().map(|interrupt| span(&interrupt.span));
+        let tasks = self
+            .closed
+            .runs
+            .iter()
+            .filter(|run| run.task.is_some())
+            .map(|run| span(&run.span));
+        let handler_open = self.entered.first().map(|&(_, from, _)| from.cycles);
+        let task_open = self.running.and_then(|(task, from)| task.map(|_| from.cycles));
+        let known = self.known();
+        Cpu {
+            handlers: Covered::union(handlers.clone(), handler_open).within(&known),
+            busy: Covered::union(handlers.chain(tasks), handler_open.into_iter().chain(task_open).min()).within(&known),
+            known,
+        }
     }
 
     /// The activations still open, ended at the last event.
