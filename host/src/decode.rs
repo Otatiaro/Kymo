@@ -202,8 +202,8 @@ pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f
 
 /// The value of `ty` at the start of `bytes`: integers in decimal, booleans
 /// as true or false, enumerations by enumerator, pointers by what they point
-/// at in the image (symbols.rs) or else in hexadecimal, arrays in brackets,
-/// structures in braces.
+/// at in the image (symbols.rs) or else in hexadecimal, durations and time
+/// points as a count and its unit, arrays in brackets, structures in braces.
 fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
     let size = ty.size.unwrap_or_default() as usize;
     let bytes = &bytes[..size];
@@ -245,6 +245,10 @@ fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
                 let _ = write!(out, "0x{:0width$x}", unsigned(), width = 2 * size);
             }
         },
+        Kind::Duration(count, num, den) => {
+            value(out, symbols, count, bytes);
+            unit(out, *num, *den);
+        }
         Kind::Array(element, lengths) => array(out, symbols, element, lengths, bytes),
         Kind::Record(fields) => {
             out.push('{');
@@ -274,6 +278,28 @@ fn array(out: &mut String, symbols: &Symbols, element: &Type, lengths: &[u64], b
         array(out, symbols, element, inner, &bytes[n * stride..]);
     }
     out.push(']');
+}
+
+/// The unit of a count lasting `num` / `den` seconds: its SI symbol, or else
+/// the ratio, `x(1/60)s`.
+fn unit(out: &mut String, num: u64, den: u64) {
+    let symbol = match (num, den) {
+        (1, 1) => "s",
+        (1, 1_000) => "ms",
+        (1, 1_000_000) => "us",
+        (1, 1_000_000_000) => "ns",
+        (60, 1) => "min",
+        (3_600, 1) => "h",
+        (num, 1) => {
+            let _ = write!(out, "x{num}s");
+            return;
+        }
+        (num, den) => {
+            let _ = write!(out, "x({num}/{den})s");
+            return;
+        }
+    };
+    out.push_str(symbol);
 }
 
 /// Bytes with no other reading, in memory order.
