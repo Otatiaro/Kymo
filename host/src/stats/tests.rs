@@ -230,6 +230,14 @@ pub fn violations(schema: &Json, root: &Json, value: &Json, at: &str, out: &mut 
                     out.push(format!("{at}: {value:?} is not {argument:?}"));
                 }
             }
+            "enum" => {
+                let Json::Array(choices) = argument else {
+                    return out.push(format!("{at}: enum is no array"));
+                };
+                if !choices.contains(value) {
+                    out.push(format!("{at}: {value:?} is none of {argument:?}"));
+                }
+            }
             "minimum" => {
                 if let Json::Number(_) = value
                     && value.number() < argument.number()
@@ -301,7 +309,12 @@ pub const SCHEMA: &str = include_str!("../../schema/stats.schema.json");
 
 /// Fails unless `json` fits host/schema/stats.schema.json.
 pub fn check_schema(json: &str) {
-    let schema = Json::parse(SCHEMA);
+    fits_schema(SCHEMA, json);
+}
+
+/// Fails unless `json` fits `schema`.
+pub fn fits_schema(schema: &str, json: &str) {
+    let schema = Json::parse(schema);
     let mut broken = Vec::new();
     violations(&schema, &schema, &Json::parse(json), "", &mut broken);
     assert!(

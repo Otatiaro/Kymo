@@ -1501,6 +1501,8 @@ dependencies = [
  "libloading",
  "object 0.37.3",
  "probe-rs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

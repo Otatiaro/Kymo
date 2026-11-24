@@ -87,6 +87,8 @@ pub struct Distribution {
     pub histogram: Histogram,
     /// The highest values first, the earliest first among equals.
     pub worst: Vec<Point>,
+    /// Every value, lowest first.
+    pub values: Vec<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +187,7 @@ pub fn distribution(points: &[Point], worst: usize) -> Option<Distribution> {
         total,
         histogram: histogram(&sorted),
         worst: by_value.into_iter().take(worst).cloned().collect(),
+        values: sorted,
     })
 }
 
