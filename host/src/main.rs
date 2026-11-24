@@ -66,7 +66,8 @@ record options:
 stats: OpSy's statistics over a capture of an image built with Kymo's OpSy
 hooks, or over its range from --from to --to seconds after its first event.
 For each task, of each activation, from its task_ready to the event that
-makes it not ready: wake latency (in total and by wake reason), time
+makes it not ready: wake latency (in total, by wake reason, and by cause as
+decode --opsy names it: handler:<name>, task:<name>, elapsed, unknown), time
 preempted by tasks and by handlers, net and gross execution, response time;
 and the period, from a task_ready to the next. For each handler: gross and
 net duration, period. For each mutex: holds and waits, by task and in total.

@@ -27,7 +27,7 @@
         "kind": { "type": "string", "description": "task, handler or mutex." },
         "subject": { "type": "string" },
         "metric": { "type": "string" },
-        "detail": { "type": ["string", "null"], "description": "What divides the metric further: a wake reason, a task; null for its total." },
+        "detail": { "type": ["string", "null"], "description": "What divides the metric further: a wake reason, a cause of wake (handler:<name>, task:<name>, elapsed, unknown), a task; null for its total." },
         "count": { "type": "integer", "minimum": 0, "description": "The instances counted." },
         "excluded_loss": { "type": "integer", "minimum": 0, "description": "The instances that touch a loss." },
         "excluded_suspect": { "type": "integer", "minimum": 0, "description": "The instances that cover an overrun write." },

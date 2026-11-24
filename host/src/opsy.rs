@@ -914,7 +914,8 @@ pub fn ready(opsy: &Opsy) -> Vec<Ready> {
 /// OpSy's instances for kymo::stats, by subject and metric:
 ///
 /// - a task's, of each activation from its task_ready to its end: the wake
-///   latency, to its first run in the activation, in total and by reason;
+///   latency, to its first run in the activation, in total, by reason and
+///   by cause, after the reasons;
 ///   the gross execution, from that run to the end; the net execution, its
 ///   runs less the handlers that run within them, outermost ones whole, the
 ///   kernel's among them; the time preempted, the gross less its runs by
@@ -952,13 +953,13 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
     let task_runs = task_runs(opsy);
 
     // Sorted by kind, subject, metric, detail and start before being handed out.
-    type Order = (u8, usize, usize, Option<String>, usize);
+    type Order = (u8, usize, usize, Option<(u8, String)>, usize);
     let mut out: Vec<(Order, Instance)> = Vec::new();
     let mut push = |kind: (u8, &'static str),
                     subject: usize,
                     metrics: &[Metric],
                     metric: Metric,
-                    detail: Option<String>,
+                    detail: Option<(u8, String)>,
                     value: i64,
                     span: Span,
                     open: bool| {
@@ -974,7 +975,7 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
                 kind: kind.1,
                 subject: name.clone(),
                 metric,
-                detail,
+                detail: detail.map(|(_, detail)| detail),
                 value,
                 from: span.from,
                 to: span.to,
@@ -985,6 +986,9 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
     const TASK: (u8, &str) = (0, "task");
     const HANDLER: (u8, &str) = (1, "handler");
     const MUTEX: (u8, &str) = (2, "mutex");
+    // The wake latency's details: by reason, then by cause.
+    const REASON: u8 = 0;
+    const CAUSE: u8 = 1;
 
     let still_open = opsy.open_activations();
     let activations = opsy
@@ -1006,7 +1010,10 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
         let latency = first.cycles - span.from.cycles;
         task_push(WAKE_LATENCY, None, latency);
         if let Some(reason) = &activation.reason {
-            task_push(WAKE_LATENCY, Some(reason.clone()), latency);
+            task_push(WAKE_LATENCY, Some((REASON, reason.clone())), latency);
+        }
+        if let Some(cause) = activation.cause {
+            task_push(WAKE_LATENCY, Some((CAUSE, opsy.cause(cause))), latency);
         }
         task_push(PREEMPTED_BY_TASKS, None, gross - ran);
         task_push(PREEMPTED_BY_HANDLERS, None, handled);
@@ -1103,7 +1110,7 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
             hold.mutex,
             &MUTEX_METRICS,
             metric,
-            Some(task),
+            Some((0, task)),
             value,
             hold.span,
             open,

@@ -14,7 +14,7 @@
     "kind": { "enum": ["task", "handler", "mutex"], "description": "Needed only when the subject and the metric name groups of several kinds." },
     "subject": { "type": "string", "description": "As kymo stats names it: name@0x... for a name other symbols share." },
     "metric": { "enum": ["wake_latency", "preempted_by_tasks", "preempted_by_handlers", "net", "gross", "response", "period", "hold", "wait"] },
-    "detail": { "type": "string", "description": "What divides the metric: a wake reason, a task. Absent for the total." },
+    "detail": { "type": "string", "description": "What divides the metric: a wake reason, a cause of wake (handler:<name>, task:<name>, elapsed, unknown), a task. Absent for the total." },
     "stat": { "enum": ["min", "p50", "p90", "p99", "max", "mean", "jitter", "count", "share"] },
     "quantity": { "type": ["string", "integer"], "description": "A duration with its unit, a percentage for a share, a whole number for a count." },
     "bound": {
