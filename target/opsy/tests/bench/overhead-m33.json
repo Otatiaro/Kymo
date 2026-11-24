@@ -4,7 +4,7 @@
   "condition_variable_from_isr": 140,
   "queue_from_isr": 140,
   "mutex_free": 73,
-  "mutex_contended": 271,
+  "mutex_contended": 322,
   "sleep_one_tick": 99,
   "isr_lock_round_trip": 0,
   "release_no_switch": 74,

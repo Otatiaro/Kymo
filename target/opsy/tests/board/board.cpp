@@ -117,8 +117,8 @@ void sampler()
 {
 	// From a running task: a priority change before scheduler::start asks
 	// for a switch with no process stack to save to.
-	g_sampler.priority(opsy::task_priority::high);
-	g_logger.priority(opsy::task_priority::low);
+	g_sampler.base_priority(opsy::task_priority::high);
+	g_logger.base_priority(opsy::task_priority::low);
 	start_timer();
 	while (true)
 	{

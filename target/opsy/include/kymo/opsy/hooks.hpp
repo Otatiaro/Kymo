@@ -97,12 +97,13 @@ struct enter_idle
 	static constexpr family kymo_family = family::scheduling;
 };
 
-/// A task's priority changed, priority inheritance included.
+/// A task's effective priority moved: a donation through a mutex raised it
+/// or ended, or its base priority was set.
 struct task_priority_changed
 {
 	static constexpr family kymo_family = family::scheduling;
 	task_t task;
-	std::uint8_t priority;
+	std::uint8_t priority; ///< the one it moved to, opsy::task_priority, lower is higher
 };
 
 // Causality
@@ -242,13 +243,13 @@ struct hooks
 {
 	static void starting(auto& /*idle*/, std::uint32_t core_clock, auto&& /*foreach_task*/) { Trace::emit(kymo::opsy::starting{core_clock}); }
 
-	static void task_added(auto& task) { Trace::emit(kymo::opsy::task_added{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())}); }
+	static void task_added(auto& task) { Trace::emit(kymo::opsy::task_added{.task = &task, .priority = static_cast<std::uint8_t>(task.current_priority())}); }
 	static void task_terminated(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_terminated{&task}); }
 	static void task_started(::opsy::task_control_block& task) { Trace::emit(kymo::opsy::task_started{&task}); }
 	static void enter_idle() { Trace::emit(kymo::opsy::enter_idle{}); }
 	static void task_priority_changed(auto& task)
 	{
-		Trace::emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.priority())});
+		Trace::emit(kymo::opsy::task_priority_changed{.task = &task, .priority = static_cast<std::uint8_t>(task.current_priority())});
 	}
 
 	static void task_ready(::opsy::task_control_block& task, ::opsy::wake_reason reason)

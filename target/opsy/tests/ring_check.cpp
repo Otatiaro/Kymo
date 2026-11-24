@@ -140,7 +140,7 @@ OPSY_QEMU_TEST(the_adapter_records_an_interrupt_waking_a_task)
 			++g_woken;
 		}
 	}));
-	g_worker.priority(opsy::task_priority::highest);
+	g_worker.base_priority(opsy::task_priority::highest);
 	opsy::sleep_for(std::chrono::milliseconds{2});
 
 	if (g_irq == qemu_test::no_irq)
