@@ -5,14 +5,19 @@ use crate::levels::Levels;
 use crate::meaning::Meaning;
 use kymo::model::Element;
 
-/// The tasks other than idle in the order of their lines: by priority value,
-/// those without one last, then by name.
+/// The tasks other than idle in the order of their lines: highest priority
+/// first, as the kernel ranks them, those without one last, then by name.
 pub(super) fn tasks(meaning: &Meaning) -> Vec<usize> {
     let list = &meaning.kernel.tasks.list;
+    let precedence = meaning.kernel.precedence;
     let mut tasks: Vec<usize> = (0..list.len()).collect();
     tasks.sort_by_key(|&task| {
         let task = &list[task];
-        (task.priority.is_none(), task.priority, &task.name)
+        (
+            task.priority.is_none(),
+            task.priority.map(|priority| precedence.rank(priority)),
+            &task.name,
+        )
     });
     tasks
 }
@@ -101,9 +106,9 @@ impl Timeline {
         }
     }
 
-    /// The lines: the CPU's load, OpSy's sections, the tasks by priority, highest first,
-    /// then the rows of event types unless folded; those rows alone without
-    /// OpSy.
+    /// The lines: the CPU's load, the kernel's sections, the tasks by priority,
+    /// highest first, then the rows of event types unless folded; those rows
+    /// alone without a kernel adapter.
     pub(super) fn lines(&self) -> Vec<Line> {
         let events = (0..self.rows.len()).map(Line::Event);
         let Some(meaning) = &self.meaning else {
@@ -130,7 +135,10 @@ impl Timeline {
 
     pub(super) fn label(&self, line: Line) -> String {
         let shown = |kind: usize, n: usize| {
-            let meaning = self.meaning.as_ref().expect("a subject's line has OpSy's meaning");
+            let meaning = self
+                .meaning
+                .as_ref()
+                .expect("a subject's line has the kernel's meaning");
             meaning.names[kind][n].clone()
         };
         match line {

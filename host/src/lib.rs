@@ -8,6 +8,7 @@ pub mod check;
 pub mod decode;
 pub mod elf;
 pub mod events;
+mod freertos;
 pub mod interrupts;
 pub mod load;
 pub mod meaning;

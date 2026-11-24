@@ -1,4 +1,4 @@
-//! The statistics panel: the groups `kymo::stats` makes of OpSy's instances
+//! The statistics panel: the groups `kymo::stats` makes of the kernel's instances
 //! over a range, a table sorted by a column. A group's min, its max and its
 //! worst instances each lead to the instance on the timeline.
 
@@ -172,7 +172,7 @@ impl Panel {
         ui.horizontal(|ui| {
             ui.strong(title);
             ui.label(format!(
-                "{} known, {}, {} overrun writes, {} against OpSy's order",
+                "{} known, {}, {} overrun writes, {} against the kernel's order",
                 stats::duration(report.known, frequency),
                 counted(report.losses as u64, "loss", "losses"),
                 report.suspects,

@@ -72,7 +72,7 @@ fn theme_menu(ui: &mut egui::Ui) {
     });
 }
 
-/// The modes of OpSy's rows, right to left.
+/// The modes of the kernel's rows, right to left.
 fn mode_choice(ui: &mut egui::Ui, mode: &mut Mode) {
     for (choice, name) in [(Mode::Load, "Load"), (Mode::Bars, "Bars"), (Mode::Auto, "Auto")] {
         ui.selectable_value(mode, choice, name);

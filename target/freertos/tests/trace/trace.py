@@ -29,11 +29,21 @@ Then checks that:
   drops it back to the one task_create or task_priority_set gave it;
 - every family on by default was recorded;
 - the scenarios of application.cpp, in their order (SCENARIOS).
+
+Then reads the capture with `kymo decode --meaning`, and checks that:
+
+- no event contradicts the kernel's order;
+- the idle task runs as the idle task, never as a task;
+- every wake has a reason, the wait the task leaves, and a cause;
+- the wakes of the scenarios, in their order (WAKES), with their reasons
+  and causes: a priority change of a ready task is no wake;
+- control waits for the contested mutex.
 """
 
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -155,6 +165,27 @@ SCENARIOS = [
     ("creation", [("task_create", {"task": EPHEMERAL, "priority": "2", "name": '"ephemeral"'}),
                   ("task_delete", {"task": EPHEMERAL})]),
 ]
+
+# The wakes kymo decode --meaning prints for each scenario, in order: (task,
+# reason, cause), None for any cause. A cause ending in a space is a prefix:
+# a handler's name is followed by its interrupt's. Other wakes may come
+# between them.
+DEVICE = "handler:application::device_handler "
+WAITS = ["queue_peek", "queue_receive", "queue_send", "notify_take", "notify_wait", "event_group_wait_bits",
+         "event_group_sync", "stream_buffer_receive", "stream_buffer_send"]
+WAKES = [
+    ("start", [(task, "created", None) for task in ("control", "ping", "pong", "receiver", "low")]),
+    ("switches", [("ping", "notify_take", "task:control")]
+     + [("pong", "notify_take", "task:ping"), ("ping", "notify_take", "task:pong")] * ROUNDS),
+    ("handler", [("receiver", "queue_receive", DEVICE)]),
+    ("mutexes", [("control", "notify_take", "task:low"), ("control", "mutex", "task:low")]),
+    ("delays", [("control", "delay", "elapsed"), ("control", "delay_until", "elapsed")]),
+    ("ready priority", [("low", "notify_take", "task:control"), ("control", "delay", "elapsed")]),
+    ("suspension", [("low", "suspend", "task:control"), ("control", "delay", "elapsed")]),
+    ("waits", [("control", wait, "elapsed") for wait in WAITS]),
+    ("creation", [("ephemeral", "created", "task:control")]),
+]
+WAKE = re.compile(r"wake at=\d+ task=(\S+) reason=(\S+) cause=(.+)")
 
 
 def parse(output: str) -> tuple[list, list[str]]:
@@ -281,6 +312,42 @@ def check(output: str) -> list[str]:
     return errors
 
 
+def check_meaning(output: str) -> list[str]:
+    """kymo decode --meaning's lines against what the scenarios make."""
+    errors = []
+    lines = output.splitlines()
+    errors += [f"{line}: against the kernel's order" for line in lines if line.startswith("contradiction")]
+    errors += [f"{line}: the idle task as a task" for line in lines if "task=IDLE" in line]
+    if not any(line.startswith("run ") and "task=idle" in line for line in lines):
+        errors.append("the idle task never runs")
+    wakes = []
+    for line in lines:
+        if line.startswith("wake "):
+            match = WAKE.fullmatch(line)
+            if not match:
+                errors.append(f"{line}: not a wake line")
+                continue
+            if "unknown" in (match[2], match[3]) and match[2] != "created":
+                errors.append(f"{line}: a wake without its reason or cause, no event lost")
+            wakes.append((line, match[1], match[2], match[3]))
+    if not any(line.startswith("wait ") and "task=control" in line and "contested" in line for line in lines):
+        errors.append("control never waits for the contested mutex")
+
+    at = 0
+    for scenario, expected in WAKES:
+        for task, reason, cause in expected:
+            while at < len(wakes) and not (
+                    wakes[at][1:3] == (task, reason)
+                    and (cause is None or wakes[at][3] == cause
+                         or (cause.endswith(" ") and wakes[at][3].startswith(cause)))):
+                at += 1
+            if at == len(wakes):
+                errors.append(f"scenario {scenario}: no wake of {task} by {reason}, cause {cause}, where expected")
+                return errors
+            at += 1
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", required=True)
@@ -290,15 +357,23 @@ def main() -> int:
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as directory:
-        recording = record_to_exit(args.qemu, args.machine, args.image, args.host,
-                                   os.path.join(directory, "application.kcap"), END)
+        capture = os.path.join(directory, "application.kcap")
+        recording = record_to_exit(args.qemu, args.machine, args.image, args.host, capture, END)
+        decoded = None
+        if recording.returncode == 0 and recording.exit_status is not None:
+            decoded = subprocess.run([args.host, "decode", args.image, capture, "--meaning"],
+                                     capture_output=True, text=True, check=False)
     print(recording.stderr.strip())
-    if recording.returncode != 0 or recording.exit_status is None:
+    if decoded is None:
         print(recording.stdout[-2000:])
         print("kymo record failed" if recording.returncode != 0 else f"stopped short of {END}")
         return 1
     errors = [] if recording.exit_status == 1 else ["the application failed"]
     errors += check(recording.stdout)
+    if decoded.returncode != 0:
+        errors.append(f"kymo decode --meaning failed: {decoded.stderr.strip()}")
+    else:
+        errors += check_meaning(decoded.stdout)
     for error in errors[:20]:
         print(error)
     print("RESULT:", "FAIL" if errors else "PASS")

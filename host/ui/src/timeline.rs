@@ -4,7 +4,7 @@
 //! are bands across the rows, between the events recorded before and after
 //! them.
 //!
-//! An image with the OpSy adapter shows its meaning above them: a row per
+//! An image with a kernel adapter shows its meaning above them: a row per
 //! task, the idle task, each interrupt handler and each mutex, drawn as
 //! spans; the rows of event types are then folded under one line.
 
@@ -61,7 +61,7 @@ pub struct Timeline {
     /// The event types of the catalogue, a row each, in its order.
     ids: Vec<u16>,
     rows: Vec<Row>,
-    /// OpSy's meaning, when the image has the adapter.
+    /// The kernel's meaning, when the image has an adapter.
     meaning: Option<Meaning>,
     /// Whether the rows of event types are folded.
     folded: bool,
@@ -90,7 +90,7 @@ pub struct Timeline {
     /// Milliseconds the last frame took to lay the timeline out.
     painted: f64,
     measure: Option<Measure>,
-    /// The statistics of OpSy's instances, with OpSy's meaning.
+    /// The statistics of the kernel's instances, with its meaning.
     panel: Option<Panel>,
     /// The range selected, in cycles, and where a selection being dragged
     /// started.
@@ -100,7 +100,7 @@ pub struct Timeline {
     picked: Option<(i64, i64)>,
     /// Whether the last frame moved the view or the selection.
     moving: bool,
-    /// How OpSy's rows are drawn.
+    /// How the kernel's rows are drawn.
     mode: Mode,
     /// The event list's lines, the range it shows, the element clicked in
     /// it and the one to scroll to.

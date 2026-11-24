@@ -1,4 +1,4 @@
-//! The bottom panel: the event list of the range (ADR-072) and, with OpSy's
+//! The bottom panel: the event list of the range (ADR-072) and, with the kernel's
 //! meaning, the statistics.
 
 use super::Timeline;
