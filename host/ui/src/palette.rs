@@ -19,7 +19,8 @@ pub struct Palette {
     pub wake: Color32,
     /// The hatching of the time unknown, in the load view.
     pub unknown: Color32,
-    /// The bands of a loss and of a suspect line, over the rows.
+    /// A loss and a suspect line: their marks in the ruler, and, at `BAND`'s
+    /// opacity, their bands over the rows.
     pub loss: Color32,
     pub suspect: Color32,
     /// The owner's name, written on a hold.
@@ -31,15 +32,15 @@ pub struct Palette {
 const LIGHT: Palette = Palette {
     event: Color32::from_rgb(0x2f, 0x6f, 0xdb),
     run: Color32::from_rgb(0x2f, 0x6f, 0xdb),
-    idle: Color32::from_rgb(0x84, 0x8d, 0x98),
+    idle: Color32::from_rgb(0x76, 0x7f, 0x8a),
     interrupt: Color32::from_rgb(0xc4, 0x61, 0x0a),
     hold: Color32::from_rgb(0x1a, 0x7f, 0x4b),
     wait: Color32::from_rgb(0x4e, 0x94, 0x70),
     ready: Color32::from_rgb(0x6e, 0x77, 0x81),
     wake: Color32::from_rgb(0xa2, 0x1c, 0xaf),
     unknown: Color32::from_rgb(0x6e, 0x77, 0x81),
-    loss: Color32::from_rgba_premultiplied(150, 0, 0, 200),
-    suspect: Color32::from_rgba_premultiplied(120, 70, 0, 200),
+    loss: Color32::from_rgb(0xc6, 0x28, 0x28),
+    suspect: Color32::from_rgb(0xb4, 0x5f, 0x06),
     owner: Color32::WHITE,
     surface: Color32::from_rgb(0xf0, 0xf2, 0xf5),
 };
@@ -47,18 +48,22 @@ const LIGHT: Palette = Palette {
 const DARK: Palette = Palette {
     event: Color32::from_rgb(0x5b, 0x9b, 0xf0),
     run: Color32::from_rgb(0x5b, 0x9b, 0xf0),
-    idle: Color32::from_rgb(0x66, 0x6e, 0x7a),
+    idle: Color32::from_rgb(0x74, 0x7c, 0x88),
     interrupt: Color32::from_rgb(0xf0, 0xa2, 0x4a),
     hold: Color32::from_rgb(0x3f, 0xb9, 0x7f),
     wait: Color32::from_rgb(0x35, 0x8a, 0x62),
     ready: Color32::from_rgb(0x8b, 0x95, 0xa1),
     wake: Color32::from_rgb(0xe8, 0x79, 0xf9),
     unknown: Color32::from_rgb(0x9a, 0xa3, 0xae),
-    loss: Color32::from_rgba_premultiplied(210, 60, 60, 210),
-    suspect: Color32::from_rgba_premultiplied(200, 140, 30, 200),
+    loss: Color32::from_rgb(0xf0, 0x64, 0x64),
+    suspect: Color32::from_rgb(0xe0, 0xa0, 0x30),
     owner: Color32::BLACK,
     surface: Color32::from_rgb(0x1e, 0x21, 0x27),
 };
+
+/// The opacity of a loss's or a suspect line's band over the rows: the data
+/// stays readable through it.
+pub const BAND: f32 = 0.15;
 
 impl Palette {
     /// The palette of the theme `visuals` are of.

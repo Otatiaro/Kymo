@@ -69,6 +69,20 @@ fn the_text_reads_on_every_background() {
     assert_eq!(below(4.5, pairs), Vec::<String>::new());
 }
 
+/// The loss and suspect colours, written as warnings in the status bar,
+/// read on the panel by 4.5:1 at least.
+#[test]
+fn the_warnings_read_on_the_panel() {
+    let pairs = themes().into_iter().flat_map(|(theme, visuals)| {
+        let palette = Palette::of(&visuals);
+        let [panel, _] = backgrounds(&visuals);
+        [("loss", palette.loss), ("suspect", palette.suspect)]
+            .into_iter()
+            .map(move |(name, color)| (format!("{theme} {name}"), contrast(over(color, panel), panel)))
+    });
+    assert_eq!(below(4.5, pairs), Vec::<String>::new());
+}
+
 /// The colours the data is drawn with, by name.
 fn data(palette: &Palette) -> [(&'static str, Color32); 11] {
     [
@@ -95,7 +109,8 @@ fn below(minimum: f64, pairs: impl Iterator<Item = (String, f64)>) -> Vec<String
 }
 
 /// Every colour of the data, over either background of its rows, stands out
-/// of it by 3:1 at least, the WCAG minimum for a graphical object.
+/// of it by 3:1 at least, the WCAG minimum for a graphical object. The loss
+/// and suspect colours are those of their marks in the ruler, on the panel.
 #[test]
 fn the_data_stands_out_of_the_rows() {
     let pairs = themes().into_iter().flat_map(|(theme, visuals)| {
@@ -109,6 +124,35 @@ fn the_data_stands_out_of_the_rows() {
                         format!("{theme} {name} on row {row}"),
                         contrast(over(color, background), background),
                     )
+                })
+            })
+    });
+    assert_eq!(below(3.0, pairs), Vec::<String>::new());
+}
+
+/// Under a loss's or a suspect line's band, the data still stands out of
+/// the row by 3:1 at least.
+#[test]
+fn the_data_reads_through_a_band() {
+    let pairs = themes().into_iter().flat_map(|(theme, visuals)| {
+        let palette = Palette::of(&visuals);
+        let bands = [("loss", palette.loss), ("suspect", palette.suspect)];
+        backgrounds(&visuals)
+            .into_iter()
+            .enumerate()
+            .flat_map(move |(row, background)| {
+                bands.into_iter().flat_map(move |(band, mark)| {
+                    let band_color = mark.gamma_multiply(BAND);
+                    data(&palette)
+                        .into_iter()
+                        .filter(|(name, _)| !matches!(*name, "loss" | "suspect"))
+                        .map(move |(name, color)| {
+                            let under = over(band_color, over(color, background));
+                            (
+                                format!("{theme} {name} under {band} on row {row}"),
+                                contrast(under, over(band_color, background)),
+                            )
+                        })
                 })
             })
     });
