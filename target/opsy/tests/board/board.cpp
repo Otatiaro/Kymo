@@ -214,6 +214,14 @@ constexpr auto g_table = vector_table(&_estack, Reset_Handler)
 	.with<nested_irq, nested_isr>();
 
 constexpr std::uint32_t vtor = 0xE000ED08;
+constexpr std::uint32_t demcr = 0xE000EDFC, dwt_ctrl = 0xE0001000;
+
+/** @brief The cycle counter that timestamps the events: on from power-up, whatever a probe set */
+void start_cycle_counter()
+{
+	reg(demcr) |= 1u << 24;  // TRCENA
+	reg(dwt_ctrl) |= 1u;     // CYCCNTENA
+}
 
 } // namespace
 } // namespace app
@@ -221,6 +229,7 @@ constexpr std::uint32_t vtor = 0xE000ED08;
 int opsy_test_main()
 {
 	app::board_clock();
+	app::start_cycle_counter();
 	app::reg(app::vtor) = reinterpret_cast<std::uint32_t>(&app::g_table);
 	opsy::cortex_m::set_priority(app::timer_irq, app::timer_priority);
 	opsy::cortex_m::set_priority(app::nested_irq, opsy::scheduler::os_callable_priority);
