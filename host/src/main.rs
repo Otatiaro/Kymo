@@ -40,9 +40,9 @@ from the host time of the probe's passes once the events span a second.
 record: prints the events of a running target as it writes them, drained
 from its trace ring through the probe, and the indexes lost when the ring
 overtook the probe; stops on Enter, or after --duration. A line
-\"suspect <from> <to> <n>\" reports n writers the ring lapped while its write
-index went from <from> to <to>, where the probe could not tell which events
-they wrote into: events recorded near it may hold their bytes.
+\"suspect <from> <to> <n>\" reports n writes overrun: interrupted for a full
+ring lap while its write index went from <from> to <to>, they may have
+written into events the probe read: events recorded near it may be wrong.
 
 record options:
   --channel <ring>   the kymo::ring object to drain, as for decode

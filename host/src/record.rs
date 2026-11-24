@@ -737,9 +737,8 @@ fn asleep(zeros: u32) -> String {
 fn suspect(writers: u64) -> String {
     match writers {
         0 => String::new(),
-        _ => format!(
-            ", {writers} lapped writers no danger accounts for: events near the suspect lines may hold their bytes"
-        ),
+        1 => ", 1 write overrun: events near its suspect line may be wrong".to_string(),
+        _ => format!(", {writers} writes overrun: events near the suspect lines may be wrong"),
     }
 }
 
