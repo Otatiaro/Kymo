@@ -1,7 +1,6 @@
 //! The status bar, and the times and durations it and the hovers print.
 
 use super::Timeline;
-use super::load::Mode;
 use crate::palette::Palette;
 use eframe::egui;
 
@@ -22,7 +21,7 @@ impl Timeline {
     }
 
     /// The status bar's segments: the counts in weak text, what may be wrong
-    /// in the colour of its mark, then the view and the frame's cost.
+    /// in the colour of its mark, then the frame's cost.
     pub(super) fn status(&self, ui: &mut egui::Ui) {
         let palette = Palette::of(ui.visuals());
         // `text` in `color` when `warn`, weak otherwise.
@@ -66,12 +65,6 @@ impl Timeline {
         };
         segment(ui, frequency, false, palette.loss);
         ui.separator();
-        ui.label(format!(
-            "view {} to {}",
-            self.time(self.start),
-            self.time(self.start + self.span)
-        ));
-        ui.separator();
         segment(ui, format!("laid out in {:.2} ms", self.painted), false, palette.loss);
     }
 
@@ -81,30 +74,6 @@ impl Timeline {
             Some(hz) => format!("{:.9} s", cycles / hz),
             None => format!("{cycles:.0} cycles"),
         }
-    }
-}
-
-/// The theme's buttons, right to left, in words: egui's own draw icons the
-/// default fonts have no glyph for.
-pub(super) fn theme_choice(ui: &mut egui::Ui) {
-    let chosen = ui.ctx().options(|options| options.theme_preference);
-    let mut choice = chosen;
-    for (preference, name) in [
-        (egui::ThemePreference::Dark, "Dark"),
-        (egui::ThemePreference::Light, "Light"),
-        (egui::ThemePreference::System, "System"),
-    ] {
-        ui.selectable_value(&mut choice, preference, name);
-    }
-    if choice != chosen {
-        ui.ctx().set_theme(choice);
-    }
-}
-
-/// The modes of OpSy's rows, right to left.
-pub(super) fn mode_choice(ui: &mut egui::Ui, mode: &mut Mode) {
-    for (choice, name) in [(Mode::Load, "Load"), (Mode::Bars, "Bars"), (Mode::Auto, "Auto")] {
-        ui.selectable_value(mode, choice, name);
     }
 }
 

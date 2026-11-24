@@ -46,7 +46,7 @@ task it interrupts.
 Their first row is the CPU's load: in each bin of a few pixels, the share of
 the time known that handlers run, then tasks other than idle, stacked; the
 time unknown, around losses, hatched above. Zoomed out, the other rows show
-their load too, chosen in the status bar: Auto, once a row shows more than
+their load too, chosen in the toolbar: Auto, once a row shows more than
 a span per 4 pixels; Bars; or Load. A line marks a bin's busiest sub-bin.
 Hovering a bin shows its share, how much of it is known, and the longest
 span in it.
@@ -64,12 +64,14 @@ the p99 and the max marked \"≥\" when instances were excluded. Clicking a
 min or a max, or one of the worst instances a subject lists when clicked,
 centres the timeline on that instance and frames it.
 
-The theme follows the system's unless chosen in the status bar; the choice
-is kept for the next runs.
+The toolbar names the capture and the range shown, the selection's or else
+the view's; its × clears the selection, its Whole button shows the whole
+capture. The theme follows the system's unless chosen in its menu; the
+choice is kept for the next runs.
 
   --clock <Hz>  the cycle counter's frequency, as for kymo decode
   --theme <theme>
-                system, light or dark, as chosen in the status bar
+                system, light or dark, as chosen in the toolbar
   --measure     prints the time to read the capture and build the timeline,
                 shows the whole capture then the narrowest view, 300 frames
                 each without vsync, prints the frame times and quits
@@ -116,7 +118,11 @@ fn run() -> Result<()> {
     let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;
     let read = began.elapsed();
-    let timeline = timeline::Timeline::new(catalogue, trace, measure)?;
+    let name = capture.file_name().map_or_else(
+        || capture.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let timeline = timeline::Timeline::new(name, catalogue, trace, measure)?;
     if measure {
         println!(
             "capture read in {:.0} ms, timeline built in {:.0} ms",
