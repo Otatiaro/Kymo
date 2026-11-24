@@ -18,6 +18,10 @@
 //!
 //! A pass record comes before the events and losses that pass settled.
 //! Events keep their raw slots: decoding is the reader's, with the catalogue.
+//!
+//! A recording stopped short of its end record (killed, crashed, probe
+//! unplugged) leaves a capture without one, perhaps ending inside a record:
+//! it reads back up to its last whole record, and says where it was cut.
 
 use crate::target::Result;
 use std::fs::File;
@@ -32,6 +36,22 @@ pub struct Header {
     pub first: u32,
     pub clock: Option<u64>,
     pub channel: String,
+}
+
+/// Where a capture without an end record stops: the byte its whole records
+/// end at, and the index after the last event or loss they hold.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Cut {
+    pub at: usize,
+    pub next: u32,
+}
+
+/// A capture, read back.
+pub struct Capture<'a> {
+    pub header: Header,
+    pub records: Vec<Record<'a>>,
+    /// None when the capture holds its end record.
+    pub cut: Option<Cut>,
 }
 
 pub enum Record<'a> {
@@ -95,6 +115,13 @@ impl Writer {
         Ok(())
     }
 
+    /// Puts what is written on disk: a recording stopped short loses no
+    /// more than what came after.
+    pub fn flush(&mut self) -> Result<()> {
+        self.file.flush()?;
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<()> {
         self.file.flush()?;
         Ok(())
@@ -106,55 +133,67 @@ pub fn is_capture(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// The header of a capture, and its records in order.
-pub fn read(bytes: &[u8]) -> Result<(Header, Vec<Record<'_>>)> {
+/// The header of a capture and its whole records in order, up to its end
+/// record or to where it was cut.
+pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
     let mut cursor = Cursor { bytes };
-    if cursor.take(8)? != MAGIC {
+    let short = "the capture is cut short in its header";
+    if cursor.take(8).ok_or(short)? != MAGIC {
         return Err("not a Kymo capture".into());
     }
-    let version = cursor.u32()?;
+    let version = cursor.u32().ok_or(short)?;
     if version != VERSION {
         return Err(format!("capture version {version}, this kymo reads {VERSION}").into());
     }
-    let first = cursor.u32()?;
-    let clock = cursor.u64()?;
-    let length = usize::from(cursor.u16()?);
-    let channel = std::str::from_utf8(cursor.take(length)?).map_err(|_| "the capture's channel name is not UTF-8")?;
+    let first = cursor.u32().ok_or(short)?;
+    let clock = cursor.u64().ok_or(short)?;
+    let length = usize::from(cursor.u16().ok_or(short)?);
+    let channel = std::str::from_utf8(cursor.take(length).ok_or(short)?)
+        .map_err(|_| "the capture's channel name is not UTF-8")?;
     let header = Header {
         first,
         clock: (clock != 0).then_some(clock),
         channel: channel.to_owned(),
     };
     let mut records = Vec::new();
-    while !cursor.bytes.is_empty() {
-        let record = match cursor.take(1)?[0] {
-            1 => Record::Pass {
-                host_ns: cursor.u64()?,
-                write_index: cursor.u32()?,
-            },
-            2 => {
-                let index = cursor.u32()?;
-                let count = usize::from(cursor.take(1)?[0]);
-                Record::Event {
-                    index,
-                    slots: cursor.take(count * SLOT_BYTES)?,
-                }
-            }
-            3 => Record::Lost {
-                from: cursor.u32()?,
-                to: cursor.u32()?,
-            },
-            4 => Record::End { next: cursor.u32()? },
-            5 => Record::Suspect {
-                from: cursor.u32()?,
-                to: cursor.u32()?,
-                writers: cursor.u32()?,
-            },
-            tag => return Err(format!("unknown record tag {tag} in the capture").into()),
+    let mut next = first;
+    loop {
+        let at = bytes.len() - cursor.bytes.len();
+        let Some(tag) = cursor.take(1) else {
+            return Ok(Capture {
+                header,
+                records,
+                cut: Some(Cut { at, next }),
+            });
         };
+        let tag = tag[0];
+        if !(1..=5).contains(&tag) {
+            return Err(format!("unknown record tag {tag} in the capture").into());
+        }
+        let Some(record) = cursor.record(tag) else {
+            return Ok(Capture {
+                header,
+                records,
+                cut: Some(Cut { at, next }),
+            });
+        };
+        match record {
+            Record::Event { index, slots } => {
+                next = index.wrapping_add((slots.len() / SLOT_BYTES) as u32);
+            }
+            Record::Lost { to, .. } => next = to,
+            Record::End { .. } => {
+                records.push(record);
+                return Ok(Capture {
+                    header,
+                    records,
+                    cut: None,
+                });
+            }
+            Record::Pass { .. } | Record::Suspect { .. } => {}
+        }
         records.push(record);
     }
-    Ok((header, records))
 }
 
 /// The bytes of a capture not read yet.
@@ -163,24 +202,55 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
         if self.bytes.len() < count {
-            return Err("the capture is cut short".into());
+            return None;
         }
         let (taken, rest) = self.bytes.split_at(count);
         self.bytes = rest;
-        Ok(taken)
+        Some(taken)
     }
 
-    fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
     }
 
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
     }
 
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    /// The record of a known `tag`, none if the capture ends inside it.
+    fn record(&mut self, tag: u8) -> Option<Record<'a>> {
+        Some(match tag {
+            1 => Record::Pass {
+                host_ns: self.u64()?,
+                write_index: self.u32()?,
+            },
+            2 => {
+                let index = self.u32()?;
+                let count = usize::from(self.take(1)?[0]);
+                Record::Event {
+                    index,
+                    slots: self.take(count * SLOT_BYTES)?,
+                }
+            }
+            3 => Record::Lost {
+                from: self.u32()?,
+                to: self.u32()?,
+            },
+            4 => Record::End { next: self.u32()? },
+            _ => Record::Suspect {
+                from: self.u32()?,
+                to: self.u32()?,
+                writers: self.u32()?,
+            },
+        })
     }
 }
+
+#[cfg(test)]
+mod tests;

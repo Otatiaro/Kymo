@@ -159,6 +159,23 @@ foreach(test layout decode record symbols)
 	endforeach()
 endforeach()
 
+# - record-killed: the host killed while it records, amid the traffic or
+#   once the target is stopped, its capture read back up to where it was cut.
+foreach(cpu cortex-m33 cortex-m4)
+	kymo_qemu_image(record-killed-${cpu}-Os ${cpu} Os SOURCES record/record.cpp)
+	foreach(when running paused)
+		set(name record-killed-${when}-${cpu}-Os)
+		if(KYMO_HOST)
+			kymo_qemu_command(${name}
+				${CMAKE_CURRENT_SOURCE_DIR}/record/record.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+				--image $<TARGET_FILE:record-killed-${cpu}-Os> --host ${KYMO_HOST} --killed ${when})
+		else()
+			add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
+			set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+		endif()
+	endforeach()
+endforeach()
+
 # - channels: two rings in one image, each event in the ring of its family,
 #   each ring read by its name; without a name, the host lists both.
 foreach(cpu cortex-m33 cortex-m4)

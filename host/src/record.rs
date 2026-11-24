@@ -557,6 +557,9 @@ pub fn run(
                 capture.write(&record)?;
             }
         }
+        if let Some(capture) = &mut capture {
+            capture.flush()?;
+        }
         if done {
             println!("end {}", recorder.next());
             if let Some(mut capture) = capture {
@@ -612,6 +615,12 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
     }
     if let Some(next) = trace.end {
         println!("end {next}");
+    }
+    if let Some(cut) = &trace.cut {
+        eprintln!(
+            "the capture is cut short at byte {}, after index {}: read up to its last whole record",
+            cut.at, cut.next
+        );
     }
     eprintln!(
         "{} events{}{}",

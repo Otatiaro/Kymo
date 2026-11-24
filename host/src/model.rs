@@ -17,6 +17,8 @@ pub struct Trace<'a> {
     pub elements: Vec<Element<'a>>,
     /// The index recording stopped at; none if the capture was cut short.
     pub end: Option<u32>,
+    /// Where the capture was cut short.
+    pub cut: Option<capture::Cut>,
     /// The frequency the seconds are at.
     pub frequency: Option<f64>,
     /// The frequency measured over the capture, and the seconds it spans.
@@ -43,7 +45,7 @@ impl<'a> Trace<'a> {
     /// at `clock` hertz, or the capture's, or else at the frequency measured
     /// over the whole capture.
     pub fn read(catalogue: &'a Catalogue, bytes: &[u8], clock: Option<u64>) -> Result<Self> {
-        let (header, records) = capture::read(bytes)?;
+        let capture::Capture { header, records, cut } = capture::read(bytes)?;
         let ring = catalogue.ring(Some(&header.channel))?;
         let mut timeline = Timeline::new(clock.or(header.clock));
         let mut elements = Vec::new();
@@ -77,6 +79,7 @@ impl<'a> Trace<'a> {
             first: header.first,
             elements,
             end,
+            cut,
             frequency,
             measured: timeline.measured(),
         })

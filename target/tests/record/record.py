@@ -2,7 +2,7 @@
 """Record a running image through QEMU's monitor, and check what was recorded.
 
     record.py --qemu Q --machine M --image I --host KYMO
-              [--lap follows|behind --icount-shift N]
+              [--lap follows|behind --icount-shift N | --killed running|paused]
 
 Runs the image under QEMU with its monitor on a TCP port, records it with
 `kymo record --probe qemu` for a few seconds into a capture file, then
@@ -30,6 +30,15 @@ and no writer is suspect. With `behind`, the lap falls between two reads:
 some writers are suspect, and an event may hold another's bytes only near a
 suspect line, from a ring before its first index to its last.
 
+With --killed, the host is killed while recording, without --duration:
+the capture has no end record. `kymo decode` must read it up to its last
+whole record, say where it was cut, and print what `kymo record` printed up
+to there, every index accounted for up to the index it reports. `running`
+kills the host amid the traffic, where the capture may end inside a record.
+`paused` stops QEMU first, and kills the host once it has made a few passes
+over the still ring: the host puts each pass on disk, so the capture must
+hold all it printed, and end on a whole record.
+
 Which indexes are lost depends on how QEMU and the host interleave, so the
 check does not predict them: it checks that the output accounts for each.
 """
@@ -37,14 +46,17 @@ check does not predict them: it checks that the output accounts for each.
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 RECORD_SECONDS = "2"
 LAP_RECORD_SECONDS = "4"
+PAUSED_SECONDS = 0.1  # the host makes a few passes over the stopped target
 CLOCK_HZ = "64000000"  # given, so that the capture carries it to kymo decode
 TIMEOUT_SECONDS = 60
 SLOTS = 16  # ring_slots of the test images (test_trace.hpp)
@@ -70,12 +82,12 @@ def wait_for(port: int) -> None:
             time.sleep(0.05)
 
 
-def resume(port: int) -> None:
-    """Runs the stopped QEMU, through its second monitor."""
+def resume(port: int, command: str = "cont") -> None:
+    """Runs the stopped QEMU, or with "stop" stops it, through its second monitor."""
     with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT_SECONDS) as monitor:
         replies = monitor.makefile("r")
         replies.readline()  # the greeting
-        for command in ("qmp_capabilities", "cont"):
+        for command in ("qmp_capabilities", command):
             monitor.sendall(json.dumps({"execute": command}).encode() + b"\n")
             reply = json.loads(replies.readline())
             while "return" not in reply and "error" not in reply:
@@ -166,6 +178,57 @@ def check(output: str, lap: str | None) -> list[str]:
     return errors
 
 
+def killed(args, port: int, control: int, capture: str) -> int:
+    """Kills the host while it records, then reads the capture it left."""
+    # stdin open and silent: the host stops only when killed.
+    record = subprocess.Popen(
+        [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{port}",
+         "--elf", args.image, "--out", capture, "--clock", CLOCK_HZ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    lines = []
+    reader = threading.Thread(target=lambda: lines.extend(record.stdout))
+    first = record.stdout.readline()
+    if not first.startswith("record "):
+        record.kill()
+        print(f"kymo record printed {first!r} first")
+        return 1
+    lines.append(first)
+    reader.start()
+    resume(control)
+    time.sleep(float(RECORD_SECONDS))
+    if args.killed == "paused":
+        resume(control, "stop")
+        time.sleep(PAUSED_SECONDS)
+    record.kill()
+    record.wait()
+    reader.join()
+    record.stdin.close()
+
+    errors = []
+    replay = subprocess.run([args.host, "decode", args.image, capture],
+                            capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    cut = re.search(r"cut short at byte (\d+), after index (\d+)", replay.stderr)
+    if replay.returncode != 0:
+        errors.append(f"kymo decode of the capture failed: {replay.stderr.strip()}")
+    elif not cut:
+        errors.append(f"kymo decode does not say where the capture was cut: {replay.stderr.strip()}")
+    else:
+        decoded = replay.stdout.splitlines(keepends=True)
+        print(f"kymo record printed {len(lines)} lines, killed; the capture holds {len(decoded)}, "
+              f"cut at byte {cut[1]} of {os.path.getsize(capture)}, after index {cut[2]}")
+        if decoded != lines[:len(decoded)]:
+            errors.append("kymo decode of the capture is not what kymo record printed up to the cut")
+        elif args.killed == "paused" and len(decoded) != len(lines):
+            errors.append(f"the capture lacks the last {len(lines) - len(decoded)} lines kymo record printed")
+        if args.killed == "paused" and int(cut[1]) != os.path.getsize(capture):
+            errors.append("the capture of a stopped target ends inside a record")
+        errors += check(replay.stdout + f"end {cut[2]}\n", None)
+    for error in errors[:20]:
+        print(error)
+    print("RESULT:", "FAIL" if errors else "PASS")
+    return 1 if errors else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", required=True)
@@ -174,6 +237,7 @@ def main() -> int:
     parser.add_argument("--host", required=True)
     parser.add_argument("--lap", choices=["follows", "behind"])
     parser.add_argument("--icount-shift", type=int)
+    parser.add_argument("--killed", choices=["running", "paused"], help="kill the host while it records")
     args = parser.parse_args()
 
     port, control = free_port(), free_port()
@@ -188,6 +252,8 @@ def main() -> int:
         capture = os.path.join(directory, "record.kcap")
         try:
             wait_for(port)
+            if args.killed:
+                return killed(args, port, control, capture)
             record = subprocess.Popen(
                 [args.host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{port}",
                  "--elf", args.image, "--duration", LAP_RECORD_SECONDS if args.lap else RECORD_SECONDS,
