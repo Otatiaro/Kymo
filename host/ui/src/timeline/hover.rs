@@ -415,12 +415,23 @@ impl Timeline {
             },
         };
         let origin = self.origin();
-        let length = bin.to - bin.from;
         card.facts.extend([
             ("from", self.time((bin.from - origin) as f64)),
             ("to", self.time((bin.to - origin) as f64)),
-            ("bin", self.duration(length)),
+            ("bin", self.duration(bin.to - bin.from)),
         ]);
+        let statistic = self.binning.statistic;
+        let (low, high) = bin.counted;
+        let length = high - low;
+        if (low, high) != (bin.from, bin.to) {
+            let at = format!(
+                "{} to {}",
+                self.time((low - origin) as f64),
+                self.time((high - origin) as f64)
+            );
+            card.facts.push(("sub-bin", at));
+        }
+        card.facts.push(("statistic", statistic.name().to_owned()));
         if bin.known == 0 {
             card.facts.push(("share", "unknown".to_owned()));
         } else {

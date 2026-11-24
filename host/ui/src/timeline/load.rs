@@ -1,8 +1,10 @@
-//! The load view (ADR-061): in each bin of time, the share of the time known
-//! a row covers, as the height of a bar; the time unknown hatched above it;
-//! a line at the largest share of a sub-bin, which a burst reaches and the
-//! bin's share smooths out. The CPU row stacks handlers, then each task
-//! other than idle. The pointer reads the bin the frame drew.
+//! The load view (ADR-061, ADR-084): in each bin of time, the share of the
+//! time known a row covers, as the height of a bar; the time unknown hatched
+//! above it. A bin shows one statistic for every row: the mean is the whole
+//! bin's share; the median, the min and the max are the share of the sub-bin
+//! that has it, a pixel wide at most, drawn whole. The CPU row stacks
+//! handlers, then each task other than idle. The pointer reads the bin the
+//! frame drew.
 
 use super::view::View;
 use crate::meaning::Meaning;
@@ -34,6 +36,46 @@ impl Mode {
     }
 }
 
+/// The statistic of its sub-bins a bin shows, on every row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Statistic {
+    Mean,
+    Median,
+    Min,
+    Max,
+}
+
+impl Statistic {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Statistic::Mean => "mean",
+            Statistic::Median => "median",
+            Statistic::Min => "min",
+            Statistic::Max => "max",
+        }
+    }
+}
+
+/// The width of a bin by default, in pixels.
+pub(super) const PIXELS: u32 = 16;
+
+/// How the load view bins time: the width a bin is at least, in pixels, and
+/// the statistic it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Binning {
+    pub pixels: u32,
+    pub statistic: Statistic,
+}
+
+impl Default for Binning {
+    fn default() -> Self {
+        Binning {
+            pixels: PIXELS,
+            statistic: Statistic::Mean,
+        }
+    }
+}
+
 /// The most spans a row of `meaning` shows in `view`.
 pub(super) fn busiest(meaning: &Meaning, view: &View) -> usize {
     meaning
@@ -49,20 +91,21 @@ pub(super) fn busiest(meaning: &Meaning, view: &View) -> usize {
 }
 
 /// A bin as drawn: its pixel columns `left..right`, its cycles `from..to`
-/// within the capture, and their counts.
+/// within the capture, the cycles `counted`, and their counts. The cycles
+/// counted are the bin's for the mean, and the sub-bin's that has the
+/// statistic for the others; the bin's again when none of its sub-bins is
+/// known.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Drawn {
     pub left: f32,
     pub right: f32,
     pub from: i64,
     pub to: i64,
+    pub counted: (i64, i64),
     pub known: i64,
     /// The cycles covered, from the bottom: a row's; or the CPU's handlers,
     /// then each task other than idle, in the order `cpu` is given.
     pub stack: Vec<i64>,
-    /// The largest share of a sub-bin, covered over known; none where no
-    /// sub-bin is known.
-    pub max: Option<f64>,
 }
 
 impl Drawn {
@@ -81,83 +124,136 @@ fn range(view: &View, width: i64) -> (i64, i64) {
     )
 }
 
-/// The cycles a sub-bin of a bin of `width` cycles lasts: the next 1-2-5
-/// width down that divides it, 10ⁿ for 5 × 10ⁿ; `width` itself for a cycle.
-pub(super) fn below(width: i64) -> i64 {
-    let decade = 10i64.pow(width.ilog10());
-    match width / decade {
-        _ if width == 1 => 1,
-        1 => width / 2,
-        _ => decade,
+/// The cycles a sub-bin of a bin of `width` cycles lasts at `per_pixel`
+/// cycles per pixel: the longest 1, 2 or 5 × 10ⁿ cycles, a pixel at most,
+/// that divides the bin; a cycle at least.
+pub(super) fn sub(width: i64, per_pixel: f64) -> i64 {
+    let mut longest = 1;
+    let mut decade: i64 = 1;
+    while decade <= width {
+        for sub in [decade, 2 * decade, 5 * decade] {
+            if width % sub == 0 && sub as f64 <= per_pixel {
+                longest = longest.max(sub);
+            }
+        }
+        let Some(next) = decade.checked_mul(10) else { break };
+        decade = next;
     }
+    longest
 }
 
-/// A bin's cycles and counts: `from`, `to`, `known`, `stack`.
-type Counted = (i64, i64, i64, Vec<i64>);
+/// Which of the sub-bins, given by the cycles each knows and covers, has
+/// `statistic`: their shares, covered over known, ranked from the smallest,
+/// those of equal share in time order, and the sub-bins with no time known
+/// left out; the min is the first, the median the lower middle one, the max
+/// the last. None for the mean, or when none is known.
+fn pick(subs: impl Iterator<Item = (i64, i64)>, statistic: Statistic) -> Option<usize> {
+    if statistic == Statistic::Mean {
+        return None;
+    }
+    let mut ranked: Vec<(f64, usize)> = subs
+        .enumerate()
+        .filter(|&(_, (known, _))| known > 0)
+        .map(|(n, (known, covered))| (covered as f64 / known as f64, n))
+        .collect();
+    let last = ranked.len().checked_sub(1)?;
+    let at = match statistic {
+        Statistic::Mean | Statistic::Min => 0,
+        Statistic::Median => last / 2,
+        Statistic::Max => last,
+    };
+    let (_, &mut (_, n), _) = ranked.select_nth_unstable_by(at, |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    Some(n)
+}
 
-/// The bins of `view`, from the sub-bins `count` counts over a range at a
-/// width: each with its columns and the largest share of its sub-bins. A
-/// bin is the sum of its sub-bins, which divide it and share its origin.
-fn drawn(view: &View, count: impl Fn(i64, (i64, i64)) -> Vec<Counted>) -> Vec<Drawn> {
-    let width = load::width(view.span / view.width);
-    let bin = |cycles: i64| (cycles - view.origin).div_euclid(width);
-    let mut drawn: Vec<Drawn> = Vec::new();
-    for (from, to, known, stack) in count(below(width), range(view, width)) {
-        let share = (known > 0).then(|| stack.iter().sum::<i64>() as f64 / known as f64);
-        match drawn.last_mut() {
-            Some(last) if bin(last.from) == bin(from) => {
-                last.to = to;
-                last.known += known;
-                for (layer, cycles) in last.stack.iter_mut().zip(stack) {
-                    *layer += cycles;
-                }
-                last.max = match (last.max, share) {
-                    (Some(max), Some(share)) => Some(max.max(share)),
-                    (max, share) => max.or(share),
-                };
-            }
-            _ => drawn.push(Drawn {
-                left: 0.0,
-                right: 0.0,
-                from,
-                to,
-                known,
-                stack,
-                max: share,
-            }),
+/// The sub-bins of a view, the same on every row, and the time known in
+/// each: counted once a frame. The mean counts the bins themselves; the
+/// other statistics, sub-bins that divide them and share their origin.
+pub(super) struct Subs {
+    origin: i64,
+    /// The bins' width, in cycles.
+    width: i64,
+    statistic: Statistic,
+    /// The first sub-bin's start, then each one's end.
+    edges: Vec<i64>,
+    known: Vec<i64>,
+}
+
+impl Subs {
+    /// The sub-bins of `view` binned as `binning` asks, in a capture from
+    /// `capture.0` to `capture.1` cycles of which `known` is known.
+    pub(super) fn new(view: &View, binning: Binning, capture: (i64, i64), known: &Covered) -> Subs {
+        let per_pixel = view.span / view.width;
+        let width = load::width(f64::from(binning.pixels) * per_pixel);
+        let sub = match binning.statistic {
+            Statistic::Mean => width,
+            _ => sub(width, per_pixel),
+        };
+        let edges = load::edges(sub, view.origin, range(view, width), capture);
+        Subs {
+            origin: view.origin,
+            width,
+            statistic: binning.statistic,
+            known: known.counts(&edges),
+            edges,
         }
     }
-    for bin in &mut drawn {
-        (bin.left, bin.right) = (view.column(bin.from), view.column(bin.to));
-    }
-    drawn
 }
 
-/// The bins of a row covering `covered` of the time `known`, in `view` of a
-/// capture from `capture.0` to `capture.1` cycles.
-pub(super) fn row(view: &View, capture: (i64, i64), covered: &Covered, known: &Covered) -> Vec<Drawn> {
-    drawn(view, |width, range| {
-        load::bins(covered, known, width, view.origin, range, capture)
-            .into_iter()
-            .map(|bin| (bin.from, bin.to, bin.known, vec![bin.covered]))
-            .collect()
-    })
+/// The bins of `view` from its sub-bins `subs` and the cycles each layer of
+/// the stack covers in them, from the bottom: each bin with its columns and
+/// the counts of the cycles it shows.
+fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>]) -> Vec<Drawn> {
+    let stack = |n: usize| layers.iter().map(move |layer| layer[n]);
+    let bin = |cycles: i64| (cycles - subs.origin).div_euclid(subs.width);
+    let mut first = 0;
+    subs.edges
+        .windows(2)
+        .collect::<Vec<_>>()
+        .chunk_by(|a, b| bin(a[0]) == bin(b[0]))
+        .map(|edges| {
+            let held = first..first + edges.len();
+            first = held.end;
+            let (from, to) = (edges[0][0], edges[edges.len() - 1][1]);
+            let shares = held.clone().map(|n| (subs.known[n], stack(n).sum()));
+            let (counted, known, stack) = match pick(shares, subs.statistic) {
+                Some(n) => {
+                    let n = held.start + n;
+                    ((subs.edges[n], subs.edges[n + 1]), subs.known[n], stack(n).collect())
+                }
+                None => (
+                    (from, to),
+                    subs.known[held.clone()].iter().sum(),
+                    layers.iter().map(|layer| layer[held.clone()].iter().sum()).collect(),
+                ),
+            };
+            Drawn {
+                left: view.column(from),
+                right: view.column(to),
+                from,
+                to,
+                counted,
+                known,
+                stack,
+            }
+        })
+        .collect()
+}
+
+/// The bins of a row covering `covered`, within the time known, in `view`
+/// cut in `subs`.
+pub(super) fn row(view: &View, subs: &Subs, covered: &Covered) -> Vec<Drawn> {
+    drawn(view, subs, &[covered.counts(&subs.edges)])
 }
 
 /// The bins of the CPU row, as `row` gives a row's: handlers, then the tasks
 /// in `order`, every task other than idle once.
-pub(super) fn cpu(view: &View, capture: (i64, i64), cpu: &Cpu, order: &[usize]) -> Vec<Drawn> {
-    drawn(view, |width, range| {
-        load::cpu_bins(cpu, width, view.origin, range, capture)
-            .into_iter()
-            .map(|bin| {
-                let stack = std::iter::once(bin.handlers)
-                    .chain(order.iter().map(|&task| bin.each[task]))
-                    .collect();
-                (bin.from, bin.to, bin.known, stack)
-            })
-            .collect()
-    })
+pub(super) fn cpu(view: &View, subs: &Subs, cpu: &Cpu, order: &[usize]) -> Vec<Drawn> {
+    let layers: Vec<Vec<i64>> = std::iter::once(&cpu.handlers)
+        .chain(order.iter().map(|&task| &cpu.tasks[task]))
+        .map(|covered| covered.counts(&subs.edges))
+        .collect();
+    drawn(view, subs, &layers)
 }
 
 /// The bin drawn at pixel `x`: from its left column to before its right.
@@ -167,17 +263,16 @@ pub(super) fn at(bins: &[Drawn], x: f32) -> Option<&Drawn> {
 }
 
 /// A drawn bin's heights in pixels, from the bottom of a bar `height`
-/// pixels high: the top of each layer of its stack, of its time known, and
-/// the line of its max.
+/// pixels high: the top of each layer of its stack and of its time known,
+/// over the cycles it counts.
 #[derive(Debug, PartialEq)]
 pub(super) struct Heights {
     pub stack: Vec<f32>,
     pub known: f32,
-    pub max: Option<f32>,
 }
 
 pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
-    let scale = f64::from(height) / (bin.to - bin.from) as f64;
+    let scale = f64::from(height) / (bin.counted.1 - bin.counted.0) as f64;
     // Cycles counted, however few, are a pixel high at least, and so is
     // each layer that counts any.
     let pixels = |cycles: i64| {
@@ -201,16 +296,12 @@ pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
     for top in &mut stack {
         *top = top.min(known);
     }
-    Heights {
-        stack,
-        known,
-        max: bin.max.map(|max| (max * f64::from(known)).round() as f32),
-    }
+    Heights { stack, known }
 }
 
 /// Paints `bins` in `mesh` within `area`, bars from `high` to `low`: the
-/// layers of their stack in `colors`, one each, their max line in the
-/// colour of the top layer drawn, the time unknown hatched in `unknown`.
+/// layers of their stack in `colors`, one each, the time unknown hatched in
+/// `unknown`.
 pub(super) fn paint(
     mesh: &mut egui::Mesh,
     bins: &[Drawn],
@@ -227,17 +318,12 @@ pub(super) fn paint(
         }
         let heights = heights(bin, height);
         let rect = |bottom: f32, top: f32| Rect::from_min_max(pos2(left, low - top), pos2(right, low - bottom));
-        let (mut below, mut color) = (0.0, colors.last().copied().unwrap_or(unknown));
+        let mut below = 0.0;
         for (&top, &layer) in heights.stack.iter().zip(colors) {
             if top > below {
                 mesh.add_colored_rect(rect(below, top), layer);
-                (below, color) = (top, layer);
+                below = top;
             }
-        }
-        if let Some(max) = heights.max
-            && max > below
-        {
-            mesh.add_colored_rect(rect(max - 1.0, max), color);
         }
         if heights.known < height {
             hatch(mesh, rect(heights.known, height), unknown);

@@ -163,6 +163,10 @@ impl Timeline {
             .meaning
             .as_ref()
             .is_some_and(|meaning| self.mode.load(load::busiest(meaning, &view), width));
+        let subs = self
+            .meaning
+            .as_ref()
+            .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu.known));
         for (n, &line) in lines.iter().enumerate() {
             let (top, height) = (area.top() + tops[n], line.height());
             if top > area.bottom() {
@@ -201,11 +205,10 @@ impl Timeline {
             let (high, low) = (top + 4.0, top + height - 4.0);
             let middle = top + height / 2.0;
             let meaning = self.meaning.as_ref();
-            if let Some(meaning) = meaning {
+            if let (Some(meaning), Some(subs)) = (meaning, &subs) {
                 let rows = &meaning.load;
-                let known = &rows.cpu.known;
                 let row = |covered: Option<&Covered>, color: Color32| {
-                    covered.map(|covered| (load::row(&view, capture, covered, known), vec![color]))
+                    covered.map(|covered| (load::row(&view, subs, covered), vec![color]))
                 };
                 let drawn = match line {
                     Line::Cpu => {
@@ -214,7 +217,7 @@ impl Timeline {
                         let colors = std::iter::once(palette.interrupt)
                             .chain(order.iter().map(|&task| meaning.task_color(Some(task), &palette)))
                             .collect();
-                        Some((load::cpu(&view, capture, &rows.cpu, &order), colors))
+                        Some((load::cpu(&view, subs, &rows.cpu, &order), colors))
                     }
                     Line::Task(task) if loaded => row(
                         task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),

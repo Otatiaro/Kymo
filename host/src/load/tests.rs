@@ -114,8 +114,8 @@ fn bins_count_the_cycles_covered_and_known_as_the_oracle_does() {
             self::row(&mut state, capture)
         };
         open += usize::from(row.open.is_some());
-        let per_pixel = 10f64.powf((random(&mut state) % 400) as f64 / 100.0 - 1.0);
-        let width = width(per_pixel);
+        let wanted = 10f64.powf((random(&mut state) % 400) as f64 / 100.0 - 1.0);
+        let width = width(wanted);
         let low = capture.0 - 100 + (random(&mut state) % (capture.1 - capture.0 + 200) as u64) as i64;
         let range = (low, low + 1 + (random(&mut state) % 3000) as i64);
         let expected = oracle(&row, &known, width, origin, range, capture);
@@ -201,16 +201,15 @@ fn a_row_within_the_time_known_keeps_what_both_cover() {
     );
 }
 
-/// A bin is the shortest 1, 2 or 5 × 10ⁿ cycles at least `PIXELS` wide.
+/// A bin is the shortest 1, 2 or 5 × 10ⁿ cycles at least as long as wanted.
 #[test]
-fn a_bin_is_the_shortest_round_width_a_few_pixels_wide() {
+fn a_bin_is_the_shortest_round_width_as_long_as_wanted() {
     let round: Vec<i64> = (0..10).flat_map(|n| [1, 2, 5].map(|m| m * 10i64.pow(n))).collect();
-    for per_pixel in [1e-3, 0.1, 0.25, 0.26, 1.0, 1.3, 12.5, 12.6, 1e4, 3.7e6] {
-        let width = width(per_pixel);
-        let wanted = PIXELS * per_pixel;
+    for wanted in [4e-3, 0.4, 1.0, 1.04, 4.0, 5.2, 50.0, 50.4, 4e4, 1.48e7] {
+        let width = width(wanted);
         let at = round.iter().position(|&round| round == width).expect("a round width");
-        assert!(width as f64 >= wanted, "{per_pixel}: {width}");
-        assert!(at == 0 || (round[at - 1] as f64) < wanted, "{per_pixel}: {width}");
+        assert!(width as f64 >= wanted, "{wanted}: {width}");
+        assert!(at == 0 || (round[at - 1] as f64) < wanted, "{wanted}: {width}");
     }
 }
 
