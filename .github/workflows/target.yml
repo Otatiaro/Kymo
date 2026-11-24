@@ -19,7 +19,7 @@ env:
 # writes and the control word under preemption, event layouts read by the host
 # against the target's, copies of the ring decoded by the host against the
 # events written, what the host records of a running image, pointer fields
-# named from the ELF, and the cost of an emit against its threshold; then the OpSy adapter on OpSy's own suite and
+# named from the ELF, and the cost of an emit against its record; then the OpSy adapter on OpSy's own suite and
 # bench.
 # One compiler, GCC 16, from Otatiaro/arm-none-eabi-toolchain.
 jobs:
