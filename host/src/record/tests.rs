@@ -595,6 +595,65 @@ fn credits_a_writer_read_unpublished_then_published_once_lapped() {
     );
 }
 
+/// A four-slot writer the ring lapped before the host read its first slot,
+/// whose following slots a pass read unpublished, right after a loss. Lapped,
+/// it writes its first slot's words into a newer event's slot, which the host
+/// reads before the writer writes that slot's header: the danger raised from
+/// its following slots also covers the slots of the loss before them it may
+/// have reserved, and the newer event is reported lost, not read as intact.
+#[test]
+fn endangers_the_lost_slots_before_a_following_slot_read_unpublished() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let header = |type_id: u32, index: u32| type_id | HEAD_BIT | ((index / SLOTS + 1) & 0x7fff) << LAP_SHIFT;
+    let slot = |index: u32| ((SLOTS_OFFSET + index % SLOTS * 16) / 4) as usize;
+    let write_index = (WRITE_INDEX_OFFSET / 4) as usize;
+    let mut target = Scripted {
+        memory: vec![0; ((SLOTS_OFFSET + SLOTS * 16) / 4) as usize],
+        counter_reads: 0,
+        at: u32::MAX,
+        change: Vec::new(),
+    };
+    // Recording starts at the third lap, the second written whole with
+    // one-slot events.
+    let start = 2 * SLOTS;
+    target.memory[write_index] = start;
+    for index in SLOTS..start {
+        target.memory[slot(index)] = header(1, index);
+    }
+    let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+    // The writer reserves four slots, the rest are one-slot events, past a
+    // lap: the first pass reads the last lap's worth, from the writer's
+    // second slot, all published but the writer's.
+    let writer = start + 2;
+    let end = writer + SLOTS + 2;
+    for index in (start..end).filter(|index| !(writer..writer + 4).contains(index)) {
+        target.memory[slot(index)] = header(1, index);
+    }
+    // The newer event in the writer's first slot, lapped: the writer has
+    // written its words there, not yet its header.
+    let newer = writer + SLOTS;
+    target.memory[slot(newer) + 2] = 0xdead_beef;
+    target.memory[write_index] = end;
+    let mut items = Vec::new();
+    recorder.pass(&mut target, &mut items).unwrap();
+    // The ring laps the writer's following slots read unpublished.
+    for index in end..end + 2 {
+        target.memory[slot(index)] = header(1, index);
+    }
+    target.memory[write_index] = end + 2;
+    recorder.pass(&mut target, &mut items).unwrap();
+    recorder.pass(&mut target, &mut items).unwrap();
+    assert!(recorder.dangers().0 > 0, "no danger raised: {}", recorder.state());
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, Item::Event(event, _) if event.index == newer)),
+        "event {newer} read as intact, the lapped writer's words in it: {}",
+        recorder.state()
+    );
+}
+
 /// A capture of a simulated recording with losses and suspect lines, read
 /// back by the model: the events, losses and suspect lines in the places the
 /// recording yielded them, the events dated in index order from their
