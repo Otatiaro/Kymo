@@ -9,7 +9,7 @@ use crate::listing::Entry;
 use crate::palette::Palette;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use kymo::decode;
+use kymo::decode::{self, Decoded};
 use kymo::events::Pointee;
 use kymo::model::Element;
 
@@ -70,6 +70,22 @@ impl Timeline {
 
     /// The elements of the range the view had when it last stood still, a
     /// line each, only those scrolled to written. Clicking one goes to it.
+    /// An event's fields, a subject by the name its row shows, anything else
+    /// as decode names it.
+    pub(super) fn fields(&self, event: &Decoded) -> String {
+        let symbols = &self.catalogue.symbols;
+        let shown = |pointee: &Pointee, address: u64| {
+            self.meaning
+                .as_ref()
+                .and_then(|meaning| meaning.shown_at(address))
+                .map(str::to_owned)
+                .or_else(|| symbols.name(pointee, address))
+        };
+        let mut fields = String::new();
+        decode::fields_named(&mut fields, &shown, event);
+        fields
+    }
+
     fn list(&mut self, ui: &mut egui::Ui) {
         let reveal = self.reveal.take();
         let range = self.range();
@@ -84,21 +100,12 @@ impl Timeline {
         });
         ui.separator();
         let symbols = &self.catalogue.symbols;
-        // A subject by the name its row shows, anything else as decode names it.
-        let shown = |pointee: &Pointee, address: u64| {
-            self.meaning
-                .as_ref()
-                .and_then(|meaning| meaning.shown_at(address))
-                .map(str::to_owned)
-                .or_else(|| symbols.name(pointee, address))
-        };
         // A line's cells: index, type, fields; a loss's or a suspect line's
         // text in the fields, and the fields in full when they differ.
         let cells = |entry: &Entry| -> (String, String, String, Option<String>) {
             match &self.trace.elements[entry.element] {
                 Element::Event { event, .. } => {
-                    let mut fields = String::new();
-                    decode::fields_named(&mut fields, &shown, event);
+                    let fields = self.fields(event);
                     let mut full = String::new();
                     decode::fields(&mut full, symbols, event);
                     let full = (full != fields).then_some(full);
