@@ -28,8 +28,8 @@ Shows a capture made by kymo record --out: one row per event type of the
 image, the gaps (slots lost) and the overrun writes (a write interrupted for
 a full ring lap: events recorded near it may be wrong) marked across the
 rows. Wheel: zoom at the pointer; drag or horizontal wheel: scroll; double
-click: the whole capture. Hovering an event shows its line as kymo decode
-prints it.
+click: the whole capture. Hovering an event shows its time, index and
+fields, a subject by the name its row shows.
 
 An image with the OpSy adapter shows, above the event rows, folded then: a
 row per task, by its last priority, and the idle task, where it holds the

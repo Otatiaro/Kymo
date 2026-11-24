@@ -430,9 +430,7 @@ impl Timeline {
                     );
                 }
             }
-            response.on_hover_ui_at_pointer(|ui| {
-                ui.label(egui::RichText::new(hovered).monospace());
-            });
+            response.on_hover_ui_at_pointer(|ui| hovered.show(ui));
         }
     }
 }
