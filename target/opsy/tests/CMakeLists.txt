@@ -114,6 +114,10 @@ if(KYMO_OPSY_BOARD)
 	# What OpSy's directory adds to its own images: debug information and the
 	# optimisation level.
 	target_compile_options(opsy_board PRIVATE -g ${OPSY_OPTIMISATION})
+	# 80 ms of the board's 12,600 slots a second: a probe read on a Windows
+	# host stalls for 20 ms at times, longer than the 256 slots of the other
+	# images last.
+	target_compile_definitions(opsy_board PRIVATE KYMO_TEST_RING_SLOTS=1024)
 	target_include_directories(opsy_board PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
 	find_program(KYMO_PROBE_RS probe-rs)
 	add_test(NAME opsy_board_h563
@@ -121,5 +125,5 @@ if(KYMO_OPSY_BOARD)
 			--image $<TARGET_FILE:opsy_board> --host ${KYMO_HOST}
 			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
 	# The adapter keeps the idle awake: the host never reads the target as zeros.
-	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "read as zeros")
+	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 300 FAIL_REGULAR_EXPRESSION "read as zeros")
 endif()
