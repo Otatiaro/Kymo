@@ -9,7 +9,7 @@ use crate::meaning::Meaning;
 use eframe::egui::{self, Color32, Pos2, Rect, pos2};
 use kymo::load::{self, Covered, Cpu};
 
-/// How the rows of OpSy's meaning are drawn: their spans, their load, or
+/// How the rows of the kernel's meaning are drawn: their spans, their load, or
 /// whichever suits the view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {

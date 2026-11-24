@@ -31,9 +31,10 @@ rows. Wheel: zoom at the pointer; drag or horizontal wheel: scroll; double
 click: the whole capture. Hovering an event shows its time, index and
 fields, a subject by the name its row shows.
 
-An image with the OpSy adapter shows, above the event rows, folded then: a
-row per task, by its last priority, and the idle task, where it holds the
-core; a row per interrupt handler, a nested one in the lower half, the
+An image with a kernel adapter (OpSy's or FreeRTOS's) shows, above the
+event rows, folded then: a row per task, by its last priority, highest
+first, and the idle task, where it holds the core; a row per interrupt
+handler, a nested one in the lower half, the
 whole row from a loss to the next task switch, the nesting unknown; a row
 per mutex, held, with its owner named where it fits, or waited for
 (fainter). Hovering a span shows its start, end and duration; a task's, its
@@ -60,7 +61,7 @@ prints it; a gap or an overrun write stands after the event recorded before
 it, marked in its colour. Clicking a line centres the timeline on it at the
 same zoom.
 
-With the OpSy adapter, a second tab shows the statistics of OpSy's
+With a kernel adapter, a second tab shows the statistics of the kernel's
 instances, as kymo stats computes them, over the same range: a row per
 subject and metric, sorted by the column clicked,
 the p99 and the max marked \"≥\" when instances were excluded. Clicking a

@@ -1,4 +1,4 @@
-//! OpSy's meaning on the timeline: the spans `kymo::meaning` makes of the trace,
+//! The kernel's meaning on the timeline: the spans `kymo::meaning` makes of the trace,
 //! a row of spans each for a task, the idle task, a handler at each depth, a
 //! mutex's holders and each of its waiters; and each task's time ready, with
 //! what woke it. They grow with the trace.
@@ -42,7 +42,7 @@ pub struct Meaning {
 }
 
 impl Meaning {
-    /// None when the image has no OpSy adapter.
+    /// None when the image has no kernel adapter.
     pub fn new(catalogue: &'static Catalogue, first: u32) -> Result<Option<Self>> {
         let kernel = Kernel::new(catalogue, first)?;
         Ok(kernel.traced().then(|| Self {

@@ -26,7 +26,7 @@ that:
   one task_added or task_priority_changed gave it, and the suite's mutex
   donations make the priority both rise and drop;
 - every family on by default was recorded;
-- `kymo decode --opsy` on the capture of the recording gives the spans
+- `kymo decode --meaning` on the capture of the recording gives the spans
   computed here from its event lines: tasks on the core, handlers running,
   mutexes held and waited for, the cause of each wake and each time a task
   is ready; and the suite wakes a task from a handler, from a task, by a
@@ -207,7 +207,7 @@ def check(output: str) -> list[str]:
     return errors
 
 def spans(output: str, names: dict[int, str]) -> list[str]:
-    """OpSy's spans in the event lines of a recording, as kymo decode --opsy
+    """OpSy's spans in the event lines of a recording, as kymo decode --meaning
     prints them, sorted.
 
     A task runs from its task_started, or the idle task from enter_idle, to
@@ -383,7 +383,7 @@ def interrupt_names(host: str, image: str) -> dict[int, str]:
 
 
 def check_spans(output: str, decoded: str, names: dict[int, str]) -> list[str]:
-    """kymo decode --opsy's spans against those computed here, each kind seen."""
+    """kymo decode --meaning's spans against those computed here, each kind seen."""
     expected, got = spans(output, names), sorted(decoded.splitlines())
     kinds = {kind: sum(line.startswith(kind + " ") for line in expected)
              for kind in ("run", "interrupt", "hold", "wait", "wake", "ready")}
@@ -391,7 +391,7 @@ def check_spans(output: str, decoded: str, names: dict[int, str]) -> list[str]:
               for cause in ("handler:", "task:", "elapsed")}
     granted = sum(line.startswith("wake ") and " reason=mutex_granted " in line for line in expected)
     print(f"wakes by cause: {causes}, by a mutex released: {granted}")
-    print(f"spans: {kinds}, {len(got)} printed by kymo decode --opsy")
+    print(f"spans: {kinds}, {len(got)} printed by kymo decode --meaning")
     errors = [f"expected, not printed: {line}" for line in sorted(set(expected) - set(got))]
     errors += [f"printed, not expected: {line}" for line in sorted(set(got) - set(expected))]
     if not errors and expected != got:
@@ -544,10 +544,10 @@ def main() -> int:
         print("kymo record failed" if recording.returncode != 0 else f"stopped short of {EXIT}")
         return 1
     errors = check(stdout)
-    decoded = subprocess.run([args.host, "decode", args.image, capture, "--opsy"],
+    decoded = subprocess.run([args.host, "decode", args.image, capture, "--meaning"],
                              capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS)
     if decoded.returncode != 0:
-        errors.append(f"kymo decode --opsy failed: {decoded.stderr.strip()}")
+        errors.append(f"kymo decode --meaning failed: {decoded.stderr.strip()}")
     else:
         errors += check_spans(stdout, decoded.stdout, interrupt_names(args.host, args.image))
     errors += check_stats(args.host, args.image, capture)

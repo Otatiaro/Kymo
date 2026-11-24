@@ -9,11 +9,11 @@
 //! by `timed_out` or `sleep_elapsed` is by a delay that ran out.
 
 use crate::events::Catalogue;
-use crate::meaning::{Dialect, Field, Hook};
+use crate::meaning::{Dialect, Field, Hook, Precedence};
 use crate::target::Result;
 use std::collections::HashMap;
 
-const PREFIX: &str = "kymo::opsy::";
+pub(crate) const PREFIX: &str = "kymo::opsy::";
 /// OpSy's wake reasons for a delay that ran out, given in SysTick.
 const ELAPSED: [&str; 2] = ["timed_out", "sleep_elapsed"];
 
@@ -30,6 +30,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
             "task_added" => Hook::TaskAdded {
                 task: field("task")?,
                 priority: field("priority")?,
+                name: None,
             },
             "task_priority_changed" => Hook::TaskPriorityChanged {
                 task: field("task")?,
@@ -40,9 +41,12 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
             "enter_idle" => Hook::EnterIdle,
             "task_ready" => Hook::TaskReady {
                 task: field("task")?,
-                reason: field("reason")?,
+                reason: Some(field("reason")?),
             },
-            "task_sleep" | "task_wait" | "task_wait_timeout" => Hook::TaskBlocked { task: field("task")? },
+            "task_sleep" | "task_wait" | "task_wait_timeout" => Hook::TaskBlocked {
+                task: Some(field("task")?),
+                wait: None,
+            },
             "enter_systick" => Hook::KernelEnter { handler: "systick" },
             "exit_systick" => Hook::KernelExit { handler: "systick" },
             "enter_service_call" => Hook::KernelEnter {
@@ -60,15 +64,15 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
             },
             "mutex_taken" => Hook::MutexTaken {
                 mutex: field("mutex")?,
-                task: field("owner")?,
+                task: Some(field("owner")?),
             },
             "mutex_released" => Hook::MutexReleased {
                 mutex: field("mutex")?,
-                task: field("owner")?,
+                task: Some(field("owner")?),
             },
             "mutex_blocked" => Hook::MutexBlocked {
                 mutex: field("mutex")?,
-                task: field("waiter")?,
+                task: Some(field("waiter")?),
             },
             _ => continue,
         };
@@ -77,6 +81,9 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
     Ok(Dialect {
         hooks,
         elapsed: &ELAPSED,
+        tick: None,
+        requeue: false,
+        precedence: Precedence::LowerIsHigher,
     })
 }
 

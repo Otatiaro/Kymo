@@ -52,7 +52,7 @@ impl Timeline {
             let against = meaning.kernel.contradictions.len();
             segment(
                 ui,
-                format!("{against} against OpSy's order"),
+                format!("{against} against the kernel's order"),
                 against > 0,
                 palette.suspect,
             );

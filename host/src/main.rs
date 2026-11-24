@@ -10,7 +10,7 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 usage: kymo events <elf> [--svd <file>]
-       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--opsy] [--svd <file>]
+       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
        kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
@@ -25,9 +25,10 @@ decode: lists the events a copy of a trace ring holds, oldest first; the
 copy is the bytes of a kymo::ring object, dumped from a stopped target
 running the image. Given a capture made by kymo record --out, prints what
 kymo record printed while making it, but for the seconds: they are
-recomputed over the whole capture. With --opsy, prints instead OpSy's spans
-in a capture of an image built with Kymo's OpSy hooks: a line each for a task
-on the core (`run`, the idle task as `task=idle`), a handler running
+recomputed over the whole capture. With --meaning, prints instead the
+kernel's spans in a capture of an image built with a Kymo kernel adapter
+(OpSy's or FreeRTOS's): a line each for a task on the core (`run`, the idle
+task as `task=idle`), a handler running
 (`interrupt`, `depth` handlers below it, `unknown` from a loss to the next
 task switch), a mutex held (`hold`) or waited for (`wait`), from one event
 index to another; `lost` for an edge hidden by a loss, `to=open` for a span
@@ -39,7 +40,8 @@ handler open but the kernel's (`handler:<name>`) or else the task on the core
 adapter hides in the task it interrupts. Then a line for each time a task is
 ready and not on the core (`ready`): from its task_ready to its first run,
 then each time it is preempted, to the end of its activation. Then a line
-`contradiction <index>` for each event against the order OpSy's hooks keep.
+`contradiction <index>` for each event against the order the adapter's
+events keep.
 
 A handler is named `<handler> (<interrupt>)`, once for each interrupt it
 runs for. The interrupt is named by the image's IRQn_Type enumeration, from
@@ -71,11 +73,12 @@ record options:
   --clock <Hz>       the cycle counter's frequency, kept in the capture;
                      without it, measured
 
-stats: OpSy's statistics over a capture of an image built with Kymo's OpSy
-hooks, or over its range from --from to --to seconds after its first event.
+stats: the kernel's statistics over a capture of an image built with a Kymo
+kernel adapter, or over its range from --from to --to seconds after its
+first event.
 For each task, of each activation, from its task_ready to the event that
 makes it not ready: wake latency (in total, by wake reason, and by cause as
-decode --opsy names it: handler:<name>, task:<name>, elapsed, unknown), time
+decode --meaning names it: handler:<name>, task:<name>, elapsed, unknown), time
 preempted by tasks and by handlers, net and gross execution, response time;
 and the period, from a task_ready to the next. For each handler: gross and
 net duration, period. For each mutex: holds and waits, by task and in total.
@@ -185,7 +188,7 @@ impl Window {
     }
 }
 
-/// OpSy's statistics of the capture `copy` of the image `elf`.
+/// The kernel's statistics of the capture `copy` of the image `elf`.
 fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> Result<()> {
     let mut window = Window::default();
     let mut worst = 10;
@@ -250,11 +253,11 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         return Err(format!("{copy} is not a capture of kymo record").into());
     }
     let trace = Trace::read(&catalogue, &bytes, clock)?;
-    let mut opsy = meaning::Meaning::new(&catalogue, trace.first)?;
-    if !opsy.traced() {
-        return Err("the image has no OpSy hook events".into());
+    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
+    if !kernel.traced() {
+        return Err("the image has no kernel adapter events".into());
     }
-    opsy.add(&trace.elements, 0);
+    kernel.add(&trace.elements, 0);
     let origin = trace.elements.iter().find_map(|element| match element {
         Element::Event { cycles, .. } => Some(*cycles),
         _ => None,
@@ -273,9 +276,9 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         to: cycles(to)?,
     };
     let found = stats::Found {
-        instances: &meaning::instances(&opsy),
-        contradictions: &opsy.contradictions,
-        known: &opsy.known(),
+        instances: &meaning::instances(&kernel),
+        contradictions: &kernel.contradictions,
+        known: &kernel.known(),
     };
     Ok(stats::compute(&trace, found, range, worst))
 }
@@ -320,7 +323,7 @@ fn run() -> Result<()> {
             let mut spans = false;
             let mut svd = None;
             while let Some(option) = arguments.next() {
-                if option == "--opsy" {
+                if option == "--meaning" {
                     spans = true;
                     continue;
                 }
@@ -340,12 +343,12 @@ fn run() -> Result<()> {
                 }
                 if spans {
                     let trace = Trace::read(&catalogue, &bytes, clock)?;
-                    let mut opsy = meaning::Meaning::new(&catalogue, trace.first)?;
-                    if !opsy.traced() {
-                        return Err("the image has no OpSy hook events".into());
+                    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
+                    if !kernel.traced() {
+                        return Err("the image has no kernel adapter events".into());
                     }
-                    opsy.add(&trace.elements, 0);
-                    for line in meaning::lines(&trace, &opsy) {
+                    kernel.add(&trace.elements, 0);
+                    for line in meaning::lines(&trace, &kernel) {
                         println!("{line}");
                     }
                     return Ok(());
@@ -353,7 +356,7 @@ fn run() -> Result<()> {
                 return record::print_capture(&catalogue, &bytes, clock);
             }
             if spans {
-                return Err("--opsy reads a capture, not a copy of a ring".into());
+                return Err("--meaning reads a capture, not a copy of a ring".into());
             }
             let ring = catalogue.ring(channel.as_deref())?;
             let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;

@@ -1,4 +1,4 @@
-//! The spans of one row of OpSy's meaning: a task's runs, a handler's, a
+//! The spans of one row of the kernel's meaning: a task's runs, a handler's, a
 //! mutex's holders or one of its waiters. They do not overlap, so they are
 //! sorted by their start and by their end alike, as the trace's cycles are:
 //! a view finds those it holds by a binary search, and a pixel column

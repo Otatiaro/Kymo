@@ -48,6 +48,24 @@
 //! The kernel's handlers the dialect names run as handlers of those names.
 //! PendSV has no exit event: it makes no span, and the task it puts on the
 //! core runs from the task_started it emits.
+//!
+//! A dialect may differ from OpSy's events (freertos.rs):
+//!
+//! - an event may leave its task out, for the task on the core: it is
+//!   skipped while that one is unknown, or is the idle task;
+//! - a wake may give no reason: its reason is then the wait the task leaves,
+//!   named by the event that blocked it, `created` for a task's first wake,
+//!   `unknown` after a loss; a wake emitted by the tick's handler is by a
+//!   delay that ran out;
+//! - a handler's exit may give its exception instead of its address;
+//! - a priority change may put a task that is ready back in the ready list,
+//!   with a task_ready that is no wake, right after the change or right
+//!   before it (priority inheritance): a task_ready of a ready task is a
+//!   contradiction only if the next hook is not its priority change;
+//! - the scheduler's start may give the idle task, which is no task: the
+//!   hooks before it, from the trace's start, are held back until it comes,
+//!   or a loss; a recording that starts later counts the idle task as a
+//!   task.
 
 use crate::events::{Catalogue, Event, Kind, Pointee};
 use crate::interrupts::Interrupts;
@@ -149,7 +167,8 @@ pub struct Spans {
 pub struct Subject {
     pub address: u64,
     pub name: String,
-    /// A task's priority, the last one an event gave: lower is higher.
+    /// A task's priority, the last one known, compared by the meaning's
+    /// `precedence`: a kernel's priority wider than a byte is truncated.
     pub priority: Option<u8>,
     /// A task's priority over the trace, each from its edge on: `None` where
     /// it is unknown, from a loss to the next event that gives it.
@@ -226,6 +245,33 @@ impl Subjects {
         })
     }
 
+    /// A new subject at `address`, by `name`, or by the address when the name
+    /// is empty: the address names it from then on.
+    fn create(&mut self, address: u64, name: String) -> usize {
+        let name = if name.is_empty() {
+            format!("0x{address:08x}")
+        } else {
+            name
+        };
+        self.list.push(Subject {
+            address,
+            name,
+            priority: None,
+            priorities: Vec::new(),
+        });
+        self.by_address.insert(address, self.list.len() - 1);
+        self.list.len() - 1
+    }
+
+    /// A handler entered for `exception`, the first one seen.
+    fn for_exception(&self, exception: u16) -> Option<usize> {
+        self.by_interrupt
+            .iter()
+            .filter(|((_, of), _)| *of == Some(exception))
+            .map(|(_, &handler)| handler)
+            .min()
+    }
+
     /// Whether `subject` is one no event field gives.
     fn is_named(&self, subject: usize) -> bool {
         self.by_name.values().any(|&named| named == subject)
@@ -298,15 +344,60 @@ impl Field {
             .find(|(enumerator, _)| *enumerator as u64 == value)
             .map_or_else(|| value.to_string(), |(_, label)| label.clone())
     }
+
+    /// A `char` array of any length, read up to its first NUL.
+    pub(crate) fn text_of(event: &Event, wanted: &str) -> Result<Self> {
+        let field = event
+            .fields
+            .iter()
+            .find(|field| field.name == wanted)
+            .ok_or_else(|| format!("{}: no field {wanted}, which the host reads", event.name))?;
+        let size = field
+            .ty
+            .size
+            .filter(|&size| size >= 1)
+            .ok_or_else(|| format!("{}: {wanted} has no size", event.name))?;
+        Ok(Self {
+            offset: field.offset as usize,
+            size: size as usize,
+            pointee: None,
+            enumerators: Vec::new(),
+        })
+    }
+
+    /// The bytes up to the first NUL, as UTF-8 with any invalid sequence
+    /// replaced.
+    fn text(&self, payload: &[u8]) -> String {
+        let bytes = &payload[self.offset..self.offset + self.size];
+        let end = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    }
 }
 
-/// The hooks the spans are made of.
+/// The hooks the spans are made of. A task given as `None` is the task on
+/// the core: an event about it is skipped while that task is unknown or idle.
 pub(crate) enum Hook {
+    /// The scheduler starts with this idle task, which is no task of the
+    /// meaning.
+    Starting {
+        idle: Field,
+    },
+    /// A task is created, with its priority, which is its base priority too,
+    /// and its name when the event gives it: then it is a new subject even
+    /// at the address of a task deleted before.
     TaskAdded {
         task: Field,
         priority: Field,
+        name: Option<Field>,
     },
+    /// A task's priority, its base one aside.
     TaskPriorityChanged {
+        task: Field,
+        priority: Field,
+    },
+    /// A task's base priority: its priority as well, unless it holds a
+    /// higher one it inherited.
+    TaskBasePriority {
         task: Field,
         priority: Field,
     },
@@ -317,12 +408,19 @@ pub(crate) enum Hook {
         task: Field,
     },
     EnterIdle,
+    /// A task made ready, by the reason the field gives, or else by the
+    /// wait it leaves.
     TaskReady {
         task: Field,
-        reason: Field,
+        reason: Option<Field>,
     },
-    /// task_sleep, task_wait, task_wait_timeout.
+    /// A task blocks, in the wait named when it is one the wakes give.
     TaskBlocked {
+        task: Option<Field>,
+        wait: Option<&'static str>,
+    },
+    /// A task is suspended: it waits to be resumed, whatever it waited for.
+    TaskSuspended {
         task: Field,
     },
     /// A handler entered for an exception, IPSR's.
@@ -334,6 +432,10 @@ pub(crate) enum Hook {
     IsrExit {
         handler: Field,
     },
+    /// The innermost handler entered for that exception returns.
+    IsrExitException {
+        exception: Field,
+    },
     KernelEnter {
         handler: &'static str,
     },
@@ -342,16 +444,43 @@ pub(crate) enum Hook {
     },
     MutexTaken {
         mutex: Field,
-        task: Field,
+        task: Option<Field>,
     },
     MutexReleased {
         mutex: Field,
-        task: Field,
+        task: Option<Field>,
     },
     MutexBlocked {
         mutex: Field,
-        task: Field,
+        task: Option<Field>,
     },
+}
+
+/// How a kernel's priorities compare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precedence {
+    /// OpSy's: 0 is the highest.
+    LowerIsHigher,
+    /// FreeRTOS's: 0 is the idle task's, the lowest.
+    HigherIsHigher,
+}
+
+impl Precedence {
+    /// A key that sorts `priority` highest first.
+    pub fn rank(self, priority: u8) -> i16 {
+        match self {
+            Self::LowerIsHigher => i16::from(priority),
+            Self::HigherIsHigher => -i16::from(priority),
+        }
+    }
+
+    /// How a priority value reads, for the user.
+    pub fn reading(self) -> &'static str {
+        match self {
+            Self::LowerIsHigher => "lower is higher",
+            Self::HigherIsHigher => "higher is higher",
+        }
+    }
 }
 
 /// A kernel's dialect: the hooks among the catalogue's events, by type id,
@@ -360,6 +489,13 @@ pub(crate) struct Dialect {
     pub hooks: HashMap<u16, Hook>,
     /// The wake reasons for a delay that ran out, given in SysTick.
     pub elapsed: &'static [&'static str],
+    /// The exception whose handler makes ready the tasks whose delay ran
+    /// out, when the wakes do not give it as a reason.
+    pub tick: Option<u16>,
+    /// Whether a priority change puts a task that is ready back in the ready
+    /// list with a task_ready, which is then no wake.
+    pub requeue: bool,
+    pub precedence: Precedence,
 }
 
 pub struct Meaning<'a> {
@@ -368,6 +504,30 @@ pub struct Meaning<'a> {
     hooks: HashMap<u16, Hook>,
     /// The wake reasons for a delay that ran out.
     elapsed: &'static [&'static str],
+    /// The exception of the handler that wakes the tasks whose delay ran out.
+    tick: Option<u16>,
+    requeue: bool,
+    /// How the tasks' priorities compare.
+    pub precedence: Precedence,
+    /// The idle task's address, once the scheduler's start gives it.
+    idle: Option<u64>,
+    /// The hooks taken in before the scheduler's start, which gives the idle
+    /// task: while the dialect has it, from the trace's start to it or to a
+    /// loss.
+    buffering: bool,
+    buffer: Vec<(u16, Vec<u8>, Edge)>,
+    /// The task whose priority the last hook changed, not known to wait: a
+    /// task_ready of it right after only moves it within the ready list.
+    reinsert: Option<usize>,
+    /// The task a task_ready moved while ready, and the element: a move
+    /// within the ready list if the next hook changes its priority, as
+    /// priority inheritance does after the move; else a contradiction.
+    moved: Option<(usize, usize)>,
+    /// By task: its base priority, while known.
+    base: BTreeMap<usize, u8>,
+    /// By task: the wait it is in, which its next wake leaves, `created` for
+    /// the first one; unknown from a loss to its next block.
+    waits: BTreeMap<usize, &'static str>,
     /// The first index recorded: past 0, what came before it is unknown, and
     /// read as a loss edge without being counted as a loss.
     first: u32,
@@ -380,8 +540,8 @@ pub struct Meaning<'a> {
     /// The task on the core and since when; none while unknown.
     running: Option<(Option<usize>, Edge)>,
     /// The handlers entered and not left, innermost last, each with its
-    /// depth.
-    entered: Vec<(usize, Edge, Option<usize>)>,
+    /// depth and the exception it runs for.
+    entered: Vec<(usize, Edge, Option<usize>, Option<u16>)>,
     /// Whether every handler open is in `entered`: false from a loss to the
     /// next task_started or enter_idle that comes with `entered` empty.
     nesting_known: bool,
@@ -407,14 +567,36 @@ pub struct Meaning<'a> {
 impl<'a> Meaning<'a> {
     /// Nothing taken in yet, for a trace of `catalogue`'s image that starts
     /// at index `first`, in the dialect of the kernel whose events the image
-    /// has.
+    /// has: FreeRTOS's, or else OpSy's. An image with both is an error.
     pub fn new(catalogue: &'a Catalogue, first: u32) -> Result<Self> {
-        let Dialect { hooks, elapsed } = crate::opsy::dialect(catalogue)?;
+        let has = |prefix: &str| catalogue.events.values().any(|event| event.name.starts_with(prefix));
+        let Dialect {
+            hooks,
+            elapsed,
+            tick,
+            requeue,
+            precedence,
+        } = match (has(crate::opsy::PREFIX), has(crate::freertos::PREFIX)) {
+            (true, true) => return Err("the image has both OpSy's and FreeRTOS's adapter events".into()),
+            (false, true) => crate::freertos::dialect(catalogue)?,
+            _ => crate::opsy::dialect(catalogue)?,
+        };
+        let buffering = first == 0 && hooks.values().any(|hook| matches!(hook, Hook::Starting { .. }));
         Ok(Self {
             symbols: &catalogue.symbols,
             interrupts: &catalogue.interrupts,
             hooks,
             elapsed,
+            tick,
+            requeue,
+            precedence,
+            idle: None,
+            buffering,
+            buffer: Vec::new(),
+            reinsert: None,
+            moved: None,
+            base: BTreeMap::new(),
+            waits: BTreeMap::new(),
             first,
             tasks: Subjects::default(),
             handlers: Subjects::default(),
@@ -455,52 +637,189 @@ impl<'a> Meaning<'a> {
                         self.lost(Edge { lost: true, ..edge });
                     }
                     self.last = Some(edge);
-                    if let Some(hook) = hooks.get(&event.event.id) {
+                    let id = event.event.id;
+                    let Some(hook) = hooks.get(&id) else {
+                        continue;
+                    };
+                    if !self.buffering {
                         self.hook(hook, &event.payload, edge);
+                    } else if matches!(hook, Hook::Starting { .. }) {
+                        self.hook(hook, &event.payload, edge);
+                        self.flush(&hooks);
+                    } else {
+                        self.buffer.push((id, event.payload.clone(), edge));
                     }
                 }
-                Element::Lost { .. } => self.lost(Edge {
-                    element,
-                    cycles: self.last.map_or(0, |last| last.cycles),
-                    lost: true,
-                }),
+                Element::Lost { .. } => {
+                    self.flush(&hooks);
+                    self.lost(Edge {
+                        element,
+                        cycles: self.last.map_or(0, |last| last.cycles),
+                        lost: true,
+                    });
+                }
                 Element::Suspect { .. } => {}
             }
         }
         self.hooks = hooks;
     }
 
+    /// Takes in the hooks held back for the scheduler's start, and the next
+    /// ones as they come.
+    fn flush(&mut self, hooks: &HashMap<u16, Hook>) {
+        self.buffering = false;
+        for (id, payload, edge) in std::mem::take(&mut self.buffer) {
+            self.hook(&hooks[&id], &payload, edge);
+        }
+    }
+
+    /// The task `field` gives: none for the idle task.
+    fn task(&mut self, field: &Field, payload: &[u8]) -> Option<usize> {
+        (self.idle != Some(field.read(payload))).then(|| self.tasks.index(self.symbols, field, payload))
+    }
+
+    /// The task `field` gives, or else the task on the core: none for the
+    /// idle task or while the task on the core is unknown.
+    fn task_or_running(&mut self, field: Option<&Field>, payload: &[u8]) -> Option<usize> {
+        match field {
+            Some(field) => self.task(field, payload),
+            None => self.running.and_then(|(task, _)| task),
+        }
+    }
+
+    /// Gives `task` the priority `priority` from `edge` on, `None` for
+    /// unknown.
+    fn prioritize(&mut self, task: usize, priority: Option<u8>, edge: Edge) {
+        let task = &mut self.tasks.list[task];
+        if priority.is_some() {
+            task.priority = priority;
+        }
+        task.priorities.push((edge, priority));
+    }
+
+    /// Expects the ready list's move of `task`, whose priority just changed,
+    /// if the dialect has one and the task is not known to wait: a waiting
+    /// task is in no ready list.
+    fn requeue(&mut self, task: usize) {
+        if self.requeue && !self.waits.contains_key(&task) {
+            self.reinsert = Some(task);
+        }
+    }
+
+    /// Ends the waits of `task` for mutexes at `edge`.
+    fn stop_waiting(&mut self, task: usize, edge: Edge) {
+        let ended: Vec<_> = self.waiting.keys().filter(|key| key.1 == task).copied().collect();
+        for (mutex, task) in ended {
+            let from = self.waiting.remove(&(mutex, task)).expect("a wait just found");
+            self.hold(mutex, task, true, from, edge);
+        }
+    }
+
     fn hook(&mut self, hook: &Hook, payload: &[u8], edge: Edge) {
         let symbols = self.symbols;
+        let reinsert = self.reinsert.take();
+        // The priority change the last move of a ready task anticipated, if
+        // this hook is it: no move is expected after it.
+        let mut anticipated = false;
+        if let Some((task, element)) = self.moved.take() {
+            anticipated = match hook {
+                Hook::TaskPriorityChanged { task: changed, .. } | Hook::TaskBasePriority { task: changed, .. } => {
+                    self.task(changed, payload) == Some(task)
+                }
+                _ => false,
+            };
+            if !anticipated {
+                self.contradictions.push(element);
+            }
+        }
         match hook {
-            Hook::TaskAdded { task, priority } | Hook::TaskPriorityChanged { task, priority } => {
-                let task = self.tasks.index(symbols, task, payload);
-                let task = &mut self.tasks.list[task];
-                task.priority = Some(priority.read(payload) as u8);
-                task.priorities.push((edge, task.priority));
+            Hook::Starting { idle } => {
+                self.idle.get_or_insert(idle.read(payload));
+            }
+            Hook::TaskAdded { task, priority, name } => {
+                let address = task.read(payload);
+                if self.idle == Some(address) {
+                    return;
+                }
+                let task = match name {
+                    Some(name) => self.tasks.create(address, name.text(payload)),
+                    None => self.tasks.index(symbols, task, payload),
+                };
+                let priority = priority.read(payload) as u8;
+                self.base.insert(task, priority);
+                self.waits.insert(task, "created");
+                self.prioritize(task, Some(priority), edge);
+            }
+            Hook::TaskPriorityChanged { task, priority } => {
+                let Some(task) = self.task(task, payload) else {
+                    return;
+                };
+                self.prioritize(task, Some(priority.read(payload) as u8), edge);
+                if !anticipated {
+                    self.requeue(task);
+                }
+            }
+            Hook::TaskBasePriority { task, priority } => {
+                let Some(task) = self.task(task, payload) else {
+                    return;
+                };
+                let base = priority.read(payload) as u8;
+                let now = self.tasks.list[task].priorities.last().and_then(|&(_, now)| now);
+                // The base priority is the task's own unless it inherited a
+                // higher one, which a higher base still overrides.
+                let after = match (self.base.insert(task, base), now) {
+                    (_, Some(now)) if self.precedence.rank(base) < self.precedence.rank(now) => Some(base),
+                    (Some(before), Some(now)) => Some(if before == now { base } else { now }),
+                    _ => None,
+                };
+                self.prioritize(task, after, edge);
+                if !anticipated {
+                    self.requeue(task);
+                }
             }
             Hook::TaskTerminated { task } => {
+                let Some(task) = self.task(task, payload) else {
+                    return;
+                };
                 // A task killed while it waits for a mutex waits no more.
-                let task = self.tasks.index(symbols, task, payload);
-                let ended: Vec<_> = self.waiting.keys().filter(|key| key.1 == task).copied().collect();
-                for (mutex, task) in ended {
-                    let from = self.waiting.remove(&(mutex, task)).expect("a wait just found");
-                    self.hold(mutex, task, true, from, edge);
-                }
+                self.stop_waiting(task, edge);
+                self.waits.remove(&task);
+                self.base.remove(&task);
                 self.not_ready(task, edge);
             }
             Hook::TaskStarted { task } => {
-                let task = self.tasks.index(symbols, task, payload);
-                self.run(Some(task), edge);
+                let task = self.task(task, payload);
+                self.run(task, edge);
             }
             Hook::EnterIdle => self.run(None, edge),
             Hook::TaskReady { task, reason } => {
-                let task = self.tasks.index(symbols, task, payload);
+                let Some(task) = self.task(task, payload) else {
+                    return;
+                };
+                if reinsert == Some(task) {
+                    return;
+                }
                 if self.ready.contains_key(&task) {
+                    if self.requeue {
+                        self.moved = Some((task, edge.element));
+                        return;
+                    }
                     return self.contradictions.push(edge.element);
                 }
-                let reason = reason.label(payload);
-                let cause = if self.elapsed.contains(&reason.as_str()) {
+                let reason = match reason {
+                    Some(reason) => reason.label(payload),
+                    None => {
+                        // The kernel takes the mutex again after the wake,
+                        // or times out.
+                        self.stop_waiting(task, edge);
+                        self.waits.remove(&task).unwrap_or("unknown").to_owned()
+                    }
+                };
+                let tick = self
+                    .entered
+                    .last()
+                    .is_some_and(|&(.., exception)| exception.is_some() && exception == self.tick);
+                let cause = if tick || self.elapsed.contains(&reason.as_str()) {
                     Cause::Elapsed
                 } else {
                     self.context()
@@ -514,19 +833,44 @@ impl<'a> Meaning<'a> {
                     edge,
                 });
             }
-            Hook::TaskBlocked { task } => {
-                let task = self.tasks.index(symbols, task, payload);
+            Hook::TaskBlocked { task, wait } => {
+                let Some(task) = self.task_or_running(task.as_ref(), payload) else {
+                    return;
+                };
+                // A wait that blocks through another, a stream buffer's
+                // through a notification's, is the first one.
+                if let Some(wait) = wait {
+                    self.waits.entry(task).or_insert(wait);
+                }
+                self.not_ready(task, edge);
+            }
+            Hook::TaskSuspended { task } => {
+                let Some(task) = self.task(task, payload) else {
+                    return;
+                };
+                self.stop_waiting(task, edge);
+                self.waits.insert(task, "suspend");
                 self.not_ready(task, edge);
             }
             Hook::IsrEnter { handler, exception } => {
-                // 0 is thread mode: the handler was called, not taken.
-                let exception = u16::try_from(exception.read(payload))
-                    .ok()
-                    .filter(|&exception| exception != 0);
+                let exception = exception_of(exception, payload);
                 let handler = self
                     .handlers
                     .interrupt(symbols, self.interrupts, handler, exception, payload);
-                self.enter(handler, edge);
+                self.enter(handler, exception, edge);
+            }
+            Hook::IsrExitException { exception } => {
+                let exception = exception_of(exception, payload);
+                let innermost = self
+                    .entered
+                    .last()
+                    .filter(|&&(.., of)| of == exception)
+                    .map(|&(handler, ..)| handler);
+                match innermost.or_else(|| exception.and_then(|exception| self.handlers.for_exception(exception))) {
+                    Some(handler) => self.exit(handler, edge),
+                    None if self.loss.is_some() => {}
+                    None => self.contradictions.push(edge.element),
+                }
             }
             Hook::IsrExit { handler } => {
                 let address = handler.read(payload);
@@ -545,15 +889,17 @@ impl<'a> Meaning<'a> {
             }
             Hook::KernelEnter { handler } => {
                 let handler = self.handlers.named(handler);
-                self.enter(handler, edge);
+                self.enter(handler, None, edge);
             }
             Hook::KernelExit { handler } => {
                 let handler = self.handlers.named(handler);
                 self.exit(handler, edge);
             }
             Hook::MutexTaken { mutex, task } => {
+                let Some(task) = self.task_or_running(task.as_ref(), payload) else {
+                    return;
+                };
                 let mutex = self.mutexes.index(symbols, mutex, payload);
-                let task = self.tasks.index(symbols, task, payload);
                 if self.held.contains_key(&mutex) {
                     return self.contradictions.push(edge.element);
                 }
@@ -563,8 +909,10 @@ impl<'a> Meaning<'a> {
                 self.held.insert(mutex, (task, edge));
             }
             Hook::MutexReleased { mutex, task } => {
+                let Some(task) = self.task_or_running(task.as_ref(), payload) else {
+                    return;
+                };
                 let mutex = self.mutexes.index(symbols, mutex, payload);
-                let task = self.tasks.index(symbols, task, payload);
                 let from = match (self.held.get(&mutex), self.loss) {
                     (Some(&(owner, from)), _) if owner == task => {
                         self.held.remove(&mutex);
@@ -576,12 +924,15 @@ impl<'a> Meaning<'a> {
                 self.hold(mutex, task, false, from, edge);
             }
             Hook::MutexBlocked { mutex, task } => {
+                let Some(task) = self.task_or_running(task.as_ref(), payload) else {
+                    return;
+                };
                 let mutex = self.mutexes.index(symbols, mutex, payload);
-                let task = self.tasks.index(symbols, task, payload);
                 if self.waiting.contains_key(&(mutex, task)) {
                     return self.contradictions.push(edge.element);
                 }
                 self.waiting.insert((mutex, task), edge);
+                self.waits.entry(task).or_insert("mutex");
                 self.not_ready(task, edge);
             }
         }
@@ -605,7 +956,7 @@ impl<'a> Meaning<'a> {
     /// Closes the innermost handler running, `handler`, at `edge`.
     fn exit(&mut self, handler: usize, edge: Edge) {
         let (from, depth) = match (self.entered.last(), self.loss) {
-            (Some(&(open, from, depth)), _) if open == handler => {
+            (Some(&(open, from, depth, _)), _) if open == handler => {
                 self.entered.pop();
                 (from, depth)
             }
@@ -619,10 +970,11 @@ impl<'a> Meaning<'a> {
         });
     }
 
-    /// Opens `handler` at `edge`, its depth known while the nesting is.
-    fn enter(&mut self, handler: usize, edge: Edge) {
+    /// Opens `handler`, run for `exception`, at `edge`, its depth known while
+    /// the nesting is.
+    fn enter(&mut self, handler: usize, exception: Option<u16>, edge: Edge) {
         let depth = self.nesting_known.then_some(self.entered.len());
-        self.entered.push((handler, edge, depth));
+        self.entered.push((handler, edge, depth, exception));
     }
 
     /// Ends `task`'s activation at `edge`: the one open, or else, after a
@@ -680,6 +1032,10 @@ impl<'a> Meaning<'a> {
         self.nesting_known = false;
         self.held.clear();
         self.waiting.clear();
+        self.reinsert = None;
+        self.moved = None;
+        self.base.clear();
+        self.waits.clear();
         self.loss = Some(edge);
         // A change may be among what the loss hides.
         for task in &mut self.tasks.list {
@@ -704,7 +1060,7 @@ impl<'a> Meaning<'a> {
                 .entered
                 .iter()
                 .rev()
-                .map(|&(handler, from, depth)| Interrupt {
+                .map(|&(handler, from, depth, _)| Interrupt {
                     handler,
                     depth,
                     span: Span { from, to },
@@ -770,7 +1126,7 @@ impl<'a> Meaning<'a> {
             .iter()
             .filter(|run| run.task.is_some())
             .map(|run| span(&run.span));
-        let handler_open = self.entered.first().map(|&(_, from, _)| from.cycles);
+        let handler_open = self.entered.first().map(|&(_, from, ..)| from.cycles);
         let task_open = self.running.and_then(|(task, from)| task.map(|_| from.cycles));
         let known = self.known();
         let handlers_known = Covered::union(handlers.clone(), handler_open).within(&known);
@@ -798,7 +1154,7 @@ impl<'a> Meaning<'a> {
         }
     }
 
-    /// `cause` as `kymo decode --opsy` prints it: `handler:<name>`,
+    /// `cause` as `kymo decode --meaning` prints it: `handler:<name>`,
     /// `task:<name>` (`task:idle` for the idle task), `elapsed` or `unknown`.
     pub fn cause(&self, cause: Cause) -> String {
         match cause {
@@ -815,6 +1171,14 @@ impl<'a> Meaning<'a> {
             .map(|last| self.activations_ended_at(last))
             .unwrap_or_default()
     }
+}
+
+/// The exception `field` gives, IPSR's: none for 0, thread mode, where the
+/// handler was called, not taken.
+fn exception_of(field: &Field, payload: &[u8]) -> Option<u16> {
+    u16::try_from(field.read(payload))
+        .ok()
+        .filter(|&exception| exception != 0)
 }
 
 const fn metric(name: &'static str, share: bool, jitter: bool) -> Metric {
@@ -1170,7 +1534,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
     out.into_iter().map(|(_, instance)| instance).collect()
 }
 
-/// `kymo decode --opsy`'s output: the spans of a capture's trace, a line
+/// `kymo decode --meaning`'s output: the spans of a capture's trace, a line
 /// each, those still open at its end last with `to=open`; each task_ready
 /// and its cause; each time ready; then the contradictions. An edge is the
 /// index of its event, or `lost`.

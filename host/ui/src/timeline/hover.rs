@@ -249,7 +249,7 @@ impl Timeline {
         card
     }
 
-    /// The spans of an OpSy `line` from `low` to `high` cycles, a card each;
+    /// The spans of a kernel `line` from `low` to `high` cycles, a card each;
     /// and for a task's, the wake to draw.
     fn span_cards(
         &self,
@@ -296,7 +296,7 @@ impl Timeline {
                     let at = low + (high - low) / 2;
                     if let Some(priority) = run.task.and_then(|task| kernel.tasks.list[task].priority_at(at)) {
                         card.facts
-                            .push(("priority", format!("{priority} there, lower is higher")));
+                            .push(("priority", format!("{priority} there, {}", kernel.precedence.reading())));
                     }
                     if !still && !run.span.to.lost {
                         card.events = ("last events, the switch last", self.events_before(run.span));
@@ -395,7 +395,7 @@ impl Timeline {
         })
     }
 
-    /// The load of an OpSy `line` in `bin`, the bin drawn: its share of the
+    /// The load of a kernel `line` in `bin`, the bin drawn: its share of the
     /// time known, how much is known, and the longest span reaching into it.
     fn load_card(&self, meaning: &Meaning, line: Line, bin: &Drawn, open: &kymo::meaning::Spans) -> Option<Card> {
         let (kind, swatch) = match line {
