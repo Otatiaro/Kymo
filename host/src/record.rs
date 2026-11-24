@@ -91,6 +91,15 @@ pub struct Recorder<'a> {
     suspects: u32,
     /// The passes that read the target as zeros, its core asleep.
     zeros: u32,
+    /// The most slots a pass reads, the newest: halved when the ring lapped
+    /// a read before the next pass's counters settled it, grown by an eighth
+    /// when it did not, up to the ring. A probe slower than the writer still
+    /// reads a share of the events, where a read of the whole backlog would
+    /// be lapped every time.
+    window: u32,
+    /// Whether the core slept since the last pass settled: a read lapped
+    /// then says nothing of the probe's pace.
+    slept: bool,
 }
 
 /// The events `start..end`, read unpublished then lapped by the ring: their
@@ -149,6 +158,8 @@ impl<'a> Recorder<'a> {
             pass_index: 0,
             suspects: 0,
             zeros: 0,
+            window: ring.slots,
+            slept: false,
         };
         let (lapped, write_index) = recorder.counters(target)?;
         recorder.lapped = lapped;
@@ -214,6 +225,7 @@ impl<'a> Recorder<'a> {
         let zeros = (write_index == 0 && self.pass_index != 0) || (lapped == 0 && self.lapped != 0);
         if zeros {
             self.zeros += 1;
+            self.slept = true;
             self.read_end = self.retreat(self.read_end);
         }
         zeros
@@ -248,9 +260,21 @@ impl<'a> Recorder<'a> {
         self.account(lapped, write_index, items);
         self.lift(target, write_index)?;
         let slots = self.ring.slots;
-        if write_index.wrapping_sub(self.next) > slots {
-            self.lost(items, self.next, write_index.wrapping_sub(slots));
-            self.next = write_index.wrapping_sub(slots);
+        let window = self.window;
+        if write_index.wrapping_sub(self.next) > window {
+            // Indexes read unpublished and left while the ring has not lapped
+            // them: their writers may be under way, watched like those settled lost.
+            let to = write_index.wrapping_sub(window);
+            let left = to.wrapping_sub(self.next);
+            for index in std::mem::take(&mut self.unpublished) {
+                if index.wrapping_sub(self.next) >= left {
+                    self.unpublished.push(index);
+                } else if write_index.wrapping_sub(index) <= slots {
+                    self.skipped.push(index);
+                }
+            }
+            self.lost(items, self.next, to);
+            self.next = to;
         }
         let count = write_index.wrapping_sub(self.next);
         let start = self.next & (slots - 1);
@@ -266,6 +290,7 @@ impl<'a> Recorder<'a> {
                 Some(slot) => {
                     self.store(from, &words[..slot as usize * 4]);
                     self.zeros += 1;
+                    self.slept = true;
                     end = self.retreat(index.wrapping_add(slot));
                     break;
                 }
@@ -358,8 +383,11 @@ impl<'a> Recorder<'a> {
             }
         }
         let mut index = self.next;
+        let read = self.read_end != index;
+        let mut overtaken = false;
         while (self.read_end.wrapping_sub(index) as i32) > 0 {
             if write_index.wrapping_sub(index) > self.ring.slots {
+                overtaken = true;
                 let to = self.give_up(index, write_index)?;
                 self.lost(items, index, to);
                 index = to;
@@ -404,6 +432,14 @@ impl<'a> Recorder<'a> {
         self.unpublished = self.unpublished_from(index);
         self.next = index;
         self.read_end = index;
+        if overtaken {
+            if !self.slept {
+                self.window = (self.window / 2).max(self.max_event_slots.min(self.ring.slots));
+            }
+        } else if read {
+            self.window = (self.window + self.window / 8 + 1).min(self.ring.slots);
+            self.slept = false;
+        }
         Ok(())
     }
 

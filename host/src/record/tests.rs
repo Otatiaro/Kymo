@@ -66,6 +66,9 @@ struct Simulated {
     bursts: bool,
     /// Whether the writer stays slower than the probe, quiet or steady.
     slow: bool,
+    /// Word stores between two words read drawn up to this, always: a
+    /// writer that steadily outruns the probe.
+    fast: Option<u32>,
     /// The writers that counted themselves lapped.
     counted: Vec<u32>,
     /// Whether the core sleeps through some passes whole, from their
@@ -104,6 +107,7 @@ impl Simulated {
             host_write_index: 0,
             bursts: true,
             slow: false,
+            fast: None,
             counted: Vec::new(),
             doze: false,
             naps: false,
@@ -249,6 +253,9 @@ impl Target for Simulated {
             };
             self.rate = [0, 1, 3, 40][self.random(rates) as usize];
         }
+        if let Some(rate) = self.fast {
+            self.rate = rate;
+        }
         self.reads += 1;
         if self.doze && address == BASE + WRITE_INDEX_OFFSET {
             self.dozing = self.random(4) == 0;
@@ -379,7 +386,11 @@ fn drops_what_it_reads_of_a_target_asleep() {
             for _ in 0..2000 {
                 recorder.pass(&mut target, &mut items).unwrap();
             }
-            (target.doze, target.naps, target.dozing, target.asleep) = (false, false, false, 0);
+            // A nap under way runs to its end: a read it cut is read again.
+            (target.doze, target.naps, target.dozing) = (false, false, false);
+            while target.asleep > 0 {
+                recorder.pass(&mut target, &mut items).unwrap();
+            }
             target.stop();
             recorder.pass(&mut target, &mut items).unwrap();
             recorder.pass(&mut target, &mut items).unwrap();
@@ -424,6 +435,63 @@ fn drops_what_it_reads_of_a_target_asleep() {
             assert_eq!(zeros, 0, "awake: passes dropped");
             awake = dropped;
         }
+    }
+}
+
+/// A writer that steadily writes one to three slots while the probe reads
+/// one: each pass reads no more than the probe can read before the ring laps
+/// it, so the recording keeps a share of the events, each read back as
+/// written, and reports the rest lost. A read of the whole backlog would be
+/// lapped every time, and keep next to nothing.
+#[test]
+fn keeps_a_share_of_what_a_writer_outrunning_the_probe_writes() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    for rate in [2, 3, 4, 6] {
+        let (mut dropped, mut shown) = (0, 0);
+        for seed in 1..=50u64 {
+            let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            target.run(1000);
+            let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+            let mut expected = recorder.next();
+            let mut items = Vec::new();
+            target.fast = Some(rate);
+            for _ in 0..2000 {
+                recorder.pass(&mut target, &mut items).unwrap();
+            }
+            target.stop();
+            recorder.pass(&mut target, &mut items).unwrap();
+            recorder.pass(&mut target, &mut items).unwrap();
+            recorder.finish(&mut target, &mut items).unwrap();
+            for item in &items {
+                match item {
+                    Item::Event(event, _) => {
+                        assert_eq!(event.index, expected, "seed {seed}: event");
+                        let written = &target.written[&event.index];
+                        assert_eq!(
+                            (event.event.id, event.timestamp, &event.payload),
+                            (written.type_id, written.timestamp, &written.payload),
+                            "seed {seed}: event {}",
+                            event.index
+                        );
+                        expected = event.index + slots(written.type_id);
+                        shown += slots(written.type_id);
+                    }
+                    Item::Lost { from, to } => {
+                        assert_eq!(*from, expected, "seed {seed}: loss");
+                        dropped += to - from;
+                        expected = *to;
+                    }
+                    Item::Suspect { from, to, writers } => panic!("seed {seed}: suspect {from} {to} {writers}"),
+                }
+            }
+            assert_eq!(expected, target.write_index, "seed {seed}: end");
+        }
+        eprintln!("rate {rate}: slots lost {dropped}, shown {shown}");
+        assert!(
+            shown * 25 >= dropped,
+            "rate {rate}: {shown} slots shown, {dropped} lost"
+        );
     }
 }
 
