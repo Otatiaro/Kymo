@@ -367,7 +367,7 @@ pub fn compute(trace: &Trace, instances: &[Instance], contradictions: &[usize], 
 
 /// `cycles` as a duration: in seconds at the frequency, three significant
 /// digits, or else in cycles.
-fn duration(cycles: i64, frequency: Option<f64>) -> String {
+pub fn duration(cycles: i64, frequency: Option<f64>) -> String {
     let Some(hz) = frequency else {
         return format!("{cycles} cycles");
     };

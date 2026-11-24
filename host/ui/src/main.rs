@@ -5,6 +5,7 @@ mod levels;
 mod meaning;
 mod names;
 mod palette;
+mod panel;
 mod spans;
 mod timeline;
 
@@ -34,6 +35,13 @@ per mutex, held, with its owner named where it fits, or waited for
 (fainter). Hovering a span shows its start, end and duration; a task's, its
 priority at the pointer, left out until an event gives it and from a loss
 to the next, and the last events up to the switch that ends it.
+
+Below, the statistics of OpSy's instances, as kymo stats computes them, over
+the range selected (shift and drag; Esc clears it) or else the view once it
+stands still: a row per subject and metric, sorted by the column clicked,
+the p99 and the max marked \"≥\" when instances were excluded. Clicking a
+min or a max, or one of the worst instances a subject lists when clicked,
+centres the timeline on that instance and frames it.
 
 The theme follows the system's unless chosen in the status bar; the choice
 is kept for the next runs.

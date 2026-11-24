@@ -11,12 +11,14 @@
 use crate::levels::Levels;
 use crate::meaning::Meaning;
 use crate::palette::Palette;
+use crate::panel::Panel;
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
 use kymo::decode;
 use kymo::events::Catalogue;
 use kymo::model::{Element, Trace};
 use kymo::opsy::{self, Edge, Span};
+use kymo::stats;
 use kymo::target::Result;
 use std::fmt::Write;
 use std::time::Instant;
@@ -67,6 +69,16 @@ pub struct Timeline {
     /// Milliseconds the last frame took to lay the timeline out.
     painted: f64,
     measure: Option<Measure>,
+    /// The statistics of OpSy's instances, with OpSy's meaning.
+    panel: Option<Panel>,
+    /// The range selected, in cycles, and where a selection being dragged
+    /// started.
+    selection: Option<(i64, i64)>,
+    anchor: Option<i64>,
+    /// The instance picked in the panel: its start and end, in cycles.
+    picked: Option<(i64, i64)>,
+    /// Whether the last frame moved the view or the selection.
+    moving: bool,
 }
 
 /// The events of one type, by cycles, and their elements in the trace.
@@ -130,8 +142,17 @@ impl Timeline {
             suspects: 0,
             painted: 0.0,
             measure: measure.then(Measure::default),
+            panel: None,
+            selection: None,
+            anchor: None,
+            picked: None,
+            moving: false,
         };
         timeline.add(0);
+        timeline.panel = timeline
+            .meaning
+            .as_ref()
+            .map(|meaning| Panel::new(opsy::instances(&meaning.opsy)));
         timeline.whole();
         Ok(timeline)
     }
@@ -289,11 +310,36 @@ impl Timeline {
         if response.double_clicked() {
             self.whole();
         }
+        // Dragged with shift held, a range is selected; else the view scrolls.
+        let at = |timeline: &Self, x: f32| {
+            timeline.origin() + (timeline.start + f64::from(x - area.left()) / width * timeline.span).round() as i64
+        };
+        if response.drag_started()
+            && ui.input(|input| input.modifiers.shift)
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            self.anchor = Some(at(self, pointer.x));
+        }
+        self.moving = response.dragged() && response.drag_delta() != egui::Vec2::ZERO;
         if response.dragged() {
-            self.start -= f64::from(response.drag_delta().x) * self.span / width;
+            match (self.anchor, response.interact_pointer_pos()) {
+                (Some(anchor), Some(pointer)) => {
+                    let to = at(self, pointer.x);
+                    self.selection = (to != anchor).then(|| (anchor.min(to), anchor.max(to)));
+                }
+                _ => self.start -= f64::from(response.drag_delta().x) * self.span / width,
+            }
+        }
+        if response.drag_stopped() {
+            self.anchor = None;
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selection = None;
+            self.picked = None;
         }
         if response.hovered() {
             let (scroll, zoom) = ui.input(|input| (input.smooth_scroll_delta, input.zoom_delta()));
+            self.moving |= scroll != egui::Vec2::ZERO || zoom != 1.0;
             if let Some(pointer) = response.hover_pos() {
                 let at = (f64::from(pointer.x - area.left()) / width).clamp(0.0, 1.0);
                 self.zoom(at, (-f64::from(scroll.y) * 0.002).exp() / f64::from(zoom));
@@ -498,6 +544,30 @@ impl Timeline {
                     color,
                 );
             }
+        }
+        // The range selected, shaded; the instance picked, framed: each at
+        // least a pixel wide.
+        let columns = |(from, to): (i64, i64)| {
+            let from = view.column(from).max(area.left() - 2.0);
+            (from, view.column(to).ceil().max(from + 1.0).min(area.right() + 2.0))
+        };
+        let selected = visuals.selection.bg_fill;
+        if let Some(selection) = self.selection {
+            let (from, to) = columns(selection);
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(from, area.top()), egui::pos2(to, bottom)),
+                0.0,
+                selected.gamma_multiply(0.3),
+            );
+        }
+        if let Some(picked) = self.picked {
+            let (from, to) = columns(picked);
+            painter.rect_stroke(
+                Rect::from_min_max(egui::pos2(from - 1.0, area.top()), egui::pos2(to + 1.0, bottom)),
+                0.0,
+                Stroke::new(2.0, selected),
+                egui::StrokeKind::Inside,
+            );
         }
         self.ruler(&painter, &view, area, rect.top(), bottom, text, grid);
         self.painted = began.elapsed().as_secs_f64() * 1e3;
@@ -799,7 +869,75 @@ impl eframe::App for Timeline {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), theme_choice);
             });
         });
+        if self.panel.is_some() {
+            egui::Panel::bottom("stats")
+                .resizable(true)
+                .default_size(260.0)
+                .show(ui, |ui| self.statistics(ui));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
+        // The panel came before the view moved: it shows the new range next frame.
+        if let Some(panel) = &self.panel
+            && panel.range() != Some(self.range())
+        {
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+impl Timeline {
+    /// The range the statistics are of: the selection, or else the view.
+    fn range(&self) -> stats::Range {
+        let (from, to) = self.selection.unwrap_or_else(|| {
+            let origin = self.origin() as f64;
+            (
+                (origin + self.start).round() as i64,
+                (origin + self.start + self.span).round() as i64,
+            )
+        });
+        stats::Range {
+            from: Some(from),
+            to: Some(to),
+        }
+    }
+
+    /// The panel, of the range the view had when it last stood still: over
+    /// the whole capture, a report costs more than a frame of the timeline.
+    fn statistics(&mut self, ui: &mut egui::Ui) {
+        let (Some(mut panel), Some(meaning)) = (self.panel.take(), &self.meaning) else {
+            return;
+        };
+        let range = self.range();
+        if !self.moving || panel.range().is_none() {
+            panel.report(&self.trace, &meaning.opsy.contradictions, range);
+        }
+        let shown = panel.range().expect("a report computed");
+        let (from, to) = (shown.from.unwrap_or_default(), shown.to.unwrap_or_default());
+        let title = format!(
+            "{} {} to {}",
+            if self.selection == Some((from, to)) {
+                "Selection"
+            } else {
+                "View (shift-drag to select, Esc to clear)"
+            },
+            self.time((from - self.origin()) as f64),
+            self.time((to - self.origin()) as f64)
+        );
+        let picked = panel.show(ui, &title);
+        self.panel = Some(panel);
+        if let Some(instance) = picked {
+            self.go_to(instance.from.cycles, instance.to.cycles);
+        }
+    }
+
+    /// Centres the view on `from` to `to`, a third of its width, and frames
+    /// it.
+    fn go_to(&mut self, from: i64, to: i64) {
+        let width = (to - from) as f64;
+        self.span = (width * 3.0).clamp(NARROWEST, widest(self.first(), self.last()));
+        self.start = (from - self.origin()) as f64 + width / 2.0 - self.span / 2.0;
+        self.clamp();
+        self.picked = Some((from, to));
     }
 }
 
@@ -873,7 +1011,7 @@ fn widest(first: f64, last: f64) -> f64 {
 }
 
 /// `n` and the noun that counts it: `one` for 1, `many` otherwise.
-fn counted(n: u64, one: &str, many: &str) -> String {
+pub fn counted(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
