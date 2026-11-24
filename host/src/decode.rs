@@ -9,7 +9,7 @@
 //! events reserved but not yet published, are left out. An event that reaches
 //! the end of the ring goes on at its first slot.
 
-use crate::events::{Catalogue, Event, Kind, Ring, Type};
+use crate::events::{Catalogue, Event, Kind, Pointee, Ring, Type};
 use crate::symbols::Symbols;
 use crate::target::Result;
 use crate::time::Timeline;
@@ -205,22 +205,31 @@ pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f
     line
 }
 
+/// What a pointer to its pointee holding an address is called, if anything.
+pub type Names<'a> = &'a dyn Fn(&Pointee, u64) -> Option<String>;
+
 /// Each field of the event as `name=value`, separated by spaces.
 pub fn fields(out: &mut String, symbols: &Symbols, decoded: &Decoded) {
+    fields_named(out, &|pointee, address| symbols.name(pointee, address), decoded);
+}
+
+/// Each field of the event as `name=value`, separated by spaces, pointers
+/// called by `names`.
+pub fn fields_named(out: &mut String, names: Names, decoded: &Decoded) {
     for (n, field) in decoded.event.fields.iter().enumerate() {
         if n > 0 {
             out.push(' ');
         }
         let _ = write!(out, "{}=", field.name);
-        value(out, symbols, &field.ty, &decoded.payload[field.offset as usize..]);
+        value(out, names, &field.ty, &decoded.payload[field.offset as usize..]);
     }
 }
 
 /// The value of `ty` at the start of `bytes`: integers in decimal, booleans
-/// as true or false, enumerations by enumerator, pointers by what they point
-/// at in the image (symbols.rs) or else in hexadecimal, durations and time
-/// points as a count and its unit, arrays in brackets, structures in braces.
-fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
+/// as true or false, enumerations by enumerator, pointers by what `names`
+/// calls them or else in hexadecimal, durations and time points as a count
+/// and its unit, arrays in brackets, structures in braces.
+fn value(out: &mut String, names: Names, ty: &Type, bytes: &[u8]) {
     let size = ty.size.unwrap_or_default() as usize;
     let bytes = &bytes[..size];
     let unsigned = || {
@@ -255,17 +264,17 @@ fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
                 }
             }
         }
-        Kind::Pointer(pointee) if size <= 8 => match symbols.name(pointee, unsigned()) {
+        Kind::Pointer(pointee) if size <= 8 => match names(pointee, unsigned()) {
             Some(name) => out.push_str(&name),
             None => {
                 let _ = write!(out, "0x{:0width$x}", unsigned(), width = 2 * size);
             }
         },
         Kind::Duration(count, num, den) => {
-            value(out, symbols, count, bytes);
+            value(out, names, count, bytes);
             unit(out, *num, *den);
         }
-        Kind::Array(element, lengths) => array(out, symbols, element, lengths, bytes),
+        Kind::Array(element, lengths) => array(out, names, element, lengths, bytes),
         Kind::Record(fields) => {
             out.push('{');
             for (n, field) in fields.iter().enumerate() {
@@ -273,7 +282,7 @@ fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
                     out.push(' ');
                 }
                 let _ = write!(out, "{}=", field.name);
-                value(out, symbols, &field.ty, &bytes[field.offset as usize..]);
+                value(out, names, &field.ty, &bytes[field.offset as usize..]);
             }
             out.push('}');
         }
@@ -281,9 +290,9 @@ fn value(out: &mut String, symbols: &Symbols, ty: &Type, bytes: &[u8]) {
     }
 }
 
-fn array(out: &mut String, symbols: &Symbols, element: &Type, lengths: &[u64], bytes: &[u8]) {
+fn array(out: &mut String, names: Names, element: &Type, lengths: &[u64], bytes: &[u8]) {
     let Some((length, inner)) = lengths.split_first() else {
-        return value(out, symbols, element, bytes);
+        return value(out, names, element, bytes);
     };
     let stride = element.size.unwrap_or_default() as usize * inner.iter().product::<u64>() as usize;
     out.push('[');
@@ -291,7 +300,7 @@ fn array(out: &mut String, symbols: &Symbols, element: &Type, lengths: &[u64], b
         if n > 0 {
             out.push(',');
         }
-        array(out, symbols, element, inner, &bytes[n * stride..]);
+        array(out, names, element, inner, &bytes[n * stride..]);
     }
     out.push(']');
 }

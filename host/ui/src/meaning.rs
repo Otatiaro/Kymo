@@ -7,9 +7,11 @@ use crate::names;
 use crate::spans::Spans;
 use kymo::events::Catalogue;
 use kymo::load::{Covered, Cpu};
-use kymo::meaning::{Edge, Meaning as Kernel, Ready, Span};
+use kymo::meaning::{Edge, Meaning as Kernel, Ready, Span, Subject};
 use kymo::model::Element;
+use kymo::stats::Instance;
 use kymo::target::Result;
+use std::collections::HashMap;
 
 pub struct Meaning {
     pub kernel: Kernel<'static>,
@@ -95,6 +97,86 @@ impl Meaning {
         self.names = names::shown(&[&kernel.tasks.list, &kernel.handlers.list, &kernel.mutexes.list]);
         self.load = Load::of(kernel);
     }
+
+    /// The lists of subjects with the names shown.
+    fn named(&self) -> Named<'_> {
+        let kernel = &self.kernel;
+        let names = |n: usize| self.names.get(n).map_or(&[][..], Vec::as_slice);
+        [
+            ("task", &kernel.tasks.list, names(0)),
+            ("handler", &kernel.handlers.list, names(1)),
+            ("mutex", &kernel.mutexes.list, names(2)),
+        ]
+    }
+
+    /// The name shown of the subject an event field points at, by its
+    /// address.
+    pub fn shown_at(&self, address: u64) -> Option<&str> {
+        shown_at(&self.named(), address)
+    }
+
+    /// `instances` with the names shown; see [`shorten`].
+    pub fn shorten(&self, instances: Vec<Instance>) -> (Vec<Instance>, Full) {
+        shorten(&self.named(), instances)
+    }
+}
+
+/// The subjects of each kind, as `kymo::meaning::instances` names the kinds,
+/// with the names shown, in the same order.
+type Named<'a> = [(&'static str, &'a [Subject], &'a [String]); 3];
+
+/// The names in full, by kind and name shown; a detail's under the kind
+/// `detail`.
+pub type Full = HashMap<(&'static str, String), String>;
+
+/// The name shown of the subject at `address`; none at address 0, a
+/// subject no event field gives.
+fn shown_at<'a>(named: &Named<'a>, address: u64) -> Option<&'a str> {
+    named.iter().find_map(|(_, list, names)| {
+        let n = list
+            .iter()
+            .position(|subject| subject.address == address && address != 0)?;
+        names.get(n).map(String::as_str)
+    })
+}
+
+/// The name shown of the subject of `kind` named `name` in full.
+fn shown<'a>(named: &Named<'a>, kind: &str, name: &str) -> Option<&'a str> {
+    let (_, list, names) = named.iter().find(|(of, ..)| *of == kind)?;
+    let n = list.iter().position(|subject| subject.name == name)?;
+    names.get(n).map(String::as_str)
+}
+
+/// `instances` with the names shown, of their subjects and of the subjects
+/// their details name, and the names in full.
+fn shorten(named: &Named, instances: Vec<Instance>) -> (Vec<Instance>, Full) {
+    let mut full = HashMap::new();
+    let instances = instances
+        .into_iter()
+        .map(|mut instance| {
+            if let Some(shown) = shown(named, instance.kind, &instance.subject) {
+                let name = std::mem::replace(&mut instance.subject, shown.to_owned());
+                full.insert((instance.kind, instance.subject.clone()), name);
+            }
+            // A cause names its subject after its kind, `handler:name`; a
+            // mutex's detail is the task holding or waiting, by its name.
+            let mutex = instance.kind == "mutex";
+            if let Some(detail) = &mut instance.detail
+                && let Some(shown) = if mutex {
+                    shown(named, "task", detail).map(str::to_owned)
+                } else {
+                    detail
+                        .split_once(':')
+                        .and_then(|(kind, name)| Some(format!("{kind}:{}", shown(named, kind, name)?)))
+                }
+            {
+                let detail = std::mem::replace(detail, shown.clone());
+                full.insert(("detail", shown), detail);
+            }
+            instance
+        })
+        .collect();
+    (instances, full)
 }
 
 /// The cycles each row covers, cut to the time known, and the CPU row: what
