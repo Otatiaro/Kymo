@@ -27,7 +27,8 @@ prints it.
 
 An image with the OpSy adapter shows, above the event rows, folded then: a
 row per task, by its last priority, and the idle task, where it holds the
-core; a row per interrupt handler, a nested one in the lower half; a row
+core; a row per interrupt handler, a nested one in the lower half, the
+whole row from a loss to the next task switch, the nesting unknown; a row
 per mutex, held, with its owner named where it fits, or waited for
 (lighter). Hovering a span shows its start, end and duration; a task's, its
 priority at the pointer, left out until an event gives it and from a loss

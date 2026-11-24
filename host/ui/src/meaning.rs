@@ -16,7 +16,8 @@ pub struct Meaning {
     /// By task.
     pub runs: Vec<Spans>,
     pub idle: Spans,
-    /// By handler, then by depth.
+    /// By handler, then by depth; a depth unknown with depth 0, as a handler
+    /// that fills the row. A handler's spans never overlap.
     pub interrupts: Vec<Vec<Spans>>,
     /// By mutex.
     pub holds: Vec<Spans>,
@@ -56,7 +57,7 @@ impl Meaning {
         }
         for (n, interrupt) in closed.interrupts.iter().enumerate().skip(self.placed[1]) {
             let depths = grown(&mut self.interrupts, interrupt.handler);
-            grown(depths, interrupt.depth).push(interrupt.span, n);
+            grown(depths, interrupt.depth.unwrap_or(0)).push(interrupt.span, n);
         }
         for (n, hold) in closed.holds.iter().enumerate().skip(self.placed[2]) {
             if hold.waiting {
