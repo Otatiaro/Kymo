@@ -631,10 +631,23 @@ impl<'a> Recorder<'a> {
     }
 }
 
+/// What a pass hands to the writer: its host time, the write index it read,
+/// if any, and the items it settled.
+struct Pass<'a> {
+    host_ns: u64,
+    write_index: Option<u32>,
+    items: Vec<Item<'a>>,
+}
+
 /// `kymo record` of `ring`: prints the events as they come, until Enter is
 /// pressed on the standard input or `duration` has passed, and keeps them in the
 /// capture file `out`. Their seconds are at `clock` hertz, or else at the
 /// frequency measured so far (time.rs).
+///
+/// The calling thread only drains the ring; a second thread dates, prints and
+/// writes what it drained. The ring holds a few tens of milliseconds of
+/// events: printing them, or a stall of the console or the disk, would
+/// otherwise delay the next pass past a lap.
 pub fn run(
     target: &mut dyn Target,
     catalogue: &Catalogue,
@@ -653,43 +666,156 @@ pub fn run(
             }
         });
     }
+    raise_priority();
     let started = Instant::now();
     let mut recorder = Recorder::start(target, catalogue, ring)?;
-    println!("record {}", recorder.next());
+    let first = recorder.next();
+    println!("record {first}");
     let header = capture::Header {
-        first: recorder.next(),
+        first,
         clock,
         channel: ring.name.clone(),
     };
-    let mut capture = out.map(|out| Writer::create(out, &header)).transpose()?;
-    let mut timeline = Timeline::new(clock);
-    let mut items = Vec::new();
-    let mut counts = (0u64, 0u64, 0u64, 0u64);
-    loop {
-        let done = stop.load(Ordering::Relaxed) || duration.is_some_and(|duration| started.elapsed() >= duration);
-        let host_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos() as u64);
-        let zeros = recorder.zeros();
-        let write_index = if done {
-            recorder.finish(target, &mut items)?
-        } else {
-            recorder.pass(target, &mut items)?
+    let capture = out.map(|out| Writer::create(out, &header)).transpose()?;
+    let (passes, received) = std::sync::mpsc::channel::<Pass>();
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || write(catalogue, received, capture, clock).map_err(|error| error.to_string()));
+        let mut count = 0u64;
+        let drained = loop {
+            let done = stop.load(Ordering::Relaxed) || duration.is_some_and(|duration| started.elapsed() >= duration);
+            let host_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos() as u64);
+            let zeros = recorder.zeros();
+            let mut items = Vec::new();
+            let write_index = match if done {
+                recorder.finish(target, &mut items)
+            } else {
+                recorder.pass(target, &mut items)
+            } {
+                Ok(write_index) => write_index,
+                Err(error) => break Err(error),
+            };
+            count += 1;
+            if zeros == 0 && recorder.zeros() > 0 {
+                eprintln!("warning: {}", ASLEEP);
+            }
+            let pass = Pass {
+                host_ns,
+                write_index,
+                items,
+            };
+            // A writer gone has failed: its error is the one reported.
+            if passes.send(pass).is_err() || done {
+                break Ok(());
+            }
         };
-        counts.2 += 1;
-        if zeros == 0 && recorder.zeros() > 0 {
-            eprintln!("warning: {}", ASLEEP);
+        drop(passes);
+        let written = writer.join().expect("the capture writer panicked")?;
+        drained?;
+        println!("end {}", recorder.next());
+        if let Some(mut capture) = written.capture {
+            capture.write(&Record::End { next: recorder.next() })?;
+            capture.finish()?;
         }
-        if let Some(write_index) = write_index {
-            timeline.pass(host_ns, write_index);
+        eprintln!(
+            "{} events, {} slots lost, {} passes{}{}{}{}",
+            written.events,
+            written.lost,
+            count,
+            asleep(recorder.zeros()),
+            suspect(written.suspects),
+            target::speed_text(target),
+            measured(written.timeline.measured())
+        );
+        Ok(())
+    })
+}
+
+/// Keeps the drain's pace on Windows, for the calling thread, the drain: the
+/// process out of power throttling, which Windows applies to a process without
+/// a window in the foreground and which stalls the probe's reads by tens of
+/// milliseconds even on an idle machine; the process above the programs of
+/// normal priority, and the drain above the process's other threads, so that a
+/// loaded machine delays the reads less. The drain waits on the probe most of
+/// the time. What fails is warned of: the recording goes on, and may lose
+/// events.
+#[cfg(windows)]
+fn raise_priority() {
+    use windows_sys::Win32::System::Threading::{
+        ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetCurrentThread, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+        SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
+    // Every mechanism named in the control mask, none in the state mask: off.
+    let unthrottled = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        StateMask: 0,
+    };
+    // SAFETY: the pseudo handles of the current process and thread are always
+    // valid; the state passed is the structure ProcessPowerThrottling takes,
+    // with its size.
+    let (throttling, class, thread) = unsafe {
+        (
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                (&raw const unthrottled).cast(),
+                size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            ),
+            SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS),
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST),
+        )
+    };
+    for (done, what) in [
+        (throttling, "leave power throttling"),
+        (class, "raise the process's priority"),
+        (thread, "raise the probe thread's priority"),
+    ] {
+        if done == 0 {
+            eprintln!("warning: could not {what}: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn raise_priority() {}
+
+/// What the writer thread leaves: the capture, to be ended, the timeline, and
+/// the counts of a recording's summary.
+struct Written {
+    capture: Option<Writer>,
+    timeline: Timeline,
+    events: u64,
+    lost: u64,
+    suspects: u64,
+}
+
+/// Dates, prints and writes the passes as they come, until the drain stops.
+fn write(
+    catalogue: &Catalogue,
+    passes: std::sync::mpsc::Receiver<Pass>,
+    mut capture: Option<Writer>,
+    clock: Option<u64>,
+) -> Result<Written> {
+    let mut timeline = Timeline::new(clock);
+    let (mut events, mut lost, mut suspects) = (0u64, 0u64, 0u64);
+    for pass in passes {
+        if let Some(write_index) = pass.write_index {
+            timeline.pass(pass.host_ns, write_index);
             if let Some(capture) = &mut capture {
-                capture.write(&Record::Pass { host_ns, write_index })?;
+                capture.write(&Record::Pass {
+                    host_ns: pass.host_ns,
+                    write_index,
+                })?;
             }
         }
-        for item in items.drain(..) {
+        for item in pass.items {
             let record = match &item {
                 Item::Event(event, slots) => {
-                    counts.0 += 1;
+                    events += 1;
                     let cycles = timeline.event(event.index, event.timestamp);
                     let seconds = timeline.seconds(cycles, timeline.frequency());
                     println!("{}", decode::line(&catalogue.symbols, event, cycles, seconds));
@@ -699,12 +825,12 @@ pub fn run(
                     }
                 }
                 Item::Lost { from, to } => {
-                    counts.1 += u64::from(to.wrapping_sub(*from));
+                    lost += u64::from(to.wrapping_sub(*from));
                     println!("lost {from} {to}");
                     Record::Lost { from: *from, to: *to }
                 }
                 Item::Suspect { from, to, writers } => {
-                    counts.3 += u64::from(*writers);
+                    suspects += u64::from(*writers);
                     println!("suspect {from} {to} {writers}");
                     Record::Suspect {
                         from: *from,
@@ -720,25 +846,14 @@ pub fn run(
         if let Some(capture) = &mut capture {
             capture.flush()?;
         }
-        if done {
-            println!("end {}", recorder.next());
-            if let Some(mut capture) = capture {
-                capture.write(&Record::End { next: recorder.next() })?;
-                capture.finish()?;
-            }
-            eprintln!(
-                "{} events, {} slots lost, {} passes{}{}{}{}",
-                counts.0,
-                counts.1,
-                counts.2,
-                asleep(recorder.zeros()),
-                suspect(counts.3),
-                target::speed_text(target),
-                measured(timeline.measured())
-            );
-            return Ok(());
-        }
     }
+    Ok(Written {
+        capture,
+        timeline,
+        events,
+        lost,
+        suspects,
+    })
 }
 
 /// What a target read as zeros means.
