@@ -64,8 +64,21 @@ struct Simulated {
     host_write_index: u32,
     /// Whether the writer runs in bursts that overtake the probe.
     bursts: bool,
+    /// Whether the writer stays slower than the probe, quiet or steady.
+    slow: bool,
     /// The writers that counted themselves lapped.
     counted: Vec<u32>,
+    /// Whether the core sleeps through some passes whole, from their
+    /// counters on: the probe reads zeros, and the writer stands still.
+    doze: bool,
+    /// Whether the core sleeps for runs of at least four words read,
+    /// anywhere in a pass.
+    naps: bool,
+    /// Whether the core sleeps through the pass under way, and the passes it slept through.
+    dozing: bool,
+    dozes: u32,
+    /// The words the core sleeps on for.
+    asleep: u32,
 }
 
 impl Simulated {
@@ -90,7 +103,13 @@ impl Simulated {
             read_unpublished: BTreeSet::new(),
             host_write_index: 0,
             bursts: true,
+            slow: false,
             counted: Vec::new(),
+            doze: false,
+            naps: false,
+            dozing: false,
+            dozes: 0,
+            asleep: 0,
         }
     }
 
@@ -221,12 +240,30 @@ impl Target for Simulated {
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
         if self.reads.is_multiple_of(500) {
             // Quiet, steady, or bursts that overtake the probe.
-            let rates = if self.bursts { 4 } else { 3 };
+            let rates = if self.slow {
+                2
+            } else if self.bursts {
+                4
+            } else {
+                3
+            };
             self.rate = [0, 1, 3, 40][self.random(rates) as usize];
         }
         self.reads += 1;
+        if self.doze && address == BASE + WRITE_INDEX_OFFSET {
+            self.dozing = self.random(4) == 0;
+            self.dozes += u32::from(self.dozing);
+        }
         let copy = words.len() > 1;
         for (n, word) in words.iter_mut().enumerate() {
+            if self.naps && self.asleep == 0 && self.random(256) == 0 {
+                self.asleep = 4 + self.random(40);
+            }
+            if self.dozing || self.asleep > 0 {
+                self.asleep = self.asleep.saturating_sub(1);
+                *word = 0;
+                continue;
+            }
             if !self.stopped {
                 let stores = self.random(self.rate + 1);
                 self.run(stores);
@@ -316,6 +353,97 @@ fn records_what_was_written_with_writers_preempted_for_a_lap() {
 #[test]
 fn reports_suspect_the_lapped_writers_a_host_fallen_behind_missed() {
     records_with(true, true, 200);
+}
+
+/// A target whose core sleeps through whole passes, or through runs of words
+/// anywhere in a pass, the probe reading zeros: those reads are dropped, each
+/// pass that met them counted, and every event is read back as written, with
+/// no suspect line. Whole passes asleep are counted one each. What a read
+/// met asleep is read again, later: on this small ring, the ring may lap
+/// it meanwhile, but no more than one slot in a hundred shown.
+#[test]
+fn drops_what_it_reads_of_a_target_asleep() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let mut awake = 0;
+    for (doze, naps) in [(false, false), (true, false), (false, true)] {
+        let (mut zeros, mut dropped, mut shown) = (0, 0, 0);
+        for seed in 1..=50u64 {
+            let mut target = Simulated::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            target.slow = true;
+            target.run(1000);
+            let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+            let mut expected = recorder.next();
+            let mut items = Vec::new();
+            (target.doze, target.naps) = (doze, naps);
+            for _ in 0..2000 {
+                recorder.pass(&mut target, &mut items).unwrap();
+            }
+            (target.doze, target.naps, target.dozing, target.asleep) = (false, false, false, 0);
+            target.stop();
+            recorder.pass(&mut target, &mut items).unwrap();
+            recorder.pass(&mut target, &mut items).unwrap();
+            recorder.finish(&mut target, &mut items).unwrap();
+            assert_eq!(recorder.next(), target.write_index, "seed {seed}: {}", recorder.state());
+            for item in &items {
+                match item {
+                    Item::Event(event, _) => {
+                        assert_eq!(event.index, expected, "seed {seed}: event");
+                        let written = &target.written[&event.index];
+                        assert_eq!(
+                            (event.event.id, event.timestamp, &event.payload),
+                            (written.type_id, written.timestamp, &written.payload),
+                            "seed {seed}: event {}",
+                            event.index
+                        );
+                        expected = event.index + slots(written.type_id);
+                        shown += slots(written.type_id);
+                    }
+                    Item::Lost { from, to } => {
+                        assert_eq!(*from, expected, "seed {seed}: loss");
+                        dropped += to - from;
+                        expected = *to;
+                    }
+                    Item::Suspect { from, to, writers } => panic!("seed {seed}: suspect {from} {to} {writers}"),
+                }
+            }
+            assert_eq!(expected, target.write_index, "seed {seed}: end");
+            if doze {
+                assert_eq!(recorder.zeros(), target.dozes, "seed {seed}: passes asleep");
+            }
+            zeros += recorder.zeros();
+        }
+        eprintln!("doze {doze} naps {naps}: {zeros} passes dropped, slots lost {dropped}, shown {shown}");
+        if doze || naps {
+            assert!(zeros > 0, "doze {doze} naps {naps}: no pass met the core asleep");
+            assert!(
+                dropped * 100 <= shown,
+                "doze {doze} naps {naps}: {dropped} slots lost, {shown} shown, {awake} lost awake"
+            );
+        } else {
+            assert_eq!(zeros, 0, "awake: passes dropped");
+            awake = dropped;
+        }
+    }
+}
+
+/// A zero header where a slot was read written is the core asleep, but in a
+/// lap whose field wraps to 0, where a following slot of type id 0 is zero.
+#[test]
+fn judges_a_zero_header_but_where_the_lap_field_wraps() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let mut target = Simulated::new(1);
+    target.run(1000);
+    let recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+    let zeros = [0u32; 8];
+    let wraps = 0x8000 * SLOTS - SLOTS;
+    assert_eq!(super::decode::lap(wraps, ring), 0);
+    assert!((0..2).all(|slot| recorder.word(wraps + slot) != 0));
+    assert_eq!(recorder.zeroed(wraps - SLOTS, &zeros), Some(0));
+    assert_eq!(recorder.zeroed(wraps, &zeros), None);
+    assert_eq!(recorder.zeroed(wraps - 1, &zeros), Some(0));
+    assert_eq!(recorder.zeroed(wraps + SLOTS - 1, &zeros), Some(1));
 }
 
 /// A ring whose memory a script changes when the host reads the write index
@@ -428,7 +556,8 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
             } else {
                 target.stop();
                 recorder.finish(&mut target, &mut items).unwrap()
-            };
+            }
+            .expect("a target awake");
             writer
                 .write(&Record::Pass {
                     host_ns: 1_000 * pass,

@@ -17,6 +17,17 @@
 //! writers as it covers slots. A writer left over was lapped where the host
 //! raised no danger, so the events recorded may hold its bytes: it is
 //! reported suspect, between the write indexes of the two passes.
+//!
+//! On some parts (the STM32H5 measured) the probe reads the system bus as
+//! zeros while the core sleeps in WFI, the ring included. What no live ring
+//! can give is dropped, and the pass counted: counters at zero once they have
+//! counted, which settle nothing, or a slot's header at zero where a header
+//! was read before. A read is kept up to the event before its first such
+//! slot, the zeros may have started in its payload; counters at zero also
+//! drop the event that holds the last slot of the read before them. The
+//! slots dropped are read again by the next pass. Not seen: zeros the core
+//! slept and woke on within a read's last slot, between two passes; zeros in
+//! slots never written since reset; a ring read as zeros by `start`.
 
 use crate::capture::{self, Record, Writer};
 use crate::decode::{self, Decoded, Header};
@@ -78,6 +89,8 @@ pub struct Recorder<'a> {
     lapped: u32,
     pass_index: u32,
     suspects: u32,
+    /// The passes that read the target as zeros, its core asleep.
+    zeros: u32,
 }
 
 /// The events `start..end`, read unpublished then lapped by the ring: their
@@ -135,6 +148,7 @@ impl<'a> Recorder<'a> {
             lapped: 0,
             pass_index: 0,
             suspects: 0,
+            zeros: 0,
         };
         let (lapped, write_index) = recorder.counters(target)?;
         recorder.lapped = lapped;
@@ -180,6 +194,11 @@ impl<'a> Recorder<'a> {
         self.next
     }
 
+    /// The passes that read the target as zeros since recording started.
+    pub fn zeros(&self) -> u32 {
+        self.zeros
+    }
+
     /// The count of writers lapped and the write index, read in one go.
     fn counters(&self, target: &mut dyn Target) -> Result<(u32, u32)> {
         let mut words = [0u32; 2];
@@ -187,10 +206,44 @@ impl<'a> Recorder<'a> {
         Ok((words[1], words[0]))
     }
 
+    /// Whether counters read `lapped` and `write_index` are zeros where the
+    /// ring had counted. If so, the pass is counted, and the event holding
+    /// the last slot of the last pass's read is read again: the core may have
+    /// fallen asleep within that slot's payload, after its header was read.
+    fn read_as_zeros(&mut self, lapped: u32, write_index: u32) -> bool {
+        let zeros = (write_index == 0 && self.pass_index != 0) || (lapped == 0 && self.lapped != 0);
+        if zeros {
+            self.zeros += 1;
+            self.read_end = self.retreat(self.read_end);
+        }
+        zeros
+    }
+
+    /// The first index of the event the copy holds at `end - 1`, read from
+    /// `self.next` on: where a read that may end in zeros is trusted up to.
+    fn retreat(&self, end: u32) -> u32 {
+        let mut index = self.next;
+        while (end.wrapping_sub(index) as i32) > 0 {
+            let count = match self.header(index) {
+                Header::Head => self.count(index).unwrap_or(1),
+                _ => 1,
+            };
+            if (end.wrapping_sub(index.wrapping_add(count)) as i32) <= 0 {
+                return index;
+            }
+            index = index.wrapping_add(count);
+        }
+        end
+    }
+
     /// One pass: settles the last pass's read, then reads what was written
-    /// since. Returns the write index it read.
-    pub fn pass(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<u32> {
+    /// since. Returns the write index it read, or nothing if it read the
+    /// counters as zeros.
+    pub fn pass(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<Option<u32>> {
         let (lapped, write_index) = self.counters(target)?;
+        if self.read_as_zeros(lapped, write_index) {
+            return Ok(None);
+        }
         self.settle(write_index, items)?;
         self.account(lapped, write_index, items);
         self.lift(target, write_index)?;
@@ -201,39 +254,85 @@ impl<'a> Recorder<'a> {
         }
         let count = write_index.wrapping_sub(self.next);
         let start = self.next & (slots - 1);
-        if start + count <= slots {
-            self.read(target, start, start + count)?;
-        } else {
-            self.read(target, start, slots)?;
-            self.read(target, 0, start + count - slots)?;
+        let mut ranges = vec![(start, (start + count).min(slots))];
+        if start + count > slots {
+            ranges.push((0, start + count - slots));
         }
-        self.read_end = write_index;
-        Ok(write_index)
+        let mut index = self.next;
+        let mut end = write_index;
+        for (from, to) in ranges {
+            let words = self.fetch(target, from, to)?;
+            match self.zeroed(index, &words) {
+                Some(slot) => {
+                    self.store(from, &words[..slot as usize * 4]);
+                    self.zeros += 1;
+                    end = self.retreat(index.wrapping_add(slot));
+                    break;
+                }
+                None => self.store(from, &words),
+            }
+            index = index.wrapping_add(to - from);
+        }
+        self.read_end = end;
+        Ok(Some(write_index))
     }
 
     /// Settles the last pass's read: call once recording ends. Returns the
-    /// write index it read.
-    pub fn finish(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<u32> {
+    /// write index it read, or nothing if it read the counters as zeros: the
+    /// last pass's read is then left unsettled.
+    pub fn finish(&mut self, target: &mut dyn Target, items: &mut Vec<Item<'a>>) -> Result<Option<u32>> {
         let (lapped, write_index) = self.counters(target)?;
+        if self.read_as_zeros(lapped, write_index) {
+            self.flush(items);
+            return Ok(None);
+        }
         self.settle(write_index, items)?;
         self.account(lapped, write_index, items);
         self.flush(items);
-        Ok(write_index)
+        Ok(Some(write_index))
     }
 
-    /// Reads the slots at positions `from..to`.
+    /// Reads the slots at positions `from..to` into the copy.
     fn read(&mut self, target: &mut dyn Target, from: u32, to: u32) -> Result<()> {
-        if from == to {
-            return Ok(());
-        }
+        let words = self.fetch(target, from, to)?;
+        self.store(from, &words);
+        Ok(())
+    }
+
+    /// The words of the slots at positions `from..to`.
+    fn fetch(&self, target: &mut dyn Target, from: u32, to: u32) -> Result<Vec<u32>> {
         let mut words = vec![0u32; ((to - from) * SLOT_BYTES / 4) as usize];
-        let address = self.address + self.ring.slots_offset as u32 + from * SLOT_BYTES;
-        target.read_words(address, &mut words)?;
-        let bytes = &mut self.copy[(from * SLOT_BYTES) as usize..(to * SLOT_BYTES) as usize];
+        if from != to {
+            let address = self.address + self.ring.slots_offset as u32 + from * SLOT_BYTES;
+            target.read_words(address, &mut words)?;
+        }
+        Ok(words)
+    }
+
+    /// Puts `words`, the slots from position `from`, in the copy.
+    fn store(&mut self, from: u32, words: &[u32]) {
+        let bytes = &mut self.copy[(from * SLOT_BYTES) as usize..][..words.len() * 4];
         for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             *chunk = word.to_le_bytes();
         }
-        Ok(())
+    }
+
+    /// The first of `words`, the slots read for the indexes from `index` on,
+    /// whose header no ring can have, the core asleep: zero where the copy
+    /// holds a non-zero one. A header carries its index's lap, which starts
+    /// at 1, and a first slot its head bit: a written header is zero only on
+    /// a following slot of type id 0 once the lap field wraps to 0, and those
+    /// indexes are not judged. Counted from `words`' first slot. A run of
+    /// zeros that does not reach a header escapes it: a read's last slot is
+    /// covered by `retreat` when the next counters read as zeros.
+    fn zeroed(&self, index: u32, words: &[u32]) -> Option<u32> {
+        (0u32..)
+            .zip(words.chunks(4))
+            .find(|&(slot, words)| {
+                let index = index.wrapping_add(slot);
+                words[0] == 0 && self.word(index) != 0 && decode::lap(index, self.ring) != 0
+            })
+            .map(|(slot, _)| slot)
     }
 
     /// The header the copy holds at `index`'s position.
@@ -516,15 +615,21 @@ pub fn run(
         let host_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos() as u64);
+        let zeros = recorder.zeros();
         let write_index = if done {
             recorder.finish(target, &mut items)?
         } else {
             recorder.pass(target, &mut items)?
         };
         counts.2 += 1;
-        timeline.pass(host_ns, write_index);
-        if let Some(capture) = &mut capture {
-            capture.write(&Record::Pass { host_ns, write_index })?;
+        if zeros == 0 && recorder.zeros() > 0 {
+            eprintln!("warning: {}", ASLEEP);
+        }
+        if let Some(write_index) = write_index {
+            timeline.pass(host_ns, write_index);
+            if let Some(capture) = &mut capture {
+                capture.write(&Record::Pass { host_ns, write_index })?;
+            }
         }
         for item in items.drain(..) {
             let record = match &item {
@@ -567,16 +672,28 @@ pub fn run(
                 capture.finish()?;
             }
             eprintln!(
-                "{} events, {} slots lost, {} passes{}{}{}",
+                "{} events, {} slots lost, {} passes{}{}{}{}",
                 counts.0,
                 counts.1,
                 counts.2,
+                asleep(recorder.zeros()),
                 suspect(counts.3),
                 target::speed_text(target),
                 measured(timeline.measured())
             );
             return Ok(());
         }
+    }
+}
+
+/// What a target read as zeros means.
+const ASLEEP: &str = "the target read as zeros: its core is likely asleep (WFI), which on some parts hides its memory from the probe; keep its idle awake while tracing";
+
+/// The passes that read the target as zeros, for a recording's summary.
+fn asleep(zeros: u32) -> String {
+    match zeros {
+        0 => String::new(),
+        _ => format!(", {zeros} of them partly dropped: {ASLEEP}"),
     }
 }
 

@@ -60,6 +60,12 @@ find_program(KYMO_QEMU qemu-system-arm HINTS "C:/Program Files/qemu")
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../../host/target/release)
 find_package(Python3 COMPONENTS Interpreter)
 set(missing "")
+
+# The traced suite never sleeps (the adapter's idle_wait): no WFI in its code.
+add_test(NAME opsy_awake_${OPSY_TARGET}
+	COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/awake/awake.py
+		--objdump ${CMAKE_OBJDUMP} --image $<TARGET_FILE:opsy_qemu_tests>)
+
 foreach(tool KYMO_QEMU KYMO_HOST Python3_EXECUTABLE)
 	if(NOT ${tool})
 		list(APPEND missing ${tool})
@@ -90,7 +96,8 @@ endif()
 
 # An OpSy program on a NUCLEO-H563ZI (board/board.cpp), recorded through its
 # ST-Link and checked (board/board.py): with -DKYMO_OPSY_BOARD=<ST-Link serial
-# number>, on an M33 build without NDEBUG. Needs probe-rs to flash it.
+# number>, on an M33 build with -Os and NDEBUG, as an image ships. Needs
+# probe-rs to flash it.
 set(KYMO_OPSY_BOARD "" CACHE STRING "The serial number of the NUCLEO-H563ZI's ST-Link, to build and record board/")
 if(KYMO_OPSY_BOARD)
 	if(NOT OPSY_TARGET STREQUAL "m33")
@@ -113,5 +120,6 @@ if(KYMO_OPSY_BOARD)
 		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/board.py
 			--image $<TARGET_FILE:opsy_board> --host ${KYMO_HOST}
 			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
-	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 120)
+	# The adapter keeps the idle awake: the host never reads the target as zeros.
+	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "read as zeros")
 endif()
