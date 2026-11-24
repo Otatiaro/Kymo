@@ -818,3 +818,132 @@ fn the_task_on_the_core_is_known_between_losses_and_the_next_switch() {
         ]
     );
 }
+
+/// The CPU row of a hand trace: idle interrupted by nested handlers is
+/// busy, a task under a handler counts once, a handler run while the task
+/// on the core is unknown counts nowhere, and a handler still open runs to
+/// the end of the capture.
+#[test]
+fn the_cpu_stacks_handlers_at_any_depth_then_tasks_other_than_idle() {
+    use crate::load::{CpuBin, cpu_bins};
+    let catalogue = catalogue();
+    let trace = trace(
+        &catalogue,
+        0,
+        &[
+            ("tick", &[]),
+            ("enter_idle", &[]),
+            ("isr_enter", &[H]),
+            ("isr_enter", &[G]),
+            ("isr_exit", &[G]),
+            ("isr_exit", &[H]),
+            ("task_started", &[A]),
+            ("isr_enter", &[H]),
+            ("isr_exit", &[H]),
+            ("lost", &[]),
+            ("isr_enter", &[G]),
+            ("isr_exit", &[G]),
+            ("enter_idle", &[]),
+            ("isr_enter", &[H]),
+            ("tick", &[]),
+        ],
+    );
+    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    opsy.add(&trace.elements, 0);
+    let bin = |from, to, known, handlers, tasks| CpuBin {
+        from,
+        to,
+        known,
+        handlers,
+        tasks,
+    };
+    // Known from 10 to the loss at 80, and from 120 on; handlers 20-50,
+    // 70-80 and from 130; task A 60-80.
+    assert_eq!(
+        cpu_bins(&opsy.cpu(), 50, 0, (0, 150), (0, 150)),
+        [
+            bin(0, 50, 40, 30, 0),
+            bin(50, 100, 30, 10, 10),
+            bin(100, 150, 30, 20, 0)
+        ]
+    );
+}
+
+/// A random trace of switches, nested handlers and losses.
+fn random_steps(state: &mut u64) -> Vec<(&'static str, Vec<u32>)> {
+    let mut next = || {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    };
+    let (mut steps, mut open) = (Vec::new(), Vec::new());
+    for _ in 0..40 {
+        let step = match next() % 12 {
+            0 => ("lost", Vec::new()),
+            1 | 2 if open.is_empty() => ("task_started", vec![if next().is_multiple_of(2) { A } else { B }]),
+            3 if open.is_empty() => ("enter_idle", Vec::new()),
+            4..=6 if open.len() < 3 => {
+                let handler = [H, G][open.len() % 2];
+                open.push(handler);
+                ("isr_enter", vec![handler])
+            }
+            7..=9 if !open.is_empty() => ("isr_exit", vec![open.pop().unwrap()]),
+            _ => ("tick", Vec::new()),
+        };
+        steps.push(step);
+    }
+    steps
+}
+
+/// Over random traces, each cycle of the CPU row is the oracle's: known
+/// where a run covers it, handlers where a handler covers it, busy where a
+/// handler or a task other than idle does, the spans still open to the end.
+#[test]
+fn the_cpu_row_covers_each_cycle_as_the_oracle_does() {
+    let catalogue = catalogue();
+    let mut state = 0x1234_5678_9abc_def1u64;
+    let (mut idle_interrupted, mut hidden) = (0, 0);
+    for _ in 0..500 {
+        let first = if state.is_multiple_of(3) { 5 } else { 0 };
+        let steps = random_steps(&mut state);
+        let steps: Vec<(&str, &[u32])> = steps.iter().map(|(step, values)| (*step, values.as_slice())).collect();
+        let trace = trace(&catalogue, first, &steps);
+        let mut opsy = Opsy::new(&catalogue, first).unwrap();
+        opsy.add(&trace.elements, 0);
+        let cpu = opsy.cpu();
+        let open = opsy.open();
+        let closed = &opsy.closed;
+        let at = |covered: &Covered, cycle: i64| covered.until(cycle + 1) - covered.until(cycle) == 1;
+        let inside = |span: &Span, cycle: i64| span.from.cycles <= cycle && cycle < span.to.cycles;
+        let since = |span: &Span, cycle: i64| span.from.cycles <= cycle;
+        for cycle in -10..10 * steps.len() as i64 + 30 {
+            let run = closed
+                .runs
+                .iter()
+                .find(|run| inside(&run.span, cycle))
+                .map(|run| run.task)
+                .or_else(|| open.runs.iter().find(|run| since(&run.span, cycle)).map(|run| run.task));
+            let handler = closed.interrupts.iter().any(|interrupt| inside(&interrupt.span, cycle))
+                || open.interrupts.iter().any(|interrupt| since(&interrupt.span, cycle));
+            let known = run.is_some();
+            assert_eq!(at(&cpu.known, cycle), known, "known at {cycle}: {steps:?}");
+            assert_eq!(
+                at(&cpu.handlers, cycle),
+                known && handler,
+                "handlers at {cycle}: {steps:?}"
+            );
+            assert_eq!(
+                at(&cpu.busy, cycle),
+                known && (handler || run.flatten().is_some()),
+                "busy at {cycle}: {steps:?}"
+            );
+            idle_interrupted += usize::from(run == Some(None) && handler);
+            hidden += usize::from(!known && handler);
+        }
+    }
+    assert!(
+        idle_interrupted > 1000 && hidden > 1000,
+        "{idle_interrupted} cycles of idle interrupted, {hidden} of a handler while unknown"
+    );
+}

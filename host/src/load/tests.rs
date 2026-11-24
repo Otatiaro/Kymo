@@ -298,3 +298,115 @@ fn bins_narrower_than_a_cycle_are_a_cycle() {
     );
     assert_eq!(found.len(), 3);
 }
+
+/// Rows of overlapping spans, some open, as the oracle reads them: a cycle
+/// is covered when any of them covers it.
+fn rows(state: &mut u64, capture: (i64, i64)) -> Vec<Row> {
+    (0..1 + random(state) % 3).map(|_| row(state, capture)).collect()
+}
+
+fn union(rows: &[Row]) -> Covered {
+    Covered::union(
+        rows.iter().flat_map(|row| row.closed.iter().copied()),
+        rows.iter().filter_map(|row| row.open).min(),
+    )
+}
+
+/// The union of overlapping spans in any order covers each cycle any of
+/// them covers, from before the capture to after it.
+#[test]
+fn a_union_covers_the_cycles_any_span_covers() {
+    let mut state = 0x2545_f491_4f6c_dd1d;
+    let (mut overlapping, mut swallowed) = (0, 0);
+    for _ in 0..1000 {
+        let capture = (0, 1 + (random(&mut state) % 3000) as i64);
+        let rows = rows(&mut state, capture);
+        let union = union(&rows);
+        let open = rows.iter().filter_map(|row| row.open).min();
+        for cycle in capture.0 - 30..capture.1 + 30 {
+            let count = rows.iter().filter(|row| row.covers(cycle)).count();
+            assert_eq!(
+                union.until(cycle + 1) - union.until(cycle),
+                i64::from(count > 0),
+                "cycle {cycle}"
+            );
+            overlapping += usize::from(count > 1);
+        }
+        // A closed span still running when the open one starts.
+        swallowed += usize::from(open.is_some_and(|open| {
+            rows.iter()
+                .flat_map(|row| &row.closed)
+                .any(|&(from, to)| from < open && open < to)
+        }));
+    }
+    assert!(
+        overlapping > 1000 && swallowed > 100,
+        "{overlapping} cycles overlapping, {swallowed} closed spans running into the open one"
+    );
+}
+
+/// Every CPU bin is the oracle's: handlers, then tasks other than idle
+/// where no handler runs, both within the time known, never above it.
+#[test]
+fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
+    let mut state = 0x0bad_5eed_1234_5678;
+    let (mut both, mut stacked) = (0, 0);
+    for _ in 0..1000 {
+        let capture = (0, 1 + (random(&mut state) % 3000) as i64);
+        let (known, handlers, tasks) = (
+            row(&mut state, capture),
+            rows(&mut state, capture),
+            rows(&mut state, capture),
+        );
+        let known_covered = known.covered();
+        let handlers_covered = union(&handlers);
+        let busy = Covered::union(
+            handlers.iter().chain(&tasks).flat_map(|row| row.closed.iter().copied()),
+            handlers.iter().chain(&tasks).filter_map(|row| row.open).min(),
+        );
+        let cpu = Cpu {
+            handlers: handlers_covered.within(&known_covered),
+            busy: busy.within(&known_covered),
+            known: known_covered,
+        };
+        let width = 1 + (random(&mut state) % 200) as i64;
+        let found = cpu_bins(&cpu, width, 0, capture, capture);
+        let mut expected = Vec::new();
+        for from in (capture.0..capture.1).step_by(width as usize) {
+            let to = (from + width).min(capture.1);
+            let mut bin = CpuBin {
+                from,
+                to,
+                known: 0,
+                handlers: 0,
+                tasks: 0,
+            };
+            for cycle in from..to {
+                let any = |rows: &[Row]| rows.iter().any(|row| row.covers(cycle));
+                if known.covers(cycle) {
+                    bin.known += 1;
+                    if any(&handlers) {
+                        bin.handlers += 1;
+                    } else if any(&tasks) {
+                        bin.tasks += 1;
+                    }
+                }
+            }
+            both += usize::from(bin.handlers > 0 && bin.tasks > 0);
+            expected.push(bin);
+        }
+        assert_eq!(found, expected, "width {width} capture {capture:?}");
+        for bin in &found {
+            assert!(bin.handlers + bin.tasks <= bin.known, "{bin:?}");
+        }
+        stacked += usize::from(handlers.iter().any(|h| {
+            tasks
+                .iter()
+                .any(|t| (capture.0..capture.1).any(|c| h.covers(c) && t.covers(c) && known.covers(c)))
+        }));
+    }
+    assert!(
+        both > 1000 && stacked > 500,
+        "{both} bins with handlers and tasks, {stacked} cases with a handler over a task"
+    );
+}

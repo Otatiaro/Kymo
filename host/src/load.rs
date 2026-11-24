@@ -54,6 +54,35 @@ impl Covered {
         covered
     }
 
+    /// The cycles any of `spans` covers, which may overlap and come in any
+    /// order, and from the earliest `open` to the end of the capture.
+    pub fn union(spans: impl IntoIterator<Item = (i64, i64)>, open: Option<i64>) -> Covered {
+        let mut spans: Vec<_> = spans.into_iter().filter(|&(from, to)| from < to).collect();
+        spans.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (from, to) in spans {
+            match merged.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        let open = open.map(|open| {
+            merged
+                .iter()
+                .filter(|&&(_, to)| to >= open)
+                .map(|&(from, _)| from)
+                .fold(open, i64::min)
+        });
+        let mut union = Covered::default();
+        for (from, to) in merged {
+            if open.is_none_or(|open| to < open) {
+                union.push(from, to);
+            }
+        }
+        union.open(open);
+        union
+    }
+
     /// The spans, the open one last, ended at `i64::MAX`.
     fn spans(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
         self.from
@@ -142,6 +171,45 @@ pub fn bins(
             };
             (at, before) = (to, after);
             bin
+        })
+        .collect()
+}
+
+/// The CPU row: the time known and, within it, the time handlers run, at
+/// any depth, and the time busy, handlers or a task other than idle. Idle
+/// interrupted by a handler is busy.
+#[derive(Default)]
+pub struct Cpu {
+    pub known: Covered,
+    pub handlers: Covered,
+    pub busy: Covered,
+}
+
+/// A bin of the CPU row, from `from` to `to` cycles. Its stack, from the
+/// bottom: `handlers`, then `tasks` other than idle, then idle up to
+/// `known`; the rest of the bin is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuBin {
+    pub from: i64,
+    pub to: i64,
+    pub known: i64,
+    pub handlers: i64,
+    pub tasks: i64,
+}
+
+/// The CPU row's bins, as `bins` gives a row's.
+pub fn cpu_bins(cpu: &Cpu, width: i64, origin: i64, range: (i64, i64), capture: (i64, i64)) -> Vec<CpuBin> {
+    let handlers = bins(&cpu.handlers, &cpu.known, width, origin, range, capture);
+    let busy = bins(&cpu.busy, &cpu.known, width, origin, range, capture);
+    handlers
+        .into_iter()
+        .zip(busy)
+        .map(|(handlers, busy)| CpuBin {
+            from: handlers.from,
+            to: handlers.to,
+            known: handlers.known,
+            handlers: handlers.covered,
+            tasks: busy.covered - handlers.covered,
         })
         .collect()
 }
