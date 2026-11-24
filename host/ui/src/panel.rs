@@ -5,6 +5,7 @@
 use crate::meaning::Full;
 use crate::timeline::counted;
 use eframe::egui;
+use egui_extras::{Column as Size, TableBuilder};
 use kymo::load::Covered;
 use kymo::model::Trace;
 use kymo::stats::{self, Group, Instance, Point, Range, Report};
@@ -91,7 +92,7 @@ impl Panel {
         }
     }
 
-    /// The panel, its instances named short, with ull their names in full
+    /// The panel, its instances named short, with their names in full
     /// by kind and name shown.
     pub fn named(instances: Vec<Instance>, full: Full) -> Self {
         Self {
@@ -206,16 +207,32 @@ impl Panel {
                     });
                 });
         }
-        egui::ScrollArea::both()
-            .id_salt("table")
+        let height = ui.spacing().interact_size.y;
+        // A cell's text on one line, centred in its height; a numeric
+        // column's cells, header included, at its right.
+        let aligned = |ui: &mut egui::Ui, column: Column, add: &mut dyn FnMut(&mut egui::Ui)| {
+            let layout = if column.numeric() {
+                egui::Layout::right_to_left(egui::Align::Center)
+            } else {
+                egui::Layout::left_to_right(egui::Align::Center)
+            };
+            ui.with_layout(layout, add);
+        };
+        let mut table = TableBuilder::new(ui)
+            .id_salt("groups")
+            .striped(true)
+            .resizable(true)
             .auto_shrink(false)
-            .show(ui, |ui| {
-                egui::Grid::new("groups")
-                    .striped(true)
-                    .num_columns(Column::ALL.len())
-                    .spacing([16.0, 2.0])
-                    .show(ui, |ui| {
-                        for column in Column::ALL {
+            .column(Size::auto().at_least(80.0).clip(true))
+            .column(Size::auto().at_least(80.0).clip(true));
+        for _ in &Column::ALL[2..] {
+            table = table.column(Size::auto().at_least(60.0));
+        }
+        table
+            .header(height, |mut header| {
+                for column in Column::ALL {
+                    header.col(|ui| {
+                        aligned(ui, column, &mut |ui| {
                             let sorting = self.sort == column;
                             // Room for the triangle, drawn: the fonts have no arrow.
                             let name = if sorting {
@@ -230,11 +247,18 @@ impl Panel {
                             if button.clicked() {
                                 sort = Some(column);
                             }
-                        }
-                        ui.end_row();
-                        for &n in &order {
-                            let group = &report.groups[n];
-                            let picked = chosen_group == Some(n);
+                        });
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(height, order.len(), |mut row| {
+                    let n = order[row.index()];
+                    let group = &report.groups[n];
+                    let picked = chosen_group == Some(n);
+                    row.set_selected(picked);
+                    row.col(|ui| {
+                        aligned(ui, Column::Subject, &mut |ui| {
                             let subject = ui.selectable_label(picked, &group.subject);
                             let subject = match self.full.get(&(group.kind, group.subject.clone())) {
                                 Some(full) => subject.on_hover_text(full),
@@ -243,6 +267,10 @@ impl Panel {
                             if subject.clicked() {
                                 chosen = Some(key(group));
                             }
+                        });
+                    });
+                    row.col(|ui| {
+                        aligned(ui, Column::Metric, &mut |ui| {
                             let detail = group
                                 .detail
                                 .as_ref()
@@ -251,15 +279,19 @@ impl Panel {
                             if let Some(full) = detail {
                                 label.on_hover_text(full);
                             }
-                            for column in &Column::ALL[2..] {
-                                let text = cell(group, *column, frequency);
-                                match point(group, *column) {
+                        });
+                    });
+                    for &column in &Column::ALL[2..] {
+                        row.col(|ui| {
+                            aligned(ui, column, &mut |ui| {
+                                let text = cell(group, column, frequency);
+                                match point(group, column) {
                                     Some(point) => {
                                         if ui.link(text).on_hover_text(at(point)).clicked() {
                                             clicked = Some((n, point.clone()));
                                         }
                                     }
-                                    None if *column == Column::Excluded => {
+                                    None if column == Column::Excluded => {
                                         ui.label(text).on_hover_text(format!(
                                             "{} at a loss, {} on an overrun write, {} cut by the range",
                                             group.excluded_loss, group.excluded_suspect, group.cut
@@ -269,10 +301,10 @@ impl Panel {
                                         ui.label(text);
                                     }
                                 }
-                            }
-                            ui.end_row();
-                        }
-                    });
+                            });
+                        });
+                    }
+                });
             });
         if let Some(column) = sort {
             self.sort_by(column);

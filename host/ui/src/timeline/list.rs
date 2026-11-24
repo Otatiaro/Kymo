@@ -8,12 +8,15 @@ use super::view::centred;
 use crate::listing::Entry;
 use crate::palette::Palette;
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 use kymo::decode;
 use kymo::events::Pointee;
 use kymo::model::Element;
 
 /// The width of the bar that marks a loss or a suspect line, in pixels.
 const MARK: f32 = 4.0;
+/// The room a cell leaves around its text, in pixels.
+const CELL: f32 = 16.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Tab {
@@ -80,9 +83,6 @@ impl Timeline {
             ui.label(counted(entries.len() as u64, "line", "lines"));
         });
         ui.separator();
-        let names = self.rows.iter().map(|row| row.name.len()).max().unwrap_or_default();
-        // The widest time, the last event's.
-        let time = self.time(self.last()).len();
         let symbols = &self.catalogue.symbols;
         // A subject by the name its row shows, anything else as decode names it.
         let shown = |pointee: &Pointee, address: u64| {
@@ -92,89 +92,108 @@ impl Timeline {
                 .map(str::to_owned)
                 .or_else(|| symbols.name(pointee, address))
         };
-        // The line, and its fields in full when they differ.
-        let line = |entry: &Entry| -> (String, Option<String>) {
-            let at = self.time((entry.cycles - self.origin()) as f64);
+        // A line's cells: index, type, fields; a loss's or a suspect line's
+        // text in the fields, and the fields in full when they differ.
+        let cells = |entry: &Entry| -> (String, String, String, Option<String>) {
             match &self.trace.elements[entry.element] {
                 Element::Event { event, .. } => {
                     let mut fields = String::new();
                     decode::fields_named(&mut fields, &shown, event);
                     let mut full = String::new();
                     decode::fields(&mut full, symbols, event);
-                    let line = format!(
-                        "  {at:>time$}  {:>10}  {:<names$}  {fields}",
-                        event.index, event.event.name
-                    );
-                    (line, (full != fields).then_some(full))
+                    let full = (full != fields).then_some(full);
+                    (event.index.to_string(), event.event.name.clone(), fields, full)
                 }
-                other => (
-                    format!("  {at:>time$}  {:>10}  {}", "", marked(other).unwrap_or_default()),
-                    None,
-                ),
+                other => (String::new(), String::new(), marked(other).unwrap_or_default(), None),
             }
         };
-        let font = egui::TextStyle::Monospace;
-        ui.label(
-            egui::RichText::new(format!(
-                "  {:>time$}  {:>10}  {:<names$}  fields",
-                "time", "index", "type"
-            ))
-            .text_style(font.clone())
-            .strong(),
-        );
         let height = ui.spacing().interact_size.y;
         let palette = Palette::of(ui.visuals());
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let digit = ui.fonts_mut(|fonts| fonts.glyph_width(&font, '0'));
+        // The widest time, the last event's, and the widest index.
+        let time = digit * self.time(self.last()).len() as f32 + CELL;
+        let index = digit * 10.0 + CELL;
+        let names = digit * self.rows.iter().map(|row| row.name.len()).max().unwrap_or_default() as f32 + CELL;
+        let text = |ui: &mut egui::Ui, text: String, strong: bool| {
+            let text = egui::RichText::new(text).font(font.clone());
+            let text = if strong { text.strong() } else { text };
+            ui.add(egui::Label::new(text).selectable(false).extend());
+        };
+        // A cell's text on one line, centred in its height; a number's at
+        // the right.
+        let right = egui::Layout::right_to_left(egui::Align::Center);
+        let left = egui::Layout::left_to_right(egui::Align::Center);
         let mut clicked = None;
-        let mut area = egui::ScrollArea::both().id_salt("events").auto_shrink(false);
+        let mut table = TableBuilder::new(ui)
+            .id_salt("events")
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .auto_shrink(false)
+            .cell_layout(left)
+            .column(Column::initial(time).at_least(CELL))
+            .column(Column::initial(index).at_least(CELL))
+            .column(Column::initial(names).at_least(CELL).clip(true))
+            .column(Column::remainder().clip(true));
         if let Some(element) = reveal
             && let Some(n) = entries.iter().position(|entry| entry.element == element)
         {
-            let spacing = ui.spacing().item_spacing.y;
-            let shown = ui.available_height();
-            area = area.vertical_scroll_offset(((height + spacing) * n as f32 - shown / 2.0).max(0.0));
+            table = table.scroll_to_row(n, Some(egui::Align::Center));
         }
-        let font = font.resolve(ui.style());
-        area.show_rows(ui, height, entries.len(), |ui, rows| {
-            // A line is a band as wide as the list: shaded when chosen or
-            // hovered, its text on top.
-            let visuals = ui.visuals().clone();
-            for entry in &entries[rows] {
-                let chosen = self.chosen == Some(entry.element);
-                let color = if chosen {
-                    visuals.selection.stroke.color
-                } else {
-                    visuals.text_color()
-                };
-                let (text, full) = line(entry);
-                let galley = ui.painter().layout_no_wrap(text, font.clone(), color);
-                let width = ui.available_width().max(galley.size().x + MARK);
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
-                if chosen {
-                    ui.painter().rect_filled(rect, 0.0, visuals.selection.bg_fill);
-                } else if response.hovered() {
-                    ui.painter()
-                        .rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
-                }
-                let mark = match self.trace.elements[entry.element] {
-                    Element::Lost { .. } => Some(palette.loss),
-                    Element::Suspect { .. } => Some(palette.suspect),
-                    Element::Event { .. } => None,
-                };
-                if let Some(mark) = mark {
-                    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(MARK, rect.height()));
-                    ui.painter().rect_filled(bar, 0.0, mark);
-                }
-                let top = rect.top() + (height - galley.size().y) / 2.0;
-                ui.painter().galley(egui::pos2(rect.left(), top), galley, color);
-                let response = match full {
-                    Some(full) => response.on_hover_text(full),
-                    None => response,
-                };
-                if response.clicked() {
-                    clicked = Some(*entry);
-                }
-            }
-        });
+        table
+            .header(height, |mut header| {
+                header.col(|ui| {
+                    ui.with_layout(right, |ui| text(ui, "time".to_owned(), true));
+                });
+                header.col(|ui| {
+                    ui.with_layout(right, |ui| text(ui, "index".to_owned(), true));
+                });
+                header.col(|ui| {
+                    text(ui, "type".to_owned(), true);
+                });
+                header.col(|ui| {
+                    text(ui, "fields".to_owned(), true);
+                });
+            })
+            .body(|body| {
+                body.rows(height, entries.len(), |mut row| {
+                    let entry = entries[row.index()];
+                    row.set_selected(self.chosen == Some(entry.element));
+                    let (index, kind, fields, full) = cells(&entry);
+                    let mark = match self.trace.elements[entry.element] {
+                        Element::Lost { .. } => Some(palette.loss),
+                        Element::Suspect { .. } => Some(palette.suspect),
+                        Element::Event { .. } => None,
+                    };
+                    let at = self.time((entry.cycles - self.origin()) as f64);
+                    row.col(|ui| {
+                        if let Some(mark) = mark {
+                            let cell = ui.max_rect();
+                            let bar = egui::Rect::from_min_size(cell.min, egui::vec2(MARK, cell.height()));
+                            ui.painter().rect_filled(bar, 0.0, mark);
+                        }
+                        ui.with_layout(right, |ui| text(ui, at, false));
+                    });
+                    row.col(|ui| {
+                        ui.with_layout(right, |ui| text(ui, index, false));
+                    });
+                    row.col(|ui| {
+                        text(ui, kind, false);
+                    });
+                    row.col(|ui| {
+                        text(ui, fields, false);
+                    });
+                    let response = row.response();
+                    let response = match full {
+                        Some(full) => response.on_hover_text(full),
+                        None => response,
+                    };
+                    if response.clicked() {
+                        clicked = Some(entry);
+                    }
+                });
+            });
         if let Some(entry) = clicked {
             self.go_to_entry(entry);
         }
