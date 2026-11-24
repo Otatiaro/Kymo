@@ -1,13 +1,14 @@
 //! OpSy's meaning on the timeline: the spans `kymo::opsy` makes of the trace,
 //! a row of spans each for a task, the idle task, a handler at each depth, a
-//! mutex's holders and each of its waiters. They grow with the trace.
+//! mutex's holders and each of its waiters; and each task's time ready, with
+//! what woke it. They grow with the trace.
 
 use crate::names;
 use crate::spans::Spans;
 use kymo::events::Catalogue;
 use kymo::load::{Covered, Cpu};
 use kymo::model::Element;
-use kymo::opsy::{Opsy, Span};
+use kymo::opsy::{self, Edge, Opsy, Ready, Span};
 use kymo::target::Result;
 
 pub struct Meaning {
@@ -24,6 +25,10 @@ pub struct Meaning {
     pub holds: Vec<Spans>,
     /// By mutex: each waiting task and its waits.
     pub waits: Vec<Vec<(usize, Spans)>>,
+    /// Each task's time ready, as `kymo::opsy::ready` gives it, and by task,
+    /// places in it.
+    pub readies: Vec<Ready>,
+    pub ready: Vec<Spans>,
     /// The names the rows show: tasks, handlers, mutexes.
     pub names: Vec<Vec<String>>,
     pub load: Load,
@@ -41,6 +46,8 @@ impl Meaning {
             interrupts: Vec::new(),
             holds: Vec::new(),
             waits: Vec::new(),
+            readies: Vec::new(),
+            ready: Vec::new(),
             names: Vec::new(),
             load: Load::default(),
         }))
@@ -79,6 +86,12 @@ impl Meaning {
         }
         self.placed = [closed.runs.len(), closed.interrupts.len(), closed.holds.len()];
         let opsy = &self.opsy;
+        // Whole again: the time ready of an activation still open grows.
+        self.readies = opsy::ready(opsy);
+        self.ready.clear();
+        for (n, ready) in self.readies.iter().enumerate() {
+            grown(&mut self.ready, ready.task).push(ready.span, n);
+        }
         self.names = names::shown(&[&opsy.tasks.list, &opsy.handlers.list, &opsy.mutexes.list]);
         self.load = Load::of(opsy);
     }
@@ -147,6 +160,27 @@ impl Load {
     }
 }
 
+/// The time ready, a place in `readies`, that a run starting at `at` ends:
+/// in `ready`, the task's, the one reaching its cycles, if its activation
+/// holds the run's start.
+pub fn before_run(readies: &[Ready], ready: Option<&Spans>, at: Edge) -> Option<usize> {
+    let which = ready?.at(at.cycles, at.cycles)?;
+    let activation = readies[which].activation;
+    (activation.from.element <= at.element && at.element <= activation.to.element).then_some(which)
+}
+
+/// The wait for the first run of the activation that time ready `which` is
+/// part of: the activation's first time ready, when it starts with it.
+pub fn waited(readies: &[Ready], which: usize) -> Option<&Ready> {
+    let activation = readies[which].activation;
+    let first = readies[..=which]
+        .iter()
+        .rposition(|other| other.activation != activation)
+        .map_or(0, |before| before + 1);
+    let first = &readies[first];
+    (first.span.from == activation.from).then_some(first)
+}
+
 /// `list[n]`, the list grown to hold it.
 fn grown<T: Default>(list: &mut Vec<T>, n: usize) -> &mut T {
     if list.len() <= n {
@@ -154,3 +188,6 @@ fn grown<T: Default>(list: &mut Vec<T>, n: usize) -> &mut T {
     }
     &mut list[n]
 }
+
+#[cfg(test)]
+mod tests;

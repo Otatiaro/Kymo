@@ -127,6 +127,11 @@ pub struct Ready {
     pub task: usize,
     pub span: Span,
     pub open: bool,
+    /// The activation it is part of.
+    pub activation: Span,
+    /// The task_ready that starts the activation, in `Opsy::wakes`; none for
+    /// an activation that starts at a loss.
+    pub wake: Option<usize>,
 }
 
 /// Spans, each list in the order its spans closed.
@@ -892,12 +897,19 @@ pub fn ready(opsy: &Opsy) -> Vec<Ready> {
     let mut out = Vec::new();
     for (activation, open) in activations {
         let (task, span) = (activation.task, activation.span);
+        let wake = activation.reason.as_ref().and_then(|_| {
+            opsy.wakes
+                .binary_search_by_key(&span.from.element, |wake| wake.edge.element)
+                .ok()
+        });
         let mut push = |from: Edge, to: Edge, open| {
             if to.element > from.element {
                 out.push(Ready {
                     task,
                     span: Span { from, to },
                     open,
+                    activation: span,
+                    wake,
                 });
             }
         };

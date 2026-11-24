@@ -184,6 +184,11 @@ impl Timeline {
                 }
                 Line::Task(task) => {
                     let Some(meaning) = meaning else { continue };
+                    // The time ready, a thin bar at the foot of the row: the
+                    // runs, never at the same cycles, are drawn over it.
+                    if let Some(ready) = task.and_then(|task| meaning.ready.get(task)) {
+                        bars.paint(Some(ready), std::iter::empty(), low - READY, low, palette.ready);
+                    }
                     let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
                     let open = open.runs.iter().filter(|run| run.task == task).map(|run| run.span);
                     bars.paint(
@@ -314,8 +319,26 @@ impl Timeline {
         self.painted = began.elapsed().as_secs_f64() * 1e3;
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
-            && let Some(hovered) = self.hovered(&view, area, pointer, &lines, &open, &drawn_rows)
+            && let Some((hovered, arrow)) = self.hovered(&view, area, pointer, &lines, &open, &drawn_rows)
         {
+            // The wake, from the line of what woke the task to the task's
+            // line, both shown; at the wake's column.
+            let row = |line: Line| lines.iter().position(|&other| other == line);
+            let to = lines
+                .get(((pointer.y - area.top()) / ROW) as usize)
+                .and_then(|&line| row(line));
+            if let Some((arrow, from, to)) = arrow.and_then(|arrow| Some((arrow, row(arrow.from)?, to?))) {
+                let middle = |n: usize| area.top() + (n as f32 + 0.5) * ROW;
+                let x = view.column(arrow.cycles) + 0.5;
+                if x >= area.left() && x < area.right() {
+                    let (from, to) = (middle(from), middle(to));
+                    painter.arrow(
+                        egui::pos2(x, from),
+                        egui::vec2(0.0, to - from),
+                        Stroke::new(1.5, palette.wake),
+                    );
+                }
+            }
             response.on_hover_ui_at_pointer(|ui| {
                 ui.label(egui::RichText::new(hovered).monospace());
             });
@@ -357,6 +380,9 @@ impl Timeline {
         );
     }
 }
+
+/// The height of the bar of a task's time ready, in pixels.
+const READY: f32 = 3.0;
 
 /// The rectangles of a frame's rows, in one mesh.
 struct Bars<'a> {

@@ -36,6 +36,12 @@ per mutex, held, with its owner named where it fits, or waited for
 priority at the pointer, left out until an event gives it and from a loss
 to the next, and the last events up to the switch that ends it.
 
+Under a task's runs, a thin grey bar marks its time ready: woken, waiting
+for the core. Hovering a run or the bar shows what woke the task, why, when,
+and how long it waited for its first run, with an arrow from the row of the
+handler or task that woke it. A handler without Kymo's hooks is seen as the
+task it interrupts.
+
 Their first row is the CPU's load: in each bin of a few pixels, the share of
 the time known that handlers run, then tasks other than idle, stacked; the
 time unknown, around losses, hatched above. Zoomed out, the other rows show
