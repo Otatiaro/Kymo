@@ -1,8 +1,8 @@
 //! Kymo command line.
 
-use kymo::model::Trace;
+use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{bench, capture, decode, elf, events, opsy, record};
+use kymo::{bench, capture, decode, elf, events, opsy, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -12,6 +12,7 @@ usage: kymo events <elf>
        kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--opsy]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
+       kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--worst <n>] [--json]
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.
@@ -54,6 +55,23 @@ record options:
   --clock <Hz>       the cycle counter's frequency, kept in the capture;
                      without it, measured
 
+stats: OpSy's statistics over a capture of an image built with Kymo's OpSy
+hooks, or over its range from --from to --to seconds after its first event.
+For each task, of each activation, from its task_ready to the event that
+makes it not ready: wake latency (in total and by wake reason), time
+preempted by tasks and by handlers, net and gross execution, response time;
+and the period, from a task_ready to the next. For each handler: gross and
+net duration, period. For each mutex: holds and waits, by task and in total.
+A line each: the count, the min, the percentiles 50, 90 and 99 by nearest
+rank, the max, the mean; the jitter of a period, max - min; the share of the
+time known that a net execution takes. An instance that touches a loss or
+covers an overrun write is excluded and counted: the high values are then a
+lower bound, marked >=. One cut by the range, or open at the end, is counted
+as cut. --json prints the same, with each histogram and the --worst
+instances (default 10), as host/schema/stats.schema.json describes. Exits
+with 0 when the statistics are printed, losses or not; 1 on a capture or an
+image it cannot read; 2 on a command line it cannot parse, for any command.
+
 bench: measures how fast a probe drains the trace ring of the bench image,
 and how fast SWO carries the same events with --swo-baud, and whether the
 cycle counter keeps counting once the probe leaves.
@@ -74,9 +92,89 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(if error.is::<Usage>() { 2 } else { 1 })
         }
     }
+}
+
+/// A command line that does not parse.
+#[derive(Debug)]
+struct Usage(String);
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Usage {}
+
+fn usage(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(Usage(message.into()))
+}
+
+/// The value of `option`, parsed.
+fn parsed<T: std::str::FromStr>(option: &str, value: Option<String>) -> Result<T> {
+    let value = value.ok_or_else(|| usage(format!("{option} needs a value")))?;
+    value
+        .parse()
+        .map_err(|_| usage(format!("{option}: cannot read {value}")))
+}
+
+/// OpSy's statistics of the capture `copy` of the image `elf`.
+fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> Result<()> {
+    let mut clock = None;
+    let mut from: Option<f64> = None;
+    let mut to: Option<f64> = None;
+    let mut worst = 10;
+    let mut json = false;
+    while let Some(option) = arguments.next() {
+        match option.as_str() {
+            "--json" => json = true,
+            "--from" => from = Some(parsed(&option, arguments.next())?),
+            "--to" => to = Some(parsed(&option, arguments.next())?),
+            "--clock" => clock = Some(parsed(&option, arguments.next())?),
+            "--worst" => worst = parsed(&option, arguments.next())?,
+            _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
+        }
+    }
+    let catalogue = catalogue(Path::new(elf))?;
+    let bytes = std::fs::read(copy).map_err(|error| format!("{copy}: {error}"))?;
+    if !capture::is_capture(&bytes) {
+        return Err(format!("{copy} is not a capture of kymo record").into());
+    }
+    let trace = Trace::read(&catalogue, &bytes, clock)?;
+    let mut opsy = opsy::Opsy::new(&catalogue, trace.first)?;
+    if !opsy.traced() {
+        return Err("the image has no OpSy hook events".into());
+    }
+    opsy.add(&trace.elements, 0);
+    let origin = trace.elements.iter().find_map(|element| match element {
+        Element::Event { cycles, .. } => Some(*cycles),
+        _ => None,
+    });
+    let cycles = |seconds: Option<f64>| -> Result<Option<i64>> {
+        let Some(seconds) = seconds else {
+            return Ok(None);
+        };
+        let hz = trace
+            .frequency
+            .ok_or("--from and --to are in seconds: give the capture's frequency with --clock")?;
+        Ok(Some(origin.unwrap_or(0) + (seconds * hz).round() as i64))
+    };
+    let range = stats::Range {
+        from: cycles(from)?,
+        to: cycles(to)?,
+    };
+    let report = stats::compute(&trace, &opsy::instances(&opsy), &opsy.contradictions, range, worst);
+    if json {
+        println!("{}", stats::json(&report));
+    } else {
+        for line in stats::text(&report) {
+            println!("{line}");
+        }
+    }
+    Ok(())
 }
 
 /// The catalogue of the image at `path`, its warnings printed.
@@ -96,14 +194,14 @@ fn run() -> Result<()> {
         Some("events") => {
             let elf = match (arguments.next(), arguments.next()) {
                 (Some(elf), None) => PathBuf::from(elf),
-                _ => return Err(USAGE.into()),
+                _ => return Err(usage(USAGE)),
             };
             events::print(&catalogue(&elf)?);
             return Ok(());
         }
         Some("decode") => {
             let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
-                return Err(USAGE.into());
+                return Err(usage(USAGE));
             };
             let mut channel = None;
             let mut clock = None;
@@ -113,11 +211,11 @@ fn run() -> Result<()> {
                     spans = true;
                     continue;
                 }
-                let value = arguments.next().ok_or_else(|| format!("{option} needs a value"))?;
+                let value = arguments.next();
                 match option.as_str() {
-                    "--channel" => channel = Some(value),
-                    "--clock" => clock = Some(value.parse()?),
-                    _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
+                    "--channel" => channel = Some(parsed::<String>(&option, value)?),
+                    "--clock" => clock = Some(parsed(&option, value)?),
+                    _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
                 }
             }
             let catalogue = catalogue(Path::new(&elf))?;
@@ -148,7 +246,13 @@ fn run() -> Result<()> {
             decode::print(&catalogue, write_index, &decoded, clock);
             return Ok(());
         }
-        _ => return Err(USAGE.into()),
+        Some("stats") => {
+            let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
+                return Err(usage(USAGE));
+            };
+            return stats(&elf, &copy, arguments);
+        }
+        _ => return Err(usage(USAGE)),
     }
     let mut backend = None;
     let mut probe = None;
@@ -163,33 +267,34 @@ fn run() -> Result<()> {
     let mut clock = None;
     let mut channel = None;
     while let Some(option) = arguments.next() {
-        let mut value = || arguments.next().ok_or_else(|| format!("{option} needs a value"));
+        let value = arguments.next();
+        let given = || -> Result<String> { parsed(&option, value.clone()) };
         match option.as_str() {
             "--probe" => {
-                let name = value()?;
-                backend = Some(Backend::parse(&name).ok_or_else(|| format!("unknown probe {name}"))?);
+                let name = given()?;
+                backend = Some(Backend::parse(&name).ok_or_else(|| usage(format!("unknown probe {name}")))?);
             }
-            "--probe-id" => probe = Some(value()?),
-            "--chip" => chip = Some(value()?),
-            "--elf" => elf = Some(PathBuf::from(value()?)),
-            "--speed" => speed_khz = value()?.parse()?,
-            "--step" => step = value()?.parse()?,
-            "--max-rate" => max_events_per_tick = value()?.parse()?,
-            "--swo-baud" => swo_baud = Some(value()?.parse()?),
-            "--duration" => duration = Some(Duration::from_secs_f64(value()?.parse()?)),
-            "--out" => out = Some(PathBuf::from(value()?)),
-            "--clock" => clock = Some(value()?.parse()?),
-            "--channel" => channel = Some(value()?),
-            _ => return Err(format!("unknown option {option}\n\n{USAGE}").into()),
+            "--probe-id" => probe = Some(given()?),
+            "--chip" => chip = Some(given()?),
+            "--elf" => elf = Some(PathBuf::from(given()?)),
+            "--speed" => speed_khz = parsed(&option, value)?,
+            "--step" => step = parsed(&option, value)?,
+            "--max-rate" => max_events_per_tick = parsed(&option, value)?,
+            "--swo-baud" => swo_baud = Some(parsed(&option, value)?),
+            "--duration" => duration = Some(Duration::from_secs_f64(parsed(&option, value)?)),
+            "--out" => out = Some(PathBuf::from(given()?)),
+            "--clock" => clock = Some(parsed(&option, value)?),
+            "--channel" => channel = Some(given()?),
+            _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
         }
     }
     let connection = Connection {
-        backend: backend.ok_or(USAGE)?,
+        backend: backend.ok_or_else(|| usage(USAGE))?,
         probe,
         chip,
         speed_khz,
     };
-    let elf_path = elf.ok_or(USAGE)?;
+    let elf_path = elf.ok_or_else(|| usage(USAGE))?;
     if command.as_deref() == Some("record") {
         let catalogue = catalogue(&elf_path)?;
         let ring = catalogue.ring(channel.as_deref())?;

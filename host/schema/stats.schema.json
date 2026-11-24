@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "kymo stats --json",
+  "description": "Statistics of a range of a capture. Durations and instants are in cycles of the trace's cycle counter; seconds are since the first event, at the frequency given, null without one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "frequency", "from", "to", "origin", "known", "losses", "suspects", "contradictions", "groups"],
+  "properties": {
+    "schema": { "const": "kymo-stats" },
+    "version": { "const": 1 },
+    "frequency": { "type": ["number", "null"], "description": "The frequency of the seconds, in hertz." },
+    "from": { "type": "integer", "description": "The range's start, within the trace's events." },
+    "to": { "type": "integer", "description": "The range's end, within the trace's events." },
+    "origin": { "type": "integer", "description": "The cycles of the first event, where the seconds start." },
+    "known": { "type": "integer", "minimum": 0, "description": "The range less what its losses hid." },
+    "losses": { "type": "integer", "minimum": 0 },
+    "suspects": { "type": "integer", "minimum": 0, "description": "The writers reported overrun in the range." },
+    "contradictions": { "type": "integer", "minimum": 0 },
+    "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } }
+  },
+  "$defs": {
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "subject", "metric", "detail", "count", "excluded_loss", "excluded_suspect", "cut", "lower_bound", "jitter", "share", "distribution"],
+      "properties": {
+        "kind": { "type": "string", "description": "task, handler or mutex." },
+        "subject": { "type": "string" },
+        "metric": { "type": "string" },
+        "detail": { "type": ["string", "null"], "description": "What divides the metric further: a wake reason, a task; null for its total." },
+        "count": { "type": "integer", "minimum": 0, "description": "The instances counted." },
+        "excluded_loss": { "type": "integer", "minimum": 0, "description": "The instances that touch a loss." },
+        "excluded_suspect": { "type": "integer", "minimum": 0, "description": "The instances that cover an overrun write." },
+        "cut": { "type": "integer", "minimum": 0, "description": "The instances cut by the range, or open at the end." },
+        "lower_bound": { "type": "boolean", "description": "Whether instances were excluded: the max and the high percentiles are then a lower bound." },
+        "jitter": { "type": ["integer", "null"], "description": "Max - min, for a period." },
+        "share": { "type": ["number", "null"], "description": "The total over the time known, for a net execution." },
+        "distribution": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/distribution" }], "description": "null without an instance counted." }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "p50", "p90", "p99", "max", "mean", "total", "histogram", "worst"],
+      "properties": {
+        "min": { "$ref": "#/$defs/point" },
+        "p50": { "type": "integer", "description": "The value of rank ceil(0.5 n) among the sorted values." },
+        "p90": { "type": "integer" },
+        "p99": { "type": "integer" },
+        "max": { "$ref": "#/$defs/point" },
+        "mean": { "type": "number" },
+        "total": { "type": "integer" },
+        "histogram": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["width", "first", "counts"],
+          "properties": {
+            "width": { "type": "integer", "minimum": 1, "description": "1, 2 or 5 x 10^n cycles." },
+            "first": { "type": "integer", "description": "The first bin's lower bound, a multiple of the width." },
+            "counts": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+          }
+        },
+        "worst": { "type": "array", "items": { "$ref": "#/$defs/point" }, "description": "The highest values, the earliest first among equals." }
+      }
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "index", "cycles", "seconds"],
+      "description": "A value, and where its instance starts.",
+      "properties": {
+        "value": { "type": "integer" },
+        "index": { "type": "integer", "minimum": 0, "description": "The index of the instance's first event." },
+        "cycles": { "type": "integer" },
+        "seconds": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

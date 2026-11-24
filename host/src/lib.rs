@@ -11,6 +11,7 @@ pub mod model;
 pub mod opsy;
 pub mod record;
 mod ring;
+pub mod stats;
 mod swo;
 pub mod symbols;
 pub mod target;
