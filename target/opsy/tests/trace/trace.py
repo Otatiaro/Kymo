@@ -21,10 +21,14 @@ that:
   waiter handed the mutex it was blocked on, or a task whose wait on a
   condition ends, taking back the mutex it waited with or blocking on it;
 - every isr_exit closes the last isr_enter still open, of the same handler;
+- every task_priority_changed moves the task's priority away from the last
+  one task_added or task_priority_changed gave it, and the suite's mutex
+  donations make the priority both rise and drop;
 - every family on by default was recorded.
 
-After a loss, the running task, the waiting ones and the open interrupts are
-unknown until seen again: a check that needs them is skipped meanwhile.
+After a loss, the running task, the waiting ones, the open interrupts and the
+priorities are unknown until seen again: a check that needs them is skipped
+meanwhile.
 """
 
 import argparse
@@ -109,10 +113,12 @@ def check(output: str) -> list[str]:
     waiting = set()
     known = None  # after a loss: the tasks put on the core since, whether they wait is known
     open_isrs = []  # None at the bottom when interrupts may have opened during a loss
-    counts = {"running": 0, "waiting": 0, "isr_exit": 0}
+    priorities = {}  # task -> its priority, lower is higher; only those seen since the last loss
+    counts = {"running": 0, "waiting": 0, "isr_exit": 0, "priority_raised": 0, "priority_dropped": 0}
     for line, name, fields in items:
         if name is None:
             running, known, open_isrs = UNKNOWN, set(), [None]
+            priorities.clear()
             continue
         if not name.startswith(PREFIX) or name[len(PREFIX):] not in EVENTS:
             errors.append(f"{line}: not an event of the adapter")
@@ -152,6 +158,16 @@ def check(output: str) -> list[str]:
             waiting.discard(values["task"])
             if known is not None:
                 known.add(values["task"])
+        if name == "task_added":
+            priorities[values["task"]] = int(values["priority"], 0)
+        elif name == "task_priority_changed":
+            priority = int(values["priority"], 0)
+            previous = priorities.get(values["task"])
+            if previous == priority:
+                errors.append(f"{line}: the priority of {values['task']} did not move")
+            elif previous is not None:
+                counts["priority_raised" if priority < previous else "priority_dropped"] += 1
+            priorities[values["task"]] = priority
         if name == "isr_enter":
             open_isrs.append(values["handler"])
         elif name == "isr_exit":
@@ -165,7 +181,8 @@ def check(output: str) -> list[str]:
     losses = sum(name is None for _, name, _ in items)
     print(f"{len(items) - losses} events, {losses} losses, families {sorted(families)}, "
           f"{counts['running']} running and {counts['waiting']} waiting tasks checked, "
-          f"{counts['isr_exit']} interrupt exits checked")
+          f"{counts['isr_exit']} interrupt exits checked, priority raised "
+          f"{counts['priority_raised']} and dropped {counts['priority_dropped']} times")
     for family in sorted(DEFAULT_FAMILIES - families):
         errors.append(f"never recorded: family {family}")
     if 0 in counts.values():

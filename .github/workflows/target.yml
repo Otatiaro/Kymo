@@ -13,7 +13,7 @@ env:
   TOOLCHAIN_VERSION: '16.2.0-1'
   # The OpSy the adapter is tested against. A change on OpSy's side reaches
   # Kymo when this moves.
-  OPSY_COMMIT: a256e74a33aef18c22c9a263cb7eeb30f55ebe26
+  OPSY_COMMIT: db01fd80420c9741469f4919b3a4905e249a921f
 
 # The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
 # writes and the control word under preemption, event layouts read by the host
