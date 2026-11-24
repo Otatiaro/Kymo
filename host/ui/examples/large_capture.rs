@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     let catalogue = events::read(&PathBuf::from(elf))?;
     let bytes = std::fs::read(input)?;
     let wanted: usize = wanted.parse()?;
-    let (header, records) = capture::read(&bytes)?;
+    let capture::Capture { header, records, .. } = capture::read(&bytes)?;
     let ring = catalogue.ring(Some(&header.channel))?;
     let events: Vec<(u32, &[u8])> = records
         .iter()
