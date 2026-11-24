@@ -113,4 +113,13 @@ impl<'a> Trace<'a> {
             .filter(|element| matches!(element, Element::Event { .. }))
             .count()
     }
+
+    /// The slots the events take, and the indexes lost.
+    pub fn slots(&self) -> (u64, u64) {
+        self.elements.iter().fold((0, 0), |(taken, lost), element| match element {
+            Element::Event { event, .. } => (taken + decode::slots_for(event.event.size), lost),
+            Element::Lost { from, to } => (taken, lost + u64::from(to.wrapping_sub(*from))),
+            Element::Suspect { .. } => (taken, lost),
+        })
+    }
 }

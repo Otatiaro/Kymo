@@ -181,11 +181,16 @@ pub fn print(catalogue: &Catalogue, write_index: u32, events: &[Decoded], clock:
     }
 }
 
-/// One event's line: its index, its cycles (its timestamp extended to 64
-/// bits), the seconds since the first event or `-` without a frequency, its
-/// type and each field's value.
+/// One event's line: its index, or the range of its slots when it takes more
+/// than one, its cycles (its timestamp extended to 64 bits), the seconds since
+/// the first event or `-` without a frequency, its type and each field's value.
 pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f64>) -> String {
-    let mut line = format!("event {} {cycles} ", decoded.index);
+    let mut line = format!("event {}", decoded.index);
+    let slots = slots_for(decoded.event.size) as u32;
+    if slots > 1 {
+        let _ = write!(line, "-{}", decoded.index.wrapping_add(slots - 1));
+    }
+    let _ = write!(line, " {cycles} ");
     match seconds {
         Some(seconds) => {
             let _ = write!(line, "{seconds:.9}");
