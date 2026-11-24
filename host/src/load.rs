@@ -1,16 +1,13 @@
 //! The load of a row over time: how many cycles its spans cover in each bin
-//! of a view. A bin lasts 1, 2 or 5 × 10ⁿ cycles, the shortest that is a few
-//! pixels wide, and bins are counted from the capture's origin, not from the
-//! view's edge: panning changes neither their bounds nor their values. The
+//! of a view. A bin lasts 1, 2 or 5 × 10ⁿ cycles, the shortest that is as
+//! wide as the view asks, and bins are counted from the capture's origin, not
+//! from the view's edge: panning changes neither their bounds nor their values. The
 //! cycles a row covers before any point are a prefix sum and a binary search
 //! away, so a bin's count is exact to the cycle at any zoom.
 //!
 //! A row's share of a bin is over the time its state is known: a loss hides
 //! it, and only the next event that gives the state again makes it known.
 //! A capture records one ring, so a loss hides every row it shows.
-
-/// The narrowest a bin is drawn, in pixels.
-pub const PIXELS: f64 = 4.0;
 
 /// The spans of a row, which do not overlap, in order, and the one still
 /// open at the end of the capture, if any.
@@ -41,7 +38,34 @@ impl Covered {
 
     /// The cycles covered before `at`.
     pub fn until(&self, at: i64) -> i64 {
-        let n = self.to.partition_point(|&to| to <= at);
+        self.before(at, self.to.partition_point(|&to| to <= at))
+    }
+
+    /// The cycles covered between each two successive `edges`, which come
+    /// in order.
+    pub fn counts(&self, edges: &[i64]) -> Vec<i64> {
+        let mut ended = 0;
+        let until: Vec<i64> = edges.iter().map(|&at| self.until_from(at, &mut ended)).collect();
+        until.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    /// The cycles covered before `at`, as `until` counts them, when `at` is
+    /// no earlier than the point `ended` was last moved for: the spans ended
+    /// by `at` are searched from `ended` forward, in steps that double, and
+    /// `ended` moves past them. Points close in time cost a few steps each.
+    fn until_from(&self, at: i64, ended: &mut usize) -> i64 {
+        let to = &self.to[*ended..];
+        let mut step = 1;
+        while step < to.len() && to[step - 1] <= at {
+            step *= 2;
+        }
+        let low = step / 2;
+        *ended += low + to[low..step.min(to.len())].partition_point(|&to| to <= at);
+        self.before(at, *ended)
+    }
+
+    /// The cycles covered before `at`, `n` the number of spans it ends.
+    fn before(&self, at: i64, n: usize) -> i64 {
         let mut covered = n.checked_sub(1).map_or(0, |last| self.through[last]);
         if n < self.from.len() && self.from[n] < at {
             covered += at - self.from[n];
@@ -152,10 +176,9 @@ impl Covered {
     }
 }
 
-/// The cycles a bin lasts in a view of `per_pixel` cycles per pixel: the
-/// shortest 1, 2 or 5 × 10ⁿ cycles at least `PIXELS` wide.
-pub fn width(per_pixel: f64) -> i64 {
-    let wanted = PIXELS * per_pixel;
+/// The cycles a bin lasts when it should last `wanted` cycles: the
+/// shortest 1, 2 or 5 × 10ⁿ cycles that is no shorter, a cycle at least.
+pub fn width(wanted: f64) -> i64 {
     let mut decade: i64 = 1;
     loop {
         for width in [decade, 2 * decade, 5 * decade] {
@@ -177,10 +200,25 @@ pub struct Bin {
     pub known: i64,
 }
 
-/// The bins of `width` cycles counted from `origin` that hold cycles of
-/// `range` within `capture`, both from their first cycle to the one after
-/// their last: each cut to the capture, with the cycles `covered` and
-/// `known` cover in it. `covered` lies within `known` (`Covered::within`).
+/// The edges of the bins of `width` cycles counted from `origin` that hold
+/// cycles of `range` within `capture`, both from their first cycle to the
+/// one after their last: the first bin's start, then each bin's end, each
+/// cut to the capture. Empty when no bin holds any.
+pub fn edges(width: i64, origin: i64, range: (i64, i64), capture: (i64, i64)) -> Vec<i64> {
+    let (low, high) = (range.0.max(capture.0), range.1.min(capture.1));
+    if low >= high {
+        return Vec::new();
+    }
+    let first = (low - origin).div_euclid(width);
+    let last = (high - 1 - origin).div_euclid(width);
+    std::iter::once((origin + first * width).max(capture.0))
+        .chain((first..=last).map(|n| (origin + (n + 1) * width).min(capture.1)))
+        .collect()
+}
+
+/// The bins `edges` gives, as `edges` takes its arguments, with the cycles
+/// `covered` and `known` cover in each. `covered` lies within `known`
+/// (`Covered::within`).
 pub fn bins(
     covered: &Covered,
     known: &Covered,
@@ -189,26 +227,16 @@ pub fn bins(
     range: (i64, i64),
     capture: (i64, i64),
 ) -> Vec<Bin> {
-    let (low, high) = (range.0.max(capture.0), range.1.min(capture.1));
-    if low >= high {
-        return Vec::new();
-    }
-    let first = (low - origin).div_euclid(width);
-    let last = (high - 1 - origin).div_euclid(width);
-    let mut at = (origin + first * width).max(capture.0);
-    let mut before = (covered.until(at), known.until(at));
-    (first..=last)
-        .map(|n| {
-            let (from, to) = (at, (origin + (n + 1) * width).min(capture.1));
-            let after = (covered.until(to), known.until(to));
-            let bin = Bin {
-                from,
-                to,
-                covered: after.0 - before.0,
-                known: after.1 - before.1,
-            };
-            (at, before) = (to, after);
-            bin
+    let edges = edges(width, origin, range, capture);
+    edges
+        .windows(2)
+        .zip(covered.counts(&edges))
+        .zip(known.counts(&edges))
+        .map(|((pair, covered), known)| Bin {
+            from: pair[0],
+            to: pair[1],
+            covered,
+            known,
         })
         .collect()
 }

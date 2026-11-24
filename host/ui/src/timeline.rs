@@ -32,7 +32,7 @@ use kymo::model::Trace;
 use kymo::stats;
 use kymo::target::Result;
 use list::Tab;
-use load::Mode;
+use load::{Binning, Mode};
 use measure::Measure;
 use rows::{Mark, Row};
 use view::{clamped, whole, widest};
@@ -105,6 +105,8 @@ pub struct Timeline {
     moving: bool,
     /// How the kernel's rows are drawn.
     mode: Mode,
+    /// How the load view bins time.
+    binning: Binning,
     /// The event list's lines, the range it shows, the element clicked in
     /// it and the one to scroll to.
     list: Events,
@@ -159,6 +161,7 @@ impl Timeline {
             picked: None,
             moving: false,
             mode: Mode::Auto,
+            binning: Binning::default(),
             list: Events::default(),
             listed: None,
             chosen: None,

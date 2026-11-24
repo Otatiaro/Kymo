@@ -1,7 +1,7 @@
 //! The toolbar: the capture, the range shown, and the view's controls.
 
 use super::Timeline;
-use super::load::Mode;
+use super::load::{Mode, Statistic};
 use eframe::egui;
 
 impl Timeline {
@@ -32,6 +32,16 @@ impl Timeline {
                 if self.meaning.is_some() {
                     ui.separator();
                     mode_choice(ui, &mut self.mode);
+                    ui.separator();
+                    statistic_choice(ui, &mut self.binning.statistic);
+                    ui.separator();
+                    ui.add(
+                        egui::DragValue::new(&mut self.binning.pixels)
+                            .range(1..=256)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text("The narrowest a bin of the load is drawn");
+                    ui.label("Bin");
                 }
             });
         });
@@ -76,6 +86,19 @@ fn theme_menu(ui: &mut egui::Ui) {
 fn mode_choice(ui: &mut egui::Ui, mode: &mut Mode) {
     for (choice, name) in [(Mode::Load, "Load"), (Mode::Bars, "Bars"), (Mode::Auto, "Auto")] {
         ui.selectable_value(mode, choice, name);
+    }
+}
+
+/// The statistic each bin of the load shows, right to left.
+fn statistic_choice(ui: &mut egui::Ui, chosen: &mut Statistic) {
+    for (statistic, title, meaning) in [
+        (Statistic::Max, "Max", "the sub-bin of the largest share"),
+        (Statistic::Min, "Min", "the sub-bin of the smallest share"),
+        (Statistic::Median, "Median", "the sub-bin of the median share"),
+        (Statistic::Mean, "Mean", "its share of the whole bin"),
+    ] {
+        ui.selectable_value(chosen, statistic, title)
+            .on_hover_text(format!("Each bin of the load shows {meaning}"));
     }
 }
 
