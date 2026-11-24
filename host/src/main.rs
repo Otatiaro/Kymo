@@ -2,7 +2,7 @@
 
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{bench, capture, decode, elf, events, opsy, record, stats};
+use kymo::{bench, capture, check, decode, elf, events, opsy, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -13,6 +13,7 @@ usage: kymo events <elf>
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
        kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--worst <n>] [--json]
+       kymo check <elf> <capture> <rules.json> [--from <s>] [--to <s>] [--clock <Hz>]
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.
@@ -72,6 +73,19 @@ instances (default 10), as host/schema/stats.schema.json describes. Exits
 with 0 when the statistics are printed, losses or not; 1 on a capture or an
 image it cannot read; 2 on a command line it cannot parse, for any command.
 
+check: judges rules on the statistics stats gives, over the same range. The
+rules file is JSON, its shape in host/schema/check.schema.json: each rule
+bounds a statistic (min, p50, p90, p99, max, mean, jitter, count, share) of
+a group (subject, metric, detail, kind) with min and max, as a duration with
+its unit (50us, 2ms, 300cycles), a percentage or a count; or holds it within
+a regression (10%, 2us) of the same statistic in the baseline, a kymo stats
+--json the file names; or bounds the losses, suspects or contradictions of
+the range. Excluded instances make each statistic an interval: a rule passes
+when all of it keeps to the rule, fails when none does, and is unknown
+otherwise. A group absent from the range fails. A line each, then a total.
+Exits with 0 when every rule passes; 3 when one fails; 4 when none fails
+and one is unknown; 1 on an input it cannot read or a rule it cannot judge.
+
 bench: measures how fast a probe drains the trace ring of the bench image,
 and how fast SWO carries the same events with --swo-baud, and whether the
 cycle counter keeps counting once the probe leaves.
@@ -88,8 +102,17 @@ bench options:
 ";
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
+    let mut arguments = std::env::args().skip(1);
+    let outcome = if arguments.next().as_deref() == Some("check") {
+        match (arguments.next(), arguments.next(), arguments.next()) {
+            (Some(elf), Some(copy), Some(rules)) => check(&elf, &copy, &rules, arguments),
+            _ => Err(usage(USAGE)),
+        }
+    } else {
+        run().map(|()| ExitCode::SUCCESS)
+    };
+    match outcome {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(if error.is::<Usage>() { 2 } else { 1 })
@@ -121,23 +144,85 @@ fn parsed<T: std::str::FromStr>(option: &str, value: Option<String>) -> Result<T
         .map_err(|_| usage(format!("{option}: cannot read {value}")))
 }
 
+/// The range and clock options of stats and check.
+#[derive(Clone, Copy, Default)]
+struct Window {
+    clock: Option<u64>,
+    from: Option<f64>,
+    to: Option<f64>,
+}
+
+impl Window {
+    /// Takes `option` and its value if it is one of the window's.
+    fn take(&mut self, option: &str, arguments: &mut impl Iterator<Item = String>) -> Result<bool> {
+        match option {
+            "--from" => self.from = Some(parsed(option, arguments.next())?),
+            "--to" => self.to = Some(parsed(option, arguments.next())?),
+            "--clock" => self.clock = Some(parsed(option, arguments.next())?),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
 /// OpSy's statistics of the capture `copy` of the image `elf`.
 fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> Result<()> {
-    let mut clock = None;
-    let mut from: Option<f64> = None;
-    let mut to: Option<f64> = None;
+    let mut window = Window::default();
     let mut worst = 10;
     let mut json = false;
     while let Some(option) = arguments.next() {
+        if window.take(&option, &mut arguments)? {
+            continue;
+        }
         match option.as_str() {
             "--json" => json = true,
-            "--from" => from = Some(parsed(&option, arguments.next())?),
-            "--to" => to = Some(parsed(&option, arguments.next())?),
-            "--clock" => clock = Some(parsed(&option, arguments.next())?),
             "--worst" => worst = parsed(&option, arguments.next())?,
             _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
         }
     }
+    let report = report(elf, copy, &window, worst)?;
+    if json {
+        println!("{}", stats::json(&report));
+    } else {
+        for line in stats::text(&report) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// The rules of the file `rules` judged on the capture `copy` of the image
+/// `elf`: the exit code says how they stand.
+fn check(elf: &str, copy: &str, rules: &str, mut arguments: impl Iterator<Item = String>) -> Result<ExitCode> {
+    let mut window = Window::default();
+    while let Some(option) = arguments.next() {
+        if !window.take(&option, &mut arguments)? {
+            return Err(usage(format!("unknown option {option}\n\n{USAGE}")));
+        }
+    }
+    let text = std::fs::read_to_string(rules).map_err(|error| format!("{rules}: {error}"))?;
+    let (rules_read, baseline) = check::rules(&text).map_err(|error| format!("{rules}: {error}"))?;
+    let baseline = match baseline {
+        None => None,
+        Some(path) => {
+            let path = Path::new(rules).parent().unwrap_or(Path::new("")).join(path);
+            let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            Some(check::baseline(&text).map_err(|error| format!("{}: {error}", path.display()))?)
+        }
+    };
+    let report = report(elf, copy, &window, 1)?;
+    let verdicts =
+        check::judge(&report, &rules_read, baseline.as_ref()).map_err(|error| format!("{rules}: {error}"))?;
+    for verdict in &verdicts {
+        println!("{}", verdict.line);
+    }
+    println!("{}", check::summary(&verdicts));
+    Ok(ExitCode::from(check::code(&verdicts)))
+}
+
+/// The statistics of the capture `copy` of the image `elf`, over the window.
+fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
+    let Window { clock, from, to } = *window;
     let catalogue = catalogue(Path::new(elf))?;
     let bytes = std::fs::read(copy).map_err(|error| format!("{copy}: {error}"))?;
     if !capture::is_capture(&bytes) {
@@ -166,15 +251,13 @@ fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> 
         from: cycles(from)?,
         to: cycles(to)?,
     };
-    let report = stats::compute(&trace, &opsy::instances(&opsy), &opsy.contradictions, range, worst);
-    if json {
-        println!("{}", stats::json(&report));
-    } else {
-        for line in stats::text(&report) {
-            println!("{line}");
-        }
-    }
-    Ok(())
+    Ok(stats::compute(
+        &trace,
+        &opsy::instances(&opsy),
+        &opsy.contradictions,
+        range,
+        worst,
+    ))
 }
 
 /// The catalogue of the image at `path`, its warnings printed.

@@ -33,7 +33,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trace"))
-from trace import parse, check, check_stats  # noqa: E402
+from trace import parse, check, check_rules, check_stats  # noqa: E402
 
 CHIP = "STM32H563ZITx"
 PERIOD = 1e-3  # seconds
@@ -154,7 +154,8 @@ def main() -> int:
             print(decode.stderr)
             print("kymo decode failed")
             return 1
-        errors = check(decode.stdout) + check_board(decode.stdout) + check_stats(args.host, args.image, capture)
+        errors = (check(decode.stdout) + check_board(decode.stdout) + check_stats(args.host, args.image, capture)
+                  + check_rules(args.host, args.image, capture))
     for error in errors[:20]:
         print(error)
     print("RESULT:", "FAIL" if errors else "PASS")

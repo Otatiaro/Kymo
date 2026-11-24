@@ -360,6 +360,80 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
     return errors
 
 
+def check_rules(host: str, image: str, capture: str) -> list[str]:
+    """kymo check against oracle.py: for each group, a bound at the oracle's
+    extreme passes and one cycle past it fails; a group with excluded
+    instances is unknown; the range's losses are bounded the same way; and
+    every group holds within 0 % of a baseline of the same capture."""
+    def run(rules: dict, folder: str) -> tuple[int, list[str]]:
+        path = os.path.join(folder, "rules.json")
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump({"baseline": "baseline.json", "rules": rules}, file)
+        done = subprocess.run([host, "check", image, capture, path], capture_output=True, text=True,
+                              timeout=TIMEOUT_SECONDS)
+        if done.returncode not in (0, 3, 4):
+            raise RuntimeError(f"kymo check failed ({done.returncode}): {done.stderr.strip()}")
+        return done.returncode, done.stdout.splitlines()
+
+    def rule(group: dict, stat: str, **test) -> dict:
+        written = {"kind": group["kind"], "subject": group["subject"], "metric": group["metric"], "stat": stat}
+        if group["detail"] is not None:
+            written["detail"] = group["detail"]
+        return written | test
+
+    def expect(name: str, rules: list[dict], code: int, label: str | None) -> list[str]:
+        got, lines = run(rules, folder)
+        errors = [f"check {name}: exit {got}, not {code}"] if got != code else []
+        verdicts = lines[:-1]
+        if len(verdicts) != len(rules):
+            return errors + [f"check {name}: {len(verdicts)} verdicts for {len(rules)} rules"]
+        errors += [f"check {name}: {line}" for line in verdicts if label and not line.startswith(label + " ")]
+        return errors
+
+    try:
+        baseline = subprocess.run([host, "stats", image, capture, "--json"], capture_output=True, text=True,
+                                  timeout=TIMEOUT_SECONDS, check=True).stdout
+        decoded = subprocess.run([host, "decode", image, capture], capture_output=True, text=True,
+                                 timeout=TIMEOUT_SECONDS, check=True).stdout
+    except subprocess.CalledProcessError as error:
+        return [f"kymo {error.cmd[1]} failed: {error.stderr.strip()}"]
+    expected = oracle.report(decoded, None, None, WORST)
+    groups = [{"kind": kind, "subject": subject, "metric": metric, "detail": detail} | group
+              for (kind, subject, metric, detail), group in expected["groups"].items()]
+    known = [group for group in groups if group["distribution"] and not group["lower_bound"]]
+    excluded = [group for group in groups if group["distribution"] and group["lower_bound"]]
+    cycles = lambda value: f"{value}cycles"  # noqa: E731
+    at, past = [], []
+    for group in known:
+        low, high = group["distribution"]["min"]["value"], group["distribution"]["max"]["value"]
+        at += [rule(group, "max", max=cycles(high)), rule(group, "min", min=cycles(low)),
+               rule(group, "count", min=group["count"], max=group["count"])]
+        past += [rule(group, "max", max=cycles(high - 1)), rule(group, "min", min=cycles(low + 1)),
+                 rule(group, "count", max=group["count"] - 1)]
+    losses = expected["losses"]
+    at.append({"capture": "losses", "min": losses, "max": losses})
+    past.append({"capture": "losses", "min": losses + 1})
+    unknown = [rule(group, "max", max=cycles(group["distribution"]["max"]["value"])) for group in excluded]
+    regression = [rule(group, stat, regression="0%") for group in known for stat in ("max", "p50", "count")]
+    with tempfile.TemporaryDirectory() as folder:
+        with open(os.path.join(folder, "baseline.json"), "w", encoding="utf-8") as file:
+            file.write(baseline)
+        try:
+            errors = expect("at the oracle's bounds", at, 0, "PASS")
+            errors += expect("past the oracle's bounds", past, 3, "FAIL")
+            errors += expect("against the baseline", regression, 0, "PASS")
+            if unknown:
+                errors += expect("on excluded groups", unknown, 4, "UNKNOWN")
+                errors += expect("unknown and failed", unknown + past[:1], 3, None)
+        except (RuntimeError, ValueError) as error:
+            return [str(error)]
+    print(f"check: {len(at)} rules at the oracle's bounds, {len(past)} past them, {len(unknown)} unknown, "
+          f"{len(regression)} against the baseline")
+    if not known:
+        errors.append("no group without exclusions to check")
+    return errors
+
+
 def symbol(image: str, name: str) -> int:
     """The address of a function of an ELF32 little-endian image, from its symbol table."""
     with open(image, "rb") as file:
@@ -474,6 +548,7 @@ def main() -> int:
     else:
         errors += check_spans(stdout, decoded.stdout)
     errors += check_stats(args.host, args.image, capture)
+    errors += check_rules(args.host, args.image, capture)
     directory.cleanup()
     for error in errors[:20]:
         print(error)

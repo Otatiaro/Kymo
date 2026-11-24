@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "kymo check rules",
+  "description": "Rules on the statistics kymo stats gives of a capture. A duration is a string with its unit: s, ms, us, ns or cycles (\"50us\", \"300cycles\"); a share a percentage (\"40%\"); a count a whole number.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rules"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "baseline": { "type": "string", "description": "A kymo stats --json to compare with, relative to this file." },
+    "rules": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/bound" }, { "$ref": "#/$defs/regression" }, { "$ref": "#/$defs/range" }] } }
+  },
+  "$defs": {
+    "kind": { "enum": ["task", "handler", "mutex"], "description": "Needed only when the subject and the metric name groups of several kinds." },
+    "subject": { "type": "string", "description": "As kymo stats names it: name@0x... for a name other symbols share." },
+    "metric": { "enum": ["wake_latency", "preempted_by_tasks", "preempted_by_handlers", "net", "gross", "response", "period", "hold", "wait"] },
+    "detail": { "type": "string", "description": "What divides the metric: a wake reason, a task. Absent for the total." },
+    "stat": { "enum": ["min", "p50", "p90", "p99", "max", "mean", "jitter", "count", "share"] },
+    "quantity": { "type": ["string", "integer"], "description": "A duration with its unit, a percentage for a share, a whole number for a count." },
+    "bound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "metric", "stat"],
+      "anyOf": [{ "required": ["max"] }, { "required": ["min"] }],
+      "properties": {
+        "kind": { "$ref": "#/$defs/kind" },
+        "subject": { "$ref": "#/$defs/subject" },
+        "metric": { "$ref": "#/$defs/metric" },
+        "detail": { "$ref": "#/$defs/detail" },
+        "stat": { "$ref": "#/$defs/stat" },
+        "min": { "$ref": "#/$defs/quantity", "description": "The lowest value that passes." },
+        "max": { "$ref": "#/$defs/quantity", "description": "The highest value that passes." }
+      }
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "metric", "stat", "regression"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/kind" },
+        "subject": { "$ref": "#/$defs/subject" },
+        "metric": { "$ref": "#/$defs/metric" },
+        "detail": { "$ref": "#/$defs/detail" },
+        "stat": { "$ref": "#/$defs/stat" },
+        "regression": { "type": "string", "description": "How far above the baseline's value still passes: a percentage (\"10%\"), or a duration with its unit (\"2us\")." }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture"],
+      "anyOf": [{ "required": ["max"] }, { "required": ["min"] }],
+      "properties": {
+        "capture": { "enum": ["losses", "suspects", "contradictions"] },
+        "min": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

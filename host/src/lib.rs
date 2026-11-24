@@ -4,6 +4,7 @@
 
 pub mod bench;
 pub mod capture;
+pub mod check;
 pub mod decode;
 pub mod elf;
 pub mod events;
