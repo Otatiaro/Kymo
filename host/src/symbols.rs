@@ -6,11 +6,13 @@
 //! start, or at a base class of the object's type that is the pointer's own
 //! type (a task control block inside a task, for instance); anywhere else
 //! inside the object it is named by the object and the offset. A null
-//! pointer, and an address outside every symbol, have no name.
+//! pointer, and an address outside every symbol, have no name. A name that
+//! symbols at other addresses share, statics of different translation units,
+//! is followed by the address: `name@0x20000100`.
 
 use crate::events::Pointee;
 use object::{Object, ObjectSymbol, SymbolKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A function or an object of the image.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,8 +57,10 @@ impl Symbols {
                 bases: bases.get(&address).cloned().unwrap_or_default(),
             });
         }
-        symbols.functions.sort_by_key(|symbol| symbol.address);
-        symbols.objects.sort_by_key(|symbol| symbol.address);
+        for list in [&mut symbols.functions, &mut symbols.objects] {
+            list.sort_by_key(|symbol| symbol.address);
+            tell_apart(list);
+        }
         symbols
     }
 
@@ -88,6 +92,20 @@ impl Symbols {
         } else {
             format!("{}+{offset:#x}", symbol.name)
         })
+    }
+}
+
+/// Names a symbol whose name others at other addresses share, statics of
+/// different translation units, by its name and its address: `name@0x...`.
+fn tell_apart(list: &mut [Symbol]) {
+    let mut addresses: HashMap<String, BTreeSet<u64>> = HashMap::new();
+    for symbol in list.iter() {
+        addresses.entry(symbol.name.clone()).or_default().insert(symbol.address);
+    }
+    for symbol in list.iter_mut() {
+        if addresses[&symbol.name].len() > 1 {
+            symbol.name = format!("{}@{:#010x}", symbol.name, symbol.address);
+        }
     }
 }
 
@@ -135,6 +153,37 @@ mod tests {
         );
         assert_eq!(demangle("_Z1fIiJcEEvv"), "f<int, char>");
         assert_eq!(demangle("timer_handler"), "timer_handler");
+    }
+
+    #[test]
+    fn a_name_shared_at_other_addresses_takes_the_address() {
+        let mut list = vec![
+            symbol(0x2000, 4, "(anonymous namespace)::task", &[]),
+            symbol(0x2004, 4, "unique", &[]),
+            symbol(0x2008, 4, "(anonymous namespace)::task", &[]),
+            symbol(0x200c, 4, "alias", &[]),
+            symbol(0x200c, 4, "alias", &[]),
+        ];
+        tell_apart(&mut list);
+        let names: Vec<&str> = list.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "(anonymous namespace)::task@0x00002000",
+                "unique",
+                "(anonymous namespace)::task@0x00002008",
+                "alias",
+                "alias"
+            ]
+        );
+        let symbols = Symbols {
+            functions: Vec::new(),
+            objects: list,
+        };
+        assert_eq!(
+            symbols.name(&Pointee::Other, 0x200a).as_deref(),
+            Some("(anonymous namespace)::task@0x00002008+0x2")
+        );
     }
 
     #[test]
