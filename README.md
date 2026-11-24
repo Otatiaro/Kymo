@@ -49,4 +49,5 @@ and disables every interrupt, so the program being recorded stops.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). `kymo-ui` embeds the Inter font, under the SIL Open Font
+License 1.1 ([`host/ui/fonts/Inter-LICENSE.txt`](host/ui/fonts/Inter-LICENSE.txt)).
