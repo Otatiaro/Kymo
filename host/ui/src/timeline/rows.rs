@@ -1,6 +1,6 @@
 //! The lines of the timeline, and the rows of event types they show.
 
-use super::Timeline;
+use super::{CPU, ROW, TASK, Timeline};
 use crate::levels::Levels;
 use crate::meaning::Meaning;
 use kymo::model::Element;
@@ -53,6 +53,36 @@ pub(super) enum Line {
     Mutex(usize),
     /// The row of an event type.
     Event(usize),
+}
+
+impl Line {
+    /// Its height in pixels: the CPU's load the tallest, a task taller than
+    /// the other lines.
+    pub(super) fn height(self) -> f32 {
+        match self {
+            Line::Cpu => CPU,
+            Line::Task(_) => TASK,
+            _ => ROW,
+        }
+    }
+}
+
+/// The top of each of `lines` below the top of the first, then the bottom of
+/// the last.
+pub(super) fn tops(lines: &[Line]) -> Vec<f32> {
+    std::iter::once(0.0)
+        .chain(lines.iter().scan(0.0, |top, line| {
+            *top += line.height();
+            Some(*top)
+        }))
+        .collect()
+}
+
+/// The line `y` pixels below the top of the first, of those whose `tops`
+/// are given.
+pub(super) fn at(tops: &[f32], y: f32) -> Option<usize> {
+    let n = tops.partition_point(|&top| top <= y);
+    (y >= 0.0 && n > 0 && n < tops.len()).then(|| n - 1)
 }
 
 impl Timeline {
@@ -195,3 +225,6 @@ impl Timeline {
             }))
     }
 }
+
+#[cfg(test)]
+mod tests;

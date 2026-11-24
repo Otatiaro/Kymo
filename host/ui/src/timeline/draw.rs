@@ -1,9 +1,10 @@
 //! A frame of the timeline: the view moved by the pointer, then every line drawn.
 
 use super::load::{self, Drawn};
+use super::rows;
 use super::rows::Line;
 use super::view::{View, ticks};
-use super::{LABELS, ROW, RULER, Timeline};
+use super::{LABELS, RULER, Timeline};
 use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
@@ -63,11 +64,13 @@ impl Timeline {
         if response.clicked()
             && let Some(pointer) = response.interact_pointer_pos()
             && pointer.y >= area.top()
-            && lines.get(((pointer.y - area.top()) / ROW) as usize) == Some(&Line::Fold)
+            && rows::at(&rows::tops(&lines), pointer.y - area.top()).map(|n| lines[n]) == Some(Line::Fold)
         {
             self.folded = !self.folded;
             lines = self.lines();
         }
+        let tops = rows::tops(&lines);
+        let line_at = |y: f32| rows::at(&tops, y - area.top());
         let open = self
             .meaning
             .as_ref()
@@ -94,8 +97,8 @@ impl Timeline {
         let font = FontId::proportional(13.0);
         let heading = FontId::proportional(11.0);
         let strong = visuals.strong_text_color();
-        let shown = lines.len().min(((area.height() / ROW).ceil() as usize).max(1));
-        let bottom = (area.top() + lines.len() as f32 * ROW).min(area.bottom());
+        let shown = lines.len().min(tops.partition_point(|&top| top < area.height()).max(1));
+        let bottom = (area.top() + tops[lines.len()]).min(area.bottom());
 
         // The backgrounds first: the column of names and the headers on the
         // surface, every other data row striped; then the grid, under the data.
@@ -105,11 +108,11 @@ impl Timeline {
             palette.surface,
         );
         for (n, &line) in lines.iter().enumerate().take(shown) {
-            let top = area.top() + n as f32 * ROW;
+            let (top, height) = (area.top() + tops[n], line.height());
             let header = matches!(line, Line::Section(_) | Line::Fold);
             if header || n % 2 == 1 {
                 painter.rect_filled(
-                    Rect::from_min_max(egui::pos2(area.left(), top), egui::pos2(area.right(), top + ROW)),
+                    Rect::from_min_max(egui::pos2(area.left(), top), egui::pos2(area.right(), top + height)),
                     0.0,
                     if header { palette.surface } else { faint },
                 );
@@ -117,8 +120,8 @@ impl Timeline {
             if header {
                 painter.line_segment(
                     [
-                        egui::pos2(rect.left(), top + ROW - 0.5),
-                        egui::pos2(area.right(), top + ROW - 0.5),
+                        egui::pos2(rect.left(), top + height - 0.5),
+                        egui::pos2(area.right(), top + height - 0.5),
                     ],
                     Stroke::new(1.0, grid),
                 );
@@ -161,7 +164,7 @@ impl Timeline {
             .as_ref()
             .is_some_and(|meaning| self.mode.load(load::busiest(meaning, &view), width));
         for (n, &line) in lines.iter().enumerate() {
-            let top = area.top() + n as f32 * ROW;
+            let (top, height) = (area.top() + tops[n], line.height());
             if top > area.bottom() {
                 break;
             }
@@ -176,10 +179,10 @@ impl Timeline {
             job.wrap = egui::text::TextWrapping::truncate_at_width(area.left() - 8.0 - x);
             let galley = labels.layout_job(job);
             elided.push(galley.elided);
-            labels.galley(egui::pos2(x, top + (ROW - galley.size().y) / 2.0), galley, color);
+            labels.galley(egui::pos2(x, top + (height - galley.size().y) / 2.0), galley, color);
             if line == Line::Fold {
                 // Pointing right folded, down unfolded.
-                let (x, y) = (rect.left() + 13.0, top + ROW / 2.0);
+                let (x, y) = (rect.left() + 13.0, top + height / 2.0);
                 let points = if self.folded {
                     vec![
                         egui::pos2(x - 3.0, y - 4.0),
@@ -195,7 +198,8 @@ impl Timeline {
                 };
                 labels.add(egui::Shape::convex_polygon(points, strong, egui::Stroke::NONE));
             }
-            let (high, low) = (top + 4.0, top + ROW - 4.0);
+            let (high, low) = (top + 4.0, top + height - 4.0);
+            let middle = top + height / 2.0;
             let meaning = self.meaning.as_ref();
             if let Some(meaning) = meaning {
                 let rows = &meaning.load;
@@ -251,7 +255,6 @@ impl Timeline {
                     let Some(meaning) = meaning else { continue };
                     // Depth 0, or unknown, fills the row; a nested handler,
                     // the half below.
-                    let middle = top + ROW / 2.0;
                     let depths = meaning.interrupts.get(handler).map_or(&[][..], Vec::as_slice);
                     let row = |interrupt: &kymo::meaning::Interrupt| interrupt.depth.unwrap_or(0);
                     let deepest = depths.len().max(1 + open.interrupts.iter().map(row).max().unwrap_or(0));
@@ -287,7 +290,6 @@ impl Timeline {
                     }
                     let open: Vec<_> = holders.filter(|hold| !hold.waiting).collect();
                     let closed = meaning.holds.get(mutex);
-                    let middle = top + ROW / 2.0;
                     for band in bars.paint(closed, open.iter().map(|hold| hold.span), high, low, palette.hold) {
                         // A band of more spans than pixels is not walked, so
                         // that a frame costs at most its width: a long hold
@@ -400,13 +402,12 @@ impl Timeline {
             && let Some(pointer) = response.hover_pos()
             && pointer.x < area.left()
             && pointer.y >= area.top()
+            && let Some(n) = line_at(pointer.y)
         {
-            let n = ((pointer.y - area.top()) / ROW) as usize;
-            if let Some(&line) = lines.get(n) {
-                let full = self.full_label(line);
-                if elided.get(n).copied().unwrap_or_default() || full != self.label(line) {
-                    response.clone().on_hover_text_at_pointer(full);
-                }
+            let line = lines[n];
+            let full = self.full_label(line);
+            if elided.get(n).copied().unwrap_or_default() || full != self.label(line) {
+                response.clone().on_hover_text_at_pointer(full);
             }
         }
         if !response.dragged()
@@ -416,11 +417,9 @@ impl Timeline {
             // The wake, from the line of what woke the task to the task's
             // line, both shown; at the wake's column.
             let row = |line: Line| lines.iter().position(|&other| other == line);
-            let to = lines
-                .get(((pointer.y - area.top()) / ROW) as usize)
-                .and_then(|&line| row(line));
+            let to = line_at(pointer.y).and_then(|n| row(lines[n]));
             if let Some((arrow, from, to)) = arrow.and_then(|arrow| Some((arrow, row(arrow.from)?, to?))) {
-                let middle = |n: usize| area.top() + (n as f32 + 0.5) * ROW;
+                let middle = |n: usize| area.top() + tops[n] + lines[n].height() / 2.0;
                 let x = view.column(arrow.cycles) + 0.5;
                 if x >= area.left() && x < area.right() {
                     let (from, to) = (middle(from), middle(to));

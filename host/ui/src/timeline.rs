@@ -40,7 +40,10 @@ use view::{clamped, whole, widest};
 /// The width of the column of row names.
 const LABELS: f32 = 260.0;
 const RULER: f32 = 22.0;
+/// The height of a line, in pixels; of a task's, and of the CPU's load.
 const ROW: f32 = 22.0;
+const TASK: f32 = 30.0;
+const CPU: f32 = 60.0;
 /// The bottom panel's least height at first, in pixels.
 const BOTTOM: f32 = 160.0;
 /// The narrowest view, in cycles.
@@ -216,7 +219,7 @@ impl eframe::App for Timeline {
         });
         // The timeline as tall as its lines, the panel the rest, until the
         // panel is resized: its size egui keeps is dropped every frame before.
-        let lines = RULER + self.lines().len() as f32 * ROW + ROW;
+        let lines = RULER + rows::tops(&self.lines()).last().copied().unwrap_or_default() + ROW;
         let fitted = (ui.available_height() - lines).max(BOTTOM);
         let id = ui.scope_id().with("bottom");
         if self.fit {
