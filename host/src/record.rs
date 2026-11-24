@@ -75,6 +75,10 @@ pub struct Recorder<'a> {
     /// The indexes settled lost while read unpublished: their writers may be
     /// under way, and a danger is raised if the ring laps them.
     skipped: Vec<u32>,
+    /// The end of the last loss a pass's window cut, whose slots no pass may
+    /// have read: an index read unpublished up to `max_event_slots - 1` after
+    /// it may be a following slot of an event whose first slot is in the loss.
+    cut: Option<u32>,
     /// The writers that may still write to slots the ring has reserved again.
     dangers: Vec<Danger>,
     /// Writers read unpublished, then read published by a pass the ring
@@ -149,6 +153,7 @@ impl<'a> Recorder<'a> {
             loss: None,
             unpublished: Vec::new(),
             skipped: Vec::new(),
+            cut: None,
             dangers: Vec::new(),
             late: Vec::new(),
             raised: 0,
@@ -275,6 +280,7 @@ impl<'a> Recorder<'a> {
             }
             self.lost(items, self.next, to);
             self.next = to;
+            self.cut = Some(to);
         }
         let count = write_index.wrapping_sub(self.next);
         let start = self.next & (slots - 1);
@@ -487,15 +493,25 @@ impl<'a> Recorder<'a> {
 
     /// Raises a danger from `index`, read unpublished and since lapped, to the
     /// next event read published, at most `max_event_slots`; returns its end.
+    /// Right after a loss, `index` may be a following slot of an event whose
+    /// first slot is in the loss: the danger then starts where that first slot
+    /// may be, its writer's slots the loss's events, which `lift` steps over
+    /// once read published.
     fn raise(&mut self, index: u32, write_index: u32) -> u32 {
         let mut end = index.wrapping_add(1);
         let last = index.wrapping_add(self.max_event_slots);
         while end != self.read_end && end != last && !matches!(self.header(end), Header::Head) {
             end = end.wrapping_add(1);
         }
+        let start = match self.cut {
+            Some(cut) if index.wrapping_sub(cut) < self.max_event_slots - 1 => {
+                index.wrapping_sub(self.max_event_slots - 1)
+            }
+            _ => index,
+        };
         self.dangers.push(Danger {
-            start: index,
-            head: index,
+            start,
+            head: start,
             end,
             expires: write_index.wrapping_add(self.ring.slots),
             done: false,
