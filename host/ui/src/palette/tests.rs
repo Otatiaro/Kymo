@@ -168,7 +168,6 @@ fn data(palette: &Palette) -> Vec<(&'static str, Color32)> {
         ("wait", palette.wait),
         ("ready", palette.ready),
         ("wake", palette.wake),
-        ("unknown", palette.unknown),
         ("loss", palette.loss),
         ("suspect", palette.suspect),
     ]

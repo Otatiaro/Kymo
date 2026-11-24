@@ -1,15 +1,15 @@
 //! The load view (ADR-061, ADR-084): in each bin of time, the share of the
-//! time known a row covers, as the height of a bar; the time unknown hatched
-//! above it. A bin shows one statistic for every row: the mean is the whole
-//! bin's share; the median, the min and the max are the share of the sub-bin
-//! that has it, a pixel wide at most, drawn whole. The CPU row stacks
-//! handlers, then each task other than idle, each with the time it takes in
-//! the whole bin, whatever the statistic. The pointer reads the bin the
-//! frame drew.
+//! time known a row covers, as the height of a bar; a bin with no time known
+//! stays empty. A bin shows one statistic for every row: the mean is the
+//! whole bin's share; the median, the min and the max are the share of the
+//! sub-bin that has it, a pixel wide at most, drawn whole. The CPU row
+//! stacks handlers, then each task other than idle, each with the time it
+//! takes in the whole bin, whatever the statistic, then the time unknown in
+//! the losses' colour; idle is the empty part above. The pointer reads the bin the frame drew.
 
 use super::view::View;
 use crate::meaning::Meaning;
-use eframe::egui::{self, Color32, Pos2, Rect, pos2};
+use eframe::egui::{self, Color32, Rect, pos2};
 use kymo::load::{self, Covered, Cpu};
 
 /// How the rows of OpSy's meaning are drawn: their spans, their load, or
@@ -270,50 +270,53 @@ pub(super) fn at(bins: &[Drawn], x: f32) -> Option<&Drawn> {
 }
 
 /// A drawn bin's heights in pixels, from the bottom of a bar `height`
-/// pixels high: the top of each layer of its stack and of its time known,
-/// over the cycles it counts.
+/// pixels high that stands for `whole` cycles: the top of each layer of its
+/// stack, then of the time unknown above it, which a row's bar has none of;
+/// the rest, idle, stays empty.
 #[derive(Debug, PartialEq)]
 pub(super) struct Heights {
     pub stack: Vec<f32>,
-    pub known: f32,
+    pub unknown: f32,
 }
 
-pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
-    let scale = f64::from(height) / (bin.counted.1 - bin.counted.0) as f64;
-    // Cycles counted, however few, are a pixel high at least, and so is
-    // each layer that counts any.
-    let pixels = |cycles: i64| {
-        if cycles > 0 {
-            ((cycles as f64 * scale).round() as f32).max(1.0)
-        } else {
-            0.0
-        }
-    };
-    let (mut below, mut top) = (0, 0.0);
-    let mut stack: Vec<f32> = bin
-        .stack
-        .iter()
-        .map(|&layer| {
-            below += layer;
-            top = pixels(below).max(top + if layer > 0 { 1.0 } else { 0.0 });
-            top
-        })
-        .collect();
-    let known = pixels(bin.known).max(top).min(height);
-    for top in &mut stack {
-        *top = top.min(known);
+pub(super) fn heights(bin: &Drawn, height: f32, whole: i64) -> Heights {
+    if whole <= 0 {
+        return Heights {
+            stack: vec![0.0; bin.stack.len()],
+            unknown: 0.0,
+        };
     }
-    Heights { stack, known }
+    let scale = f64::from(height) / whole as f64;
+    // Cycles counted, however few, are a pixel high at least, and so is
+    // each layer that counts any; none rises past the bar.
+    let mut below = 0;
+    let mut top: f32 = 0.0;
+    let mut layer = |cycles: i64| {
+        below += cycles;
+        if cycles > 0 {
+            top = ((below as f64 * scale).round() as f32).max(top + 1.0).min(height);
+        }
+        top
+    };
+    let stack: Vec<f32> = bin.stack.iter().map(|&cycles| layer(cycles)).collect();
+    let unknown = layer(whole - bin.known);
+    Heights { stack, unknown }
+}
+
+/// The cycles a bar `cpu` or not stands for: the CPU's, the cycles its bin
+/// counts, the time unknown on its stack; a row's, the time known.
+pub(super) fn whole(bin: &Drawn, cpu: bool) -> i64 {
+    if cpu { bin.counted.1 - bin.counted.0 } else { bin.known }
 }
 
 /// The pixels left empty between two bins of the CPU's line, so that each
 /// reads as one column.
 pub(super) const GAP: f32 = 1.0;
 
-/// Paints `bins` in `mesh` within `area`, bars from `high` to `low` with
-/// `gap` pixels left empty at the right of each bin twice as wide: the
-/// layers of their stack in `colors`, one each, the time unknown hatched in
-/// `unknown`.
+/// Paints `bins` in `mesh` within `area`, bars from `high` to `low` on whole
+/// pixels, `gap` of them left empty at the right of each bin wide enough:
+/// the layers of their stack in `colors`, one each, then the time unknown in
+/// `unknown`, on the CPU's line alone.
 pub(super) fn paint(
     mesh: &mut egui::Mesh,
     bins: &[Drawn],
@@ -321,20 +324,17 @@ pub(super) fn paint(
     (high, low): (f32, f32),
     gap: f32,
     colors: &[Color32],
-    unknown: Color32,
+    unknown: Option<Color32>,
 ) {
     let height = low - high;
     for bin in bins {
-        let end = if bin.right - bin.left >= 2.0 * gap {
-            bin.right - gap
-        } else {
-            bin.right
-        };
-        let (left, right) = (bin.left.max(area.left()), end.min(area.right()));
+        let (left, right) = (bin.left.round(), bin.right.round());
+        let end = if right - left > 2.0 * gap { right - gap } else { right };
+        let (left, right) = (left.max(area.left()), end.min(area.right()));
         if left >= right {
             continue;
         }
-        let heights = heights(bin, height);
+        let heights = heights(bin, height, whole(bin, unknown.is_some()));
         let rect = |bottom: f32, top: f32| Rect::from_min_max(pos2(left, low - top), pos2(right, low - bottom));
         let mut below = 0.0;
         for (&top, &layer) in heights.stack.iter().zip(colors) {
@@ -343,59 +343,12 @@ pub(super) fn paint(
                 below = top;
             }
         }
-        if heights.known < height {
-            hatch(mesh, rect(heights.known, height), unknown);
+        if let Some(unknown) = unknown
+            && heights.unknown > below
+        {
+            mesh.add_colored_rect(rect(below, heights.unknown), unknown);
         }
     }
-}
-
-/// The spacing of the hatching's lines and their width, across the screen:
-/// lines rising to the right, at the same places on every rectangle, so
-/// that neighbouring rectangles join.
-const HATCH: f32 = 4.0;
-const STROKE: f32 = 1.5;
-
-/// Hatches `rect` in `color`.
-pub(super) fn hatch(mesh: &mut egui::Mesh, rect: Rect, color: Color32) {
-    let corners = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-    ];
-    let first = ((rect.left() + rect.top()) / HATCH).floor() as i32;
-    let last = ((rect.right() + rect.bottom()) / HATCH).ceil() as i32;
-    for n in first..=last {
-        // The band from x + y = line to x + y = line + STROKE.
-        let line = n as f32 * HATCH;
-        let band = clip(&clip(&corners, |p| p.x + p.y - line), |p| line + STROKE - p.x - p.y);
-        if band.len() < 3 {
-            continue;
-        }
-        let base = mesh.vertices.len() as u32;
-        for &point in &band {
-            mesh.colored_vertex(point, color);
-        }
-        for k in 1..band.len() as u32 - 1 {
-            mesh.add_triangle(base, base + k, base + k + 1);
-        }
-    }
-}
-
-/// The convex polygon `points` cut to where `inside` is positive or zero.
-fn clip(points: &[Pos2], inside: impl Fn(Pos2) -> f32) -> Vec<Pos2> {
-    let mut kept = Vec::with_capacity(points.len() + 1);
-    for (n, &a) in points.iter().enumerate() {
-        let b = points[(n + 1) % points.len()];
-        let (at_a, at_b) = (inside(a), inside(b));
-        if at_a >= 0.0 {
-            kept.push(a);
-        }
-        if (at_a >= 0.0) != (at_b >= 0.0) {
-            kept.push(a + (b - a) * (at_a / (at_a - at_b)));
-        }
-    }
-    kept
 }
 
 /// `part` of `whole` in percent, rounded, but neither 0 % nor 100 % when it

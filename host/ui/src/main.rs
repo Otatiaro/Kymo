@@ -46,13 +46,15 @@ and how long it waited for its first run, with an arrow from the row of the
 handler or task that woke it. A handler without Kymo's hooks is seen as the
 task it interrupts.
 
-Their first row is the CPU's load: in each bin of a few pixels, the share of
-the time known that handlers run, then tasks other than idle, stacked; the
-time unknown, around losses, hatched above. Zoomed out, the other rows show
-their load too, chosen in the toolbar: Auto, once a row shows more than
-a span per 4 pixels; Bars; or Load. A line marks a bin's busiest sub-bin.
-Hovering a bin shows its share, how much of it is known, and the longest
-span in it.
+Their first row is the CPU's load: in each bin (16 pixels wide by default,
+set in the toolbar), the time handlers run, then tasks other than idle,
+stacked, then the time unknown, around losses, in the losses' colour;
+idle is the empty part above. Zoomed out, the other rows show their load too, chosen in the toolbar: Auto, once
+a row shows more than a span per 4 pixels; Bars; or Load. A row's bar is
+its share of the time known, the mean of the bin or, as chosen in the
+toolbar, the median, min or max of its sub-bins; a bin with no time known
+stays empty. Hovering a bin shows its share, how much of it is known, and
+the longest span in it.
 
 Below, the events of the range selected (shift and drag; Esc clears it) or
 else of the view once it stands still, by time, a line each as kymo decode
