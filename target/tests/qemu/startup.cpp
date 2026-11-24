@@ -17,7 +17,7 @@ void Fault_Handler();
 void SysTick_Handler();
 }
 
-/// GCC calls memcpy, memset and memcmp whenever it likes, and a freestanding program
+/// GCC calls memcpy, memmove, memset and memcmp whenever it likes, and a freestanding program
 /// has to provide them; these images link no C library. Built without loop
 /// pattern recognition, so they do not turn into calls to themselves; kept
 /// whether referenced or not, since with -flto the calls appear only after
@@ -30,6 +30,19 @@ void* memcpy(void* destination, void const* source, std::size_t size)
 	auto const* from = static_cast<unsigned char const*>(source);
 	while (size-- != 0)
 		*out++ = *from++;   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): memcpy itself
+	return destination;
+}
+
+extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+void* memmove(void* destination, void const* source, std::size_t size)
+{
+	// NOLINTNEXTLINE(misc-const-correctness): written through *out, which clang-tidy 23 takes for a read
+	auto* out = static_cast<unsigned char*>(destination);
+	auto const* from = static_cast<unsigned char const*>(source);
+	if (out < from)
+		return memcpy(destination, source, size);
+	while (size-- != 0)
+		out[size] = from[size];   // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic): memmove itself
 	return destination;
 }
 

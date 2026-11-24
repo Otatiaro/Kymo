@@ -42,6 +42,9 @@ hold all it printed, and end on a whole record.
 
 Which indexes are lost depends on how QEMU and the host interleave, so the
 check does not predict them: it checks that the output accounts for each.
+
+The adapters' trace checks import record_to_exit from here: an image
+recorded under QEMU from its first event to its exit.
 """
 
 import argparse
@@ -49,6 +52,7 @@ import json
 import os
 import re
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -95,6 +99,136 @@ def resume(port: int, command: str = "cont") -> None:
                 reply = json.loads(replies.readline())  # an event
             if "error" in reply:
                 raise RuntimeError(f"QEMU refused {command}: {reply['error']}")
+
+
+def symbol(image: str, name: str) -> int:
+    """The address of a function of an ELF32 little-endian image, from its symbol table."""
+    with open(image, "rb") as file:
+        elf = file.read()
+    shoff, = struct.unpack_from("<I", elf, 0x20)
+    shentsize, shnum = struct.unpack_from("<HH", elf, 0x2E)
+    sections = [struct.unpack_from("<IIIIIIIIII", elf, shoff + i * shentsize) for i in range(shnum)]
+    for _, kind, _, _, offset, size, link, _, _, entsize in sections:
+        if kind != 2:  # SHT_SYMTAB
+            continue
+        strings = sections[link][4]
+        for at in range(offset, offset + size, entsize):
+            name_at, value = struct.unpack_from("<II", elf, at)
+            end = elf.index(b"\0", strings + name_at)
+            if elf[strings + name_at:end].decode() == name:
+                return value & ~1
+    raise LookupError(f"{image} has no symbol {name}")
+
+
+class Gdb:
+    """Just enough of GDB's remote protocol to break on an address, run to it
+    and read a register."""
+
+    def __init__(self, port: int):
+        self.stream = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT_SECONDS)
+
+    def send(self, packet: str) -> str:
+        self.stream.sendall(f"${packet}#{sum(packet.encode()) % 256:02x}".encode())
+        reply = b""
+        while not re.fullmatch(rb"\+*\$[^#]*#[0-9a-f]{2}", reply):
+            chunk = self.stream.recv(4096)
+            if not chunk:
+                raise OSError("QEMU closed the GDB stub")
+            reply += chunk
+        self.stream.sendall(b"+")
+        return reply.decode().lstrip("+")[1:-3]
+
+    def run_to(self, address: int, timeout: float) -> str:
+        if self.send(f"Z0,{address:x},2") != "OK":
+            raise OSError("the GDB stub set no breakpoint")
+        self.stream.settimeout(timeout)
+        return self.send("c")
+
+    def register(self, number: int) -> int:
+        """A core register, r0 to r15, of the stopped target."""
+        self.stream.settimeout(TIMEOUT_SECONDS)
+        return int.from_bytes(bytes.fromhex(self.send(f"p{number:x}")), "little")
+
+
+# Where a test image ends the emulation: qemu::exit(int), out of line at
+# every optimisation level.
+EXIT = "_ZN4qemu4exitEi"
+
+
+class Recording:
+    """What record_to_exit gives: kymo record's output and status, and the
+    status the image ends with, None if it did not reach its end."""
+
+    def __init__(self, stdout: str, stderr: str, returncode: int, exit_status: int | None):
+        self.stdout, self.stderr, self.returncode, self.exit_status = stdout, stderr, returncode, exit_status
+
+
+def record_to_exit(qemu: str, machine: str, image: str, host: str, capture: str, end: str = EXIT) -> Recording:
+    """Records an image through QEMU's monitor, from its first event to its exit.
+
+    QEMU starts paused until kymo record has started, so that the recording
+    holds the image from its first event; the guest runs at the pace of the
+    host's clock, so that the passes keep up with it. The guest halts on a
+    breakpoint at the function `end`, qemu::exit by default (QEMU would leave
+    there), set through QEMU's GDB stub: kymo record reads it all, then it is
+    stopped. The status is r0 there, end's first argument.
+    """
+    end_address = symbol(image, end)
+    record_port, gdb_port = free_port(), free_port()
+    # -S: paused until kymo record runs. align=on: the guest's clock does not
+    # run ahead of the host's.
+    target = subprocess.Popen(
+        [qemu, "-machine", machine, "-kernel", image, "-nographic", "-S",
+         "-icount", "shift=5,align=on,sleep=on",
+         "-semihosting-config", "enable=on,target=native", "-monitor", "none", "-serial", "none",
+         "-qmp", f"tcp:127.0.0.1:{record_port},server=on,wait=off",
+         "-gdb", f"tcp:127.0.0.1:{gdb_port}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    lines = []
+    started = threading.Event()
+
+    def read(stream) -> None:
+        for line in stream:
+            lines.append(line)
+            if line.startswith("record "):
+                started.set()
+        started.set()
+
+    exit_status = None
+    try:
+        wait_for(record_port)
+        wait_for(gdb_port)
+        gdb = Gdb(gdb_port)
+        record = subprocess.Popen(
+            [host, "record", "--probe", "qemu", "--probe-id", f"127.0.0.1:{record_port}",
+             "--elf", image, "--out", capture],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        reader = threading.Thread(target=read, args=(record.stdout,))
+        reader.start()
+        if started.wait(TIMEOUT_SECONDS) and record.poll() is None:
+            try:
+                gdb.run_to(end_address, TIMEOUT_SECONDS)
+                exit_status = gdb.register(0)
+                # kymo record stops on what it last read: passes over the
+                # halted guest until one prints nothing new.
+                printed = -1
+                while printed != len(lines):
+                    printed = len(lines)
+                    time.sleep(PAUSED_SECONDS)
+            except (OSError, TimeoutError) as error:
+                print(f"the image did not reach {end}: {error}")
+        try:
+            record.stdin.write("\n")
+            record.stdin.close()
+        except OSError:
+            pass  # kymo record has stopped already: QEMU left
+        record.wait(TIMEOUT_SECONDS)
+        reader.join(TIMEOUT_SECONDS)
+        stderr = record.stderr.read()
+    finally:
+        target.kill()
+        target.wait()
+    return Recording("".join(lines), stderr, record.returncode, exit_status)
 
 
 def expected_fields(name: str, index: int) -> dict[str, str]:

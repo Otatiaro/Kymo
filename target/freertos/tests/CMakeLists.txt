@@ -1,0 +1,90 @@
+cmake_minimum_required(VERSION 3.25)
+
+# The FreeRTOS adapter, on a test application (application.cpp) run under
+# QEMU on the Cortex-M4 (port ARM_CM4F) and the Cortex-M33 (port
+# ARM_CM33_NTZ), recorded by the host and checked (trace/trace.py):
+#   cmake -S target/freertos/tests -B build/freertos -G Ninja \
+#         -DCMAKE_TOOLCHAIN_FILE=$PWD/target/cmake/arm-none-eabi.cmake \
+#         -DKYMO_FREERTOS_DIR=<FreeRTOS-Kernel's sources>
+#   cmake --build build/freertos && ctest --test-dir build/freertos
+project(kymo_freertos_tests C CXX)
+enable_testing()
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(KYMO_FREERTOS_DIR "" CACHE PATH "FreeRTOS-Kernel's sources, at the commit the CI pins")
+if(NOT EXISTS "${KYMO_FREERTOS_DIR}/tasks.c")
+	message(FATAL_ERROR "KYMO_FREERTOS_DIR must name FreeRTOS-Kernel's sources (no tasks.c in '${KYMO_FREERTOS_DIR}')")
+endif()
+
+set(target_dir ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+set(qemu_dir ${target_dir}/tests/qemu)
+set(portable ${KYMO_FREERTOS_DIR}/portable/GCC)
+
+# Per core: the QEMU machine, the linker script, the port and its sources,
+# the floating point the port expects.
+set(machine_cortex-m4 mps2-an386)
+set(script_cortex-m4 ${qemu_dir}/armv7m.ld)
+set(port_cortex-m4 ${portable}/ARM_CM4F)
+set(port_sources_cortex-m4 ${portable}/ARM_CM4F/port.c)
+set(float_cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16)
+
+set(machine_cortex-m33 mps2-an505)
+set(script_cortex-m33 ${qemu_dir}/armv8m.ld)
+set(port_cortex-m33 ${portable}/ARM_CM33_NTZ/non_secure)
+set(port_sources_cortex-m33 ${port_cortex-m33}/port.c ${port_cortex-m33}/portasm.c)
+set(float_cortex-m33 -mfloat-abi=soft)
+
+find_program(KYMO_QEMU qemu-system-arm HINTS "C:/Program Files/qemu")
+find_program(KYMO_HOST kymo HINTS ${target_dir}/../host/target/release)
+find_package(Python3 COMPONENTS Interpreter)
+set(missing "")
+foreach(tool KYMO_QEMU KYMO_HOST Python3_EXECUTABLE)
+	if(NOT ${tool})
+		list(APPEND missing ${tool})
+	endif()
+endforeach()
+
+foreach(cpu cortex-m4 cortex-m33)
+	set(cpu_options -mcpu=${cpu} -mthumb ${float_${cpu}})
+
+	# The kernel, built as its sources are, without Kymo's warnings as errors.
+	set(kernel freertos-${cpu})
+	add_library(${kernel} STATIC
+		${KYMO_FREERTOS_DIR}/tasks.c ${KYMO_FREERTOS_DIR}/queue.c ${KYMO_FREERTOS_DIR}/list.c
+		${KYMO_FREERTOS_DIR}/event_groups.c ${KYMO_FREERTOS_DIR}/stream_buffer.c
+		${port_sources_${cpu}})
+	target_include_directories(${kernel} PUBLIC
+		${CMAKE_CURRENT_SOURCE_DIR} ${target_dir}/freertos/include
+		${KYMO_FREERTOS_DIR}/include ${port_${cpu}})
+	target_compile_options(${kernel} PRIVATE ${cpu_options} -Os -g -ffunction-sections -fdata-sections)
+
+	set(image freertos-${cpu}-Os)
+	add_executable(${image}
+		${target_dir}/freertos/kymo_freertos.cpp application.cpp ${qemu_dir}/startup.cpp)
+	set_target_properties(${image} PROPERTIES SUFFIX ".elf"
+		LINK_DEPENDS "${script_${cpu}};${qemu_dir}/sections.ld")
+	target_include_directories(${image} PRIVATE ${target_dir}/include ${qemu_dir})
+	target_link_libraries(${image} PRIVATE ${kernel})
+	target_compile_options(${image} PRIVATE ${cpu_options} -Os
+		-g -Wall -Wextra -Werror
+		-ffunction-sections -fdata-sections
+		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
+	target_link_options(${image} PRIVATE ${cpu_options}
+		-nostdlib -nostartfiles -Wl,--gc-sections
+		-L${qemu_dir} -T ${script_${cpu}})
+
+	if(missing)
+		add_test(NAME ${image} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
+		set_tests_properties(${image} PROPERTIES WILL_FAIL ON)
+	else()
+		add_test(NAME ${image}
+			COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/trace/trace.py
+				--qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+				--image $<TARGET_FILE:${image}> --host ${KYMO_HOST})
+	endif()
+endforeach()

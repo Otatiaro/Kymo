@@ -14,13 +14,15 @@ env:
   # The OpSy the adapter is tested against. A change on OpSy's side reaches
   # Kymo when this moves.
   OPSY_COMMIT: db01fd80420c9741469f4919b3a4905e249a921f
+  # The FreeRTOS kernel the adapter is tested against: V11.3.3.
+  FREERTOS_COMMIT: 89592801dd8b73329a7583719b7e3567b50910e5
 
 # The target tests under QEMU, on Cortex-M33 and Cortex-M4: type ids, lock-free
 # writes and the control word under preemption, event layouts read by the host
 # against the target's, copies of the ring decoded by the host against the
 # events written, what the host records of a running image, pointer fields
 # named from the ELF, and the cost of an emit against its record; then the OpSy adapter on OpSy's own suite and
-# bench.
+# bench, and the FreeRTOS adapter on its test application.
 # One compiler, GCC 16, from Otatiaro/arm-none-eabi-toolchain.
 jobs:
   tests:
@@ -121,6 +123,7 @@ jobs:
   # test, each as the Arm toolchain compiles it (target/tidy.py); each public
   # header also on its own, with the library's checks. In the OpSy
   # tree only the adapter's test is Kymo's; OpSy's own sources are not checked.
+# Likewise the FreeRTOS adapter and its test application, not the kernel.
   tidy:
     name: clang-tidy
     runs-on: ubuntu-latest
@@ -132,6 +135,12 @@ jobs:
           repository: Otatiaro/OpSy
           ref: ${{ env.OPSY_COMMIT }}
           path: opsy
+
+      - uses: actions/checkout@v5
+        with:
+          repository: FreeRTOS/FreeRTOS-Kernel
+          ref: ${{ env.FREERTOS_COMMIT }}
+          path: freertos
 
       - name: Install the arm-none-eabi toolchain
         uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
@@ -152,6 +161,8 @@ jobs:
           cmake -S target/bench -B build/bench -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake -S target/opsy/tests -B build/opsy -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DKYMO_OPSY_DIR="$GITHUB_WORKSPACE/opsy" -DOPSY_TARGET=m33
+          cmake -S target/freertos/tests -B build/freertos -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DKYMO_FREERTOS_DIR="$GITHUB_WORKSPACE/freertos"
 
       - name: clang-tidy
         run: |
@@ -160,6 +171,8 @@ jobs:
           python3 target/tidy.py --clang-tidy clang-tidy --build build/bench
           python3 target/tidy.py --clang-tidy clang-tidy --build build/opsy \
             --headers target/opsy/include target/opsy/tests/ring_check.cpp
+          python3 target/tidy.py --clang-tidy clang-tidy --build build/freertos \
+            --headers target/freertos/include target/freertos/kymo_freertos.cpp target/freertos/tests/application.cpp
 
   # OpSy's on-target suite with the adapter's hooks, the adapter's events
   # read back from the ring, and the suite recorded by the host with its trace
@@ -269,3 +282,50 @@ jobs:
           --plain build-plain/opsy_qemu_bench.elf
           --traced build-traced/opsy/opsy_qemu_bench.elf
           --expected target/opsy/tests/bench/overhead-${{ matrix.target }}.json
+
+  # The FreeRTOS adapter: the test application on the Cortex-M4 (ARM_CM4F) and
+  # the Cortex-M33 (ARM_CM33_NTZ), recorded by the host with its trace checked
+  # (target/freertos/tests).
+  freertos:
+    name: FreeRTOS adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/checkout@v5
+        with:
+          repository: FreeRTOS/FreeRTOS-Kernel
+          ref: ${{ env.FREERTOS_COMMIT }}
+          path: freertos
+
+      - name: Install the arm-none-eabi toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Install Ninja and QEMU
+        run: sudo apt-get update && sudo apt-get install -y ninja-build qemu-system-arm
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+          shared-key: host-release
+
+      # kymo record, for the application's trace.
+      - name: Build the host
+        run: |
+          sudo apt-get install -y libudev-dev
+          cargo build --release --manifest-path host/Cargo.toml
+
+      - name: Configure
+        run: >
+          cmake -S target/freertos/tests -B build
+          -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/target/cmake/arm-none-eabi.cmake
+          -DKYMO_FREERTOS_DIR=${{ github.workspace }}/freertos
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
