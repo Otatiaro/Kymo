@@ -21,7 +21,7 @@ pub(super) struct Mark {
 }
 
 /// A line of the timeline, top to bottom.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Line {
     Section(&'static str),
     /// The CPU's load: handlers, then tasks other than idle.

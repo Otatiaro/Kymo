@@ -5,16 +5,16 @@ use super::rows::Line;
 use super::status::counted;
 use super::view::View;
 use super::{HOVER, ROW, SWITCH, Timeline};
-use crate::meaning::Meaning;
+use crate::meaning::{self, Meaning};
 use eframe::egui::{Pos2, Rect};
 use kymo::decode;
 use kymo::model::Element;
-use kymo::opsy::{self, Edge, Span};
+use kymo::opsy::{self, Cause, Edge, Span};
 use std::fmt::Write;
 
 impl Timeline {
     /// What the pointer is over: the nearest event of its row, or the span,
-    /// and the marks at its column.
+    /// and the marks at its column; over a task's span, the wake to draw.
     pub(super) fn hovered(
         &self,
         view: &View,
@@ -23,21 +23,25 @@ impl Timeline {
         lines: &[Line],
         open: &opsy::Spans,
         drawn: &[(usize, Vec<Drawn>)],
-    ) -> Option<String> {
+    ) -> Option<(String, Option<Arrow>)> {
         if pointer.x < area.left() || pointer.y < area.top() {
             return None;
         }
         let low = view.cycles(pointer.x - HOVER);
         let high = view.cycles(pointer.x + HOVER);
         let mut text = String::new();
+        let mut arrow = None;
         let n = ((pointer.y - area.top()) / ROW) as usize;
         let line = lines.get(n).copied();
         let bins = drawn.iter().find(|(line, _)| *line == n).map(|(_, bins)| bins);
         if let (Some(meaning), Some(line)) = (&self.meaning, line) {
-            text = match bins {
-                Some(bins) => load::at(bins, pointer.x)
-                    .map(|bin| self.load_text(meaning, line, bin, open))
-                    .unwrap_or_default(),
+            (text, arrow) = match bins {
+                Some(bins) => (
+                    load::at(bins, pointer.x)
+                        .map(|bin| self.load_text(meaning, line, bin, open))
+                        .unwrap_or_default(),
+                    None,
+                ),
                 None => self.span_text(meaning, line, low, high, open),
             };
         }
@@ -76,17 +80,25 @@ impl Timeline {
                 Element::Event { .. } => {}
             }
         }
-        (!text.is_empty()).then_some(text)
+        (!text.is_empty()).then_some((text, arrow))
     }
 
-    /// The span of an OpSy `line` from `low` to `high` cycles, described;
-    /// empty when there is none.
-    fn span_text(&self, meaning: &Meaning, line: Line, low: i64, high: i64, open: &opsy::Spans) -> String {
+    /// The span of an OpSy `line` from `low` to `high` cycles, described,
+    /// empty when there is none; and for a task's, the wake to draw.
+    fn span_text(
+        &self,
+        meaning: &Meaning,
+        line: Line,
+        low: i64,
+        high: i64,
+        open: &opsy::Spans,
+    ) -> (String, Option<Arrow>) {
         let opsy = &meaning.opsy;
         let closed = &opsy.closed;
         let near = |span: &Span| span.from.cycles <= high && span.to.cycles >= low;
         let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
         let mut text = String::new();
+        let mut arrow = None;
         match line {
             Line::Task(task) => {
                 let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
@@ -99,8 +111,29 @@ impl Timeline {
                             .find(|run| run.task == task && near(&run.span))
                             .map(|&run| (run, true))
                     });
+                let ready = task.and_then(|task| meaning.ready.get(task));
+                if found.is_none()
+                    && let Some(which) = ready.and_then(|ready| ready.at(low, high))
+                {
+                    let piece = &meaning.readies[which];
+                    let still = piece.open;
+                    let _ = write!(
+                        text,
+                        "{} ready, not on the core\n{}",
+                        named(task),
+                        self.extent(piece.span, still)
+                    );
+                    let (woken, from) = self.woken(meaning, which);
+                    let _ = write!(text, "\n{woken}");
+                    arrow = from;
+                }
                 if let Some((run, still)) = found {
                     let _ = write!(text, "{}\n{}", named(run.task), self.extent(run.span, still));
+                    if let Some(which) = meaning::before_run(&meaning.readies, ready, run.span.from) {
+                        let (woken, from) = self.woken(meaning, which);
+                        let _ = write!(text, "\n{woken}");
+                        arrow = from;
+                    }
                     // Left out where no event has given it yet, or since a loss.
                     let at = low + (high - low) / 2;
                     if let Some(priority) = run.task.and_then(|task| opsy.tasks.list[task].priority_at(at)) {
@@ -171,7 +204,40 @@ impl Timeline {
             }
             Line::Section(_) | Line::Fold | Line::Cpu | Line::Event(_) => {}
         }
-        text
+        (text, arrow)
+    }
+
+    /// What woke the activation that time ready `which` is part of, and when;
+    /// how long the task waited for its first run; and the wake to draw, from
+    /// the line of a handler or task that woke it.
+    pub(super) fn woken(&self, meaning: &Meaning, which: usize) -> (String, Option<Arrow>) {
+        let opsy = &meaning.opsy;
+        let ready = &meaning.readies[which];
+        let Some(wake) = ready.wake.map(|wake| &opsy.wakes[wake]) else {
+            return ("ready since a loss: what woke it is unknown".to_owned(), None);
+        };
+        let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+        let (cause, from) = match wake.cause {
+            Cause::Handler(handler) => (opsy.handlers.list[handler].name.clone(), Some(Line::Handler(handler))),
+            Cause::Task(task) => (named(task).to_owned(), Some(Line::Task(task))),
+            Cause::Elapsed => ("its delay elapsing".to_owned(), None),
+            Cause::Unknown => ("what a loss hides".to_owned(), None),
+        };
+        let time = self.time((wake.edge.cycles - self.origin()) as f64);
+        let mut text = format!("woken by {cause} ({}) at {time}", wake.reason);
+        if let Some(first) = meaning::waited(&meaning.readies, which) {
+            let waited = self.duration(first.span.to.cycles - first.span.from.cycles);
+            let at_least = if first.open { "at least " } else { "" };
+            let _ = write!(text, ", waited {at_least}{waited}");
+        }
+        if matches!(wake.cause, Cause::Task(_)) && wake.reason == "notified" {
+            text.push_str("\n(or a handler without Kymo's hooks, running in that task)");
+        }
+        let arrow = from.map(|from| Arrow {
+            cycles: wake.edge.cycles,
+            from,
+        });
+        (text, arrow)
     }
 
     /// The load of an OpSy `line` in `bin`, the bin drawn: its share of the
@@ -321,6 +387,14 @@ impl Timeline {
         lines.reverse();
         lines
     }
+}
+
+/// A wake to draw: from the line of what woke the task hovered, at its
+/// cycles, to the task's line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Arrow {
+    pub(super) cycles: i64,
+    pub(super) from: Line,
 }
 
 /// Who the longest span is of: a task or idle, a handler, or the task
