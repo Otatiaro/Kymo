@@ -66,6 +66,10 @@ void application_assert(char const* file, int line);
 			application_assert(__FILE__, __LINE__);      \
 	} while (0)
 
+/* The bench's untraced build, the reference its traced build is measured
+ * against, defines KYMO_UNTRACED. */
+#ifndef KYMO_UNTRACED
 #include <kymo/freertos/trace.h>
+#endif
 
 #endif

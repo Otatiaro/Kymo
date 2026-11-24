@@ -22,9 +22,10 @@
  *    buffer receive and send;
  * 8. a task created and deleted before it runs.
  *
- * The handler is installed at run time, in a vector table in RAM: the
- * table the image links holds no device interrupt.
+ * The handler is installed at run time, in a vector table in RAM
+ * (platform.hpp).
  */
+#include "platform.hpp"
 #include "qemu.hpp"
 
 #include <FreeRTOS.h>
@@ -41,19 +42,6 @@
 
 extern "C"
 {
-extern std::uint32_t _estack;
-void Reset_Handler();
-void Fault_Handler();
-#ifdef __ARM_ARCH_7EM__
-void vPortSVCHandler();
-void xPortPendSVHandler();
-void xPortSysTickHandler();
-#else
-void SVC_Handler();
-void PendSV_Handler();
-void SysTick_Handler();
-#endif
-
 /** @brief The end of the test, where trace/trace.py halts the guest and reads
  *  the verdict from r0: out of line, whatever the optimisation. */
 [[gnu::noinline]] void application_end(bool pass)
@@ -76,8 +64,6 @@ namespace application
 {
 
 constexpr std::size_t stack_depth = configMINIMAL_STACK_SIZE;
-/// The device interrupt the handler is installed for.
-constexpr unsigned irq = 0;
 /// The rounds of the switch scenario, each a switch to pong and one back.
 constexpr unsigned rounds = 3;
 constexpr std::uint32_t sent_by_handler = 42;
@@ -111,23 +97,6 @@ job volatile low_job = job::nothing;
 
 unsigned volatile bounces = 0;
 std::uint32_t volatile received = 0;
-
-using vector = std::uintptr_t;
-/// 16 system exceptions and the device interrupt, in a table aligned on its
-/// size rounded up to a power of two, as VTOR requires.
-alignas(128) std::array<vector, 32> vectors;
-
-template<typename Function>
-vector vector_of(Function* function)
-{
-	return reinterpret_cast<vector>(function); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): a vector table entry
-}
-
-/// Address of a word of the System Control Space.
-std::uint32_t volatile& scs(std::uintptr_t address)
-{
-	return *reinterpret_cast<std::uint32_t volatile*>(address); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): a register
-}
 
 /// A handler enters with traceISR_ENTER; portYIELD_FROM_ISR exits with
 /// traceISR_EXIT_TO_SCHEDULER or traceISR_EXIT.
@@ -208,7 +177,7 @@ bool switches()
 
 bool handler_wakes()
 {
-	scs(0xE000E200) = 1U << irq;   // NVIC_ISPR0: pends the interrupt, taken at once
+	platform::pend();
 	return received == sent_by_handler;
 }
 
@@ -294,39 +263,17 @@ void control_task(void* /*unused*/)
 	application_end(pass);
 }
 
-void install_vectors()
-{
-	vectors.fill(vector_of(&Fault_Handler));
-	vectors[0] = reinterpret_cast<vector>(&_estack); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): the initial stack pointer
-	vectors[1] = vector_of(&Reset_Handler);
-#ifdef __ARM_ARCH_7EM__
-	vectors[11] = vector_of(&vPortSVCHandler);
-	vectors[14] = vector_of(&xPortPendSVHandler);
-	vectors[15] = vector_of(&xPortSysTickHandler);
-#else
-	vectors[11] = vector_of(&SVC_Handler);
-	vectors[14] = vector_of(&PendSV_Handler);
-	vectors[15] = vector_of(&SysTick_Handler);
-#endif
-	vectors[16 + irq] = vector_of(&device_handler);
-	scs(0xE000ED08) = reinterpret_cast<std::uintptr_t>(vectors.data()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): VTOR
-	asm volatile("dsb\n\tisb" ::: "memory");
-
-	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr,cppcoreguidelines-pro-bounds-pointer-arithmetic): NVIC_IPR, a byte per interrupt
-	reinterpret_cast<std::uint8_t volatile*>(0xE000E400)[irq] = 0xFF;   // the lowest, below configMAX_SYSCALL_INTERRUPT_PRIORITY
-	scs(0xE000E100) = 1U << irq;   // NVIC_ISER0
-}
-
 } // namespace application
 
 void test_main()
 {
 	using namespace application;
+	// The port's SysTick handler itself: the trace check names it.
 #ifdef __ARM_ARCH_7EM__
-	scs(0xE000ED88) |= 0xFU << 20;   // CPACR: CP10 and CP11, the FPU the hard-float image uses
-	asm volatile("dsb\n\tisb" ::: "memory");
+	platform::prepare(&xPortSysTickHandler, &device_handler);
+#else
+	platform::prepare(&SysTick_Handler, &device_handler);
 #endif
-	install_vectors();
 
 	handler_queue = xQueueCreateStatic(1, sizeof(std::uint32_t), handler_queue_items.data(), &handler_queue_storage);
 	empty_queue = xQueueCreateStatic(1, sizeof(std::uint32_t), empty_queue_items.data(), &empty_queue_storage);
