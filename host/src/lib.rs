@@ -8,6 +8,7 @@ pub mod check;
 pub mod decode;
 pub mod elf;
 pub mod events;
+pub mod load;
 pub mod model;
 pub mod opsy;
 pub mod record;
