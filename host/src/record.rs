@@ -267,8 +267,9 @@ impl<'a> Recorder<'a> {
         let slots = self.ring.slots;
         let window = self.window;
         if write_index.wrapping_sub(self.next) > window {
-            // Indexes read unpublished and left while the ring has not lapped
-            // them: their writers may be under way, watched like those settled lost.
+            // Indexes read unpublished and left behind: their writers may be
+            // under way, watched like those settled lost. One the ring already
+            // lapped, a read since dropped as zeros, is endangered at once.
             let to = write_index.wrapping_sub(window);
             let left = to.wrapping_sub(self.next);
             for index in std::mem::take(&mut self.unpublished) {
@@ -276,6 +277,8 @@ impl<'a> Recorder<'a> {
                     self.unpublished.push(index);
                 } else if write_index.wrapping_sub(index) <= slots {
                     self.skipped.push(index);
+                } else {
+                    self.raise(index, write_index);
                 }
             }
             self.lost(items, self.next, to);
