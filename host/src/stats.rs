@@ -1,7 +1,8 @@
 //! Statistics of a range of a trace: instances in, distributions out.
 //!
 //! An instance is a subject's metric between two edges of the trace, its
-//! value in cycles: an adapter (opsy.rs) says what makes one. Here they are
+//! value in cycles: the meaning of a kernel's trace (meaning.rs) says what
+//! makes one. Here they are
 //! counted, over the range `[from, to)` in cycles:
 //!
 //! - an instance entirely in the range counts, unless it touches a loss (an
@@ -20,7 +21,7 @@
 //! between the min and the max, their bounds multiples of the width.
 //!
 //! A share is over the time known in the range: the adapter says when the
-//! state of what it measures is known (`Opsy::known` for OpSy).
+//! state of what it measures is known (`Meaning::known`).
 
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};

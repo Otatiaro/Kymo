@@ -50,7 +50,7 @@ impl Timeline {
         }
         if let Some(meaning) = &self.meaning {
             ui.separator();
-            let against = meaning.opsy.contradictions.len();
+            let against = meaning.kernel.contradictions.len();
             segment(
                 ui,
                 format!("{against} against OpSy's order"),

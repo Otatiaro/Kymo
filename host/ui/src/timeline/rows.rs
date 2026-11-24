@@ -95,22 +95,22 @@ impl Timeline {
         let Some(meaning) = &self.meaning else {
             return events.collect();
         };
-        let opsy = &meaning.opsy;
-        let mut tasks: Vec<usize> = (0..opsy.tasks.list.len()).collect();
+        let kernel = &meaning.kernel;
+        let mut tasks: Vec<usize> = (0..kernel.tasks.list.len()).collect();
         tasks.sort_by_key(|&task| {
-            let task = &opsy.tasks.list[task];
+            let task = &kernel.tasks.list[task];
             (task.priority.is_none(), task.priority, &task.name)
         });
         let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
         lines.extend(tasks.into_iter().map(|task| Line::Task(Some(task))));
         lines.push(Line::Task(None));
-        if !opsy.handlers.list.is_empty() {
+        if !kernel.handlers.list.is_empty() {
             lines.push(Line::Section("INTERRUPTS"));
-            lines.extend((0..opsy.handlers.list.len()).map(Line::Handler));
+            lines.extend((0..kernel.handlers.list.len()).map(Line::Handler));
         }
-        if !opsy.mutexes.list.is_empty() {
+        if !kernel.mutexes.list.is_empty() {
             lines.push(Line::Section("MUTEXES"));
-            lines.extend((0..opsy.mutexes.list.len()).map(Line::Mutex));
+            lines.extend((0..kernel.mutexes.list.len()).map(Line::Mutex));
         }
         lines.push(Line::Fold);
         if !self.folded {
@@ -140,11 +140,11 @@ impl Timeline {
     /// A line's label in full: a subject's name as in the image, else the
     /// label.
     pub(super) fn full_label(&self, line: Line) -> String {
-        let opsy = self.meaning.as_ref().map(|meaning| &meaning.opsy);
-        let name = match (line, opsy) {
-            (Line::Task(Some(n)), Some(opsy)) => opsy.tasks.list.get(n),
-            (Line::Handler(n), Some(opsy)) => opsy.handlers.list.get(n),
-            (Line::Mutex(n), Some(opsy)) => opsy.mutexes.list.get(n),
+        let kernel = self.meaning.as_ref().map(|meaning| &meaning.kernel);
+        let name = match (line, kernel) {
+            (Line::Task(Some(n)), Some(kernel)) => kernel.tasks.list.get(n),
+            (Line::Handler(n), Some(kernel)) => kernel.handlers.list.get(n),
+            (Line::Mutex(n), Some(kernel)) => kernel.mutexes.list.get(n),
             _ => None,
         };
         name.map_or_else(|| self.label(line), |subject| subject.name.clone())

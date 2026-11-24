@@ -8,8 +8,8 @@ use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
 use kymo::load::Covered;
+use kymo::meaning::Span;
 use kymo::model::Element;
-use kymo::opsy::Span;
 use std::time::Instant;
 
 impl Timeline {
@@ -71,7 +71,7 @@ impl Timeline {
         let open = self
             .meaning
             .as_ref()
-            .map(|meaning| meaning.opsy.open())
+            .map(|meaning| meaning.kernel.open())
             .unwrap_or_default();
 
         let view = View {
@@ -252,7 +252,7 @@ impl Timeline {
                     // the half below.
                     let middle = top + ROW / 2.0;
                     let depths = meaning.interrupts.get(handler).map_or(&[][..], Vec::as_slice);
-                    let row = |interrupt: &kymo::opsy::Interrupt| interrupt.depth.unwrap_or(0);
+                    let row = |interrupt: &kymo::meaning::Interrupt| interrupt.depth.unwrap_or(0);
                     let deepest = depths.len().max(1 + open.interrupts.iter().map(row).max().unwrap_or(0));
                     for depth in 0..deepest {
                         let open = open
@@ -296,7 +296,7 @@ impl Timeline {
                         }
                         for n in band.spans {
                             let (from, to, which) = closed.expect("bands come from spans").columns(n, &view);
-                            owners.push((from, to, middle, meaning.opsy.closed.holds[which].task));
+                            owners.push((from, to, middle, meaning.kernel.closed.holds[which].task));
                         }
                     }
                     for hold in open {

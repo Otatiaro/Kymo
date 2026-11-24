@@ -1,9 +1,14 @@
 use super::*;
 use crate::decode::Decoded;
 use crate::events::{Event, Field as EventField, Type};
+use crate::events::{Kind, Pointee};
+use crate::load::Covered;
+use crate::meaning::*;
+use crate::model::{Element, Trace};
 use crate::stats;
 use crate::symbols::Symbols;
 use gimli::DwAte;
+use std::collections::BTreeMap;
 
 /// The adapter's events, their fields 4-byte pointers but `priority` and
 /// `reason`, a byte and an enumeration.
@@ -145,14 +150,14 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
 fn spans(first: u32, steps: &[(&str, &[u32])]) -> Vec<String> {
     let catalogue = catalogue();
     let trace = trace(&catalogue, first, steps);
-    let mut whole = Opsy::new(&catalogue, first).unwrap();
+    let mut whole = Meaning::new(&catalogue, first).unwrap();
     whole.add(&trace.elements, 0);
     let lines = lines(&trace, &whole);
     for split in 1..trace.elements.len() {
-        let mut pieces = Opsy::new(&catalogue, first).unwrap();
+        let mut pieces = Meaning::new(&catalogue, first).unwrap();
         pieces.add(&trace.elements[..split], 0);
         pieces.add(&trace.elements, split);
-        assert_eq!(super::lines(&trace, &pieces), lines, "split at {split}");
+        assert_eq!(crate::meaning::lines(&trace, &pieces), lines, "split at {split}");
     }
     lines
 }
@@ -381,7 +386,7 @@ fn a_loss_is_at_the_cycles_of_the_event_before_it() {
         0,
         &[("tick", &[]), ("task_started", &[A]), ("lost", &[]), ("tick", &[])],
     );
-    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    let mut opsy = Meaning::new(&catalogue, 0).unwrap();
     opsy.add(&trace.elements, 0);
     let to = opsy.closed.runs[0].span.to;
     assert_eq!(
@@ -582,7 +587,7 @@ fn a_task_keeps_its_last_priority() {
             ("task_priority_changed", &[A, 1]),
         ],
     );
-    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    let mut opsy = Meaning::new(&catalogue, 0).unwrap();
     assert!(opsy.traced());
     opsy.add(&trace.elements, 0);
     let priorities: Vec<_> = opsy
@@ -612,7 +617,7 @@ fn a_priority_is_unknown_until_given_and_from_a_loss() {
             ("task_priority_changed", &[A, 3]),
         ],
     );
-    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    let mut opsy = Meaning::new(&catalogue, 0).unwrap();
     opsy.add(&trace.elements, 0);
     let task = &opsy.tasks.list[0];
     let at = [0, 10, 20, 25, 30, 50, 60, 70].map(|cycles| task.priority_at(cycles));
@@ -628,7 +633,7 @@ fn a_hook_without_a_field_the_host_reads_is_refused() {
         .find(|event| event.name.ends_with("isr_exit"))
         .unwrap();
     exit.fields[0].name = "routine".to_owned();
-    let error = Opsy::new(&catalogue, 0).err().expect("refused").to_string();
+    let error = Meaning::new(&catalogue, 0).err().expect("refused").to_string();
     assert_eq!(error, "kymo::opsy::isr_exit: no field handler, which the host reads");
 }
 
@@ -636,7 +641,7 @@ fn a_hook_without_a_field_the_host_reads_is_refused() {
 fn an_image_without_the_adapter_is_not_traced() {
     let mut catalogue = catalogue();
     catalogue.events.retain(|_, event| !event.name.starts_with(PREFIX));
-    assert!(!Opsy::new(&catalogue, 0).unwrap().traced());
+    assert!(!Meaning::new(&catalogue, 0).unwrap().traced());
 }
 
 const NOTIFIED: u32 = 0;
@@ -654,14 +659,14 @@ fn report(steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
 fn report_from(first: u32, steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
     let catalogue = catalogue();
     let trace = trace(&catalogue, first, steps);
-    let mut whole = Opsy::new(&catalogue, first).unwrap();
+    let mut whole = Meaning::new(&catalogue, first).unwrap();
     whole.add(&trace.elements, 0);
     let instances = instances(&whole);
     for split in 1..trace.elements.len() {
-        let mut pieces = Opsy::new(&catalogue, first).unwrap();
+        let mut pieces = Meaning::new(&catalogue, first).unwrap();
         pieces.add(&trace.elements[..split], 0);
         pieces.add(&trace.elements, split);
-        assert_eq!(super::instances(&pieces), instances, "split at {split}");
+        assert_eq!(crate::meaning::instances(&pieces), instances, "split at {split}");
     }
     let found = stats::Found {
         instances: &instances,
@@ -1049,7 +1054,7 @@ fn the_task_on_the_core_is_known_between_losses_and_the_next_switch() {
             ("tick", &[]),
         ],
     );
-    let mut opsy = Opsy::new(&catalogue, 5).unwrap();
+    let mut opsy = Meaning::new(&catalogue, 5).unwrap();
     opsy.add(&trace.elements, 0);
     let known = opsy.known();
     // From the first switch to the loss, then from the next switch on.
@@ -1118,7 +1123,7 @@ fn the_cpu_stacks_handlers_at_any_depth_then_tasks_other_than_idle() {
             ("tick", &[]),
         ],
     );
-    let mut opsy = Opsy::new(&catalogue, 0).unwrap();
+    let mut opsy = Meaning::new(&catalogue, 0).unwrap();
     opsy.add(&trace.elements, 0);
     let bin = |from, to, known, handlers, tasks| CpuBin {
         from,
@@ -1179,7 +1184,7 @@ fn the_cpu_row_covers_each_cycle_as_the_oracle_does() {
         let steps = random_steps(&mut state);
         let steps: Vec<(&str, &[u32])> = steps.iter().map(|(step, values)| (*step, values.as_slice())).collect();
         let trace = trace(&catalogue, first, &steps);
-        let mut opsy = Opsy::new(&catalogue, first).unwrap();
+        let mut opsy = Meaning::new(&catalogue, first).unwrap();
         opsy.add(&trace.elements, 0);
         let cpu = opsy.cpu();
         let open = opsy.open();

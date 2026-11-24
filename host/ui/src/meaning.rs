@@ -1,4 +1,4 @@
-//! OpSy's meaning on the timeline: the spans `kymo::opsy` makes of the trace,
+//! OpSy's meaning on the timeline: the spans `kymo::meaning` makes of the trace,
 //! a row of spans each for a task, the idle task, a handler at each depth, a
 //! mutex's holders and each of its waiters; and each task's time ready, with
 //! what woke it. They grow with the trace.
@@ -7,12 +7,12 @@ use crate::names;
 use crate::spans::Spans;
 use kymo::events::Catalogue;
 use kymo::load::{Covered, Cpu};
+use kymo::meaning::{Edge, Meaning as Kernel, Ready, Span};
 use kymo::model::Element;
-use kymo::opsy::{self, Edge, Opsy, Ready, Span};
 use kymo::target::Result;
 
 pub struct Meaning {
-    pub opsy: Opsy<'static>,
+    pub kernel: Kernel<'static>,
     /// The closed runs, interrupts and holds already in a row.
     placed: [usize; 3],
     /// By task.
@@ -25,7 +25,7 @@ pub struct Meaning {
     pub holds: Vec<Spans>,
     /// By mutex: each waiting task and its waits.
     pub waits: Vec<Vec<(usize, Spans)>>,
-    /// Each task's time ready, as `kymo::opsy::ready` gives it, and by task,
+    /// Each task's time ready, as `kymo::meaning::ready` gives it, and by task,
     /// places in it.
     pub readies: Vec<Ready>,
     pub ready: Vec<Spans>,
@@ -37,9 +37,9 @@ pub struct Meaning {
 impl Meaning {
     /// None when the image has no OpSy adapter.
     pub fn new(catalogue: &'static Catalogue, first: u32) -> Result<Option<Self>> {
-        let opsy = Opsy::new(catalogue, first)?;
-        Ok(opsy.traced().then(|| Self {
-            opsy,
+        let kernel = Kernel::new(catalogue, first)?;
+        Ok(kernel.traced().then(|| Self {
+            kernel,
             placed: [0; 3],
             runs: Vec::new(),
             idle: Spans::default(),
@@ -56,8 +56,8 @@ impl Meaning {
     /// Takes in `elements` from `from` on. The spans of a row close in the
     /// order they start, so each comes after those its row holds.
     pub fn add(&mut self, elements: &[Element], from: usize) {
-        self.opsy.add(elements, from);
-        let closed = &self.opsy.closed;
+        self.kernel.add(elements, from);
+        let closed = &self.kernel.closed;
         for (n, run) in closed.runs.iter().enumerate().skip(self.placed[0]) {
             let row = match run.task {
                 Some(task) => grown(&mut self.runs, task),
@@ -85,15 +85,15 @@ impl Meaning {
             }
         }
         self.placed = [closed.runs.len(), closed.interrupts.len(), closed.holds.len()];
-        let opsy = &self.opsy;
+        let kernel = &self.kernel;
         // Whole again: the time ready of an activation still open grows.
-        self.readies = opsy::ready(opsy);
+        self.readies = kymo::meaning::ready(kernel);
         self.ready.clear();
         for (n, ready) in self.readies.iter().enumerate() {
             grown(&mut self.ready, ready.task).push(ready.span, n);
         }
-        self.names = names::shown(&[&opsy.tasks.list, &opsy.handlers.list, &opsy.mutexes.list]);
-        self.load = Load::of(opsy);
+        self.names = names::shown(&[&kernel.tasks.list, &kernel.handlers.list, &kernel.mutexes.list]);
+        self.load = Load::of(kernel);
     }
 }
 
@@ -115,14 +115,14 @@ pub struct Load {
 type Row = (Vec<(i64, i64)>, Option<i64>);
 
 impl Load {
-    fn of(opsy: &Opsy) -> Self {
-        let cpu = opsy.cpu();
-        let open = opsy.open();
+    fn of(kernel: &Kernel) -> Self {
+        let cpu = kernel.cpu();
+        let open = kernel.open();
         let span = |span: &Span| (span.from.cycles, span.to.cycles);
         let start = |row: &mut Row, from: i64| row.1 = Some(row.1.map_or(from, |open| open.min(from)));
-        let mut tasks: Vec<Row> = vec![Row::default(); opsy.tasks.list.len()];
+        let mut tasks: Vec<Row> = vec![Row::default(); kernel.tasks.list.len()];
         let mut idle = Row::default();
-        for run in &opsy.closed.runs {
+        for run in &kernel.closed.runs {
             match run.task {
                 Some(task) => grown(&mut tasks, task).0.push(span(&run.span)),
                 None => idle.0.push(span(&run.span)),
@@ -134,15 +134,15 @@ impl Load {
                 None => start(&mut idle, run.span.from.cycles),
             }
         }
-        let mut handlers: Vec<Row> = vec![Row::default(); opsy.handlers.list.len()];
-        for interrupt in &opsy.closed.interrupts {
+        let mut handlers: Vec<Row> = vec![Row::default(); kernel.handlers.list.len()];
+        for interrupt in &kernel.closed.interrupts {
             grown(&mut handlers, interrupt.handler).0.push(span(&interrupt.span));
         }
         for interrupt in &open.interrupts {
             start(grown(&mut handlers, interrupt.handler), interrupt.span.from.cycles);
         }
-        let mut holds: Vec<Row> = vec![Row::default(); opsy.mutexes.list.len()];
-        for hold in opsy.closed.holds.iter().filter(|hold| !hold.waiting) {
+        let mut holds: Vec<Row> = vec![Row::default(); kernel.mutexes.list.len()];
+        for hold in kernel.closed.holds.iter().filter(|hold| !hold.waiting) {
             grown(&mut holds, hold.mutex).0.push(span(&hold.span));
         }
         for hold in open.holds.iter().filter(|hold| !hold.waiting) {

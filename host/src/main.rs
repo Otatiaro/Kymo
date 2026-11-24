@@ -2,7 +2,7 @@
 
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{bench, capture, check, decode, elf, events, opsy, record, stats};
+use kymo::{bench, capture, check, decode, elf, events, meaning, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -239,7 +239,7 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         return Err(format!("{copy} is not a capture of kymo record").into());
     }
     let trace = Trace::read(&catalogue, &bytes, clock)?;
-    let mut opsy = opsy::Opsy::new(&catalogue, trace.first)?;
+    let mut opsy = meaning::Meaning::new(&catalogue, trace.first)?;
     if !opsy.traced() {
         return Err("the image has no OpSy hook events".into());
     }
@@ -262,7 +262,7 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         to: cycles(to)?,
     };
     let found = stats::Found {
-        instances: &opsy::instances(&opsy),
+        instances: &meaning::instances(&opsy),
         contradictions: &opsy.contradictions,
         known: &opsy.known(),
     };
@@ -318,12 +318,12 @@ fn run() -> Result<()> {
                 }
                 if spans {
                     let trace = Trace::read(&catalogue, &bytes, clock)?;
-                    let mut opsy = opsy::Opsy::new(&catalogue, trace.first)?;
+                    let mut opsy = meaning::Meaning::new(&catalogue, trace.first)?;
                     if !opsy.traced() {
                         return Err("the image has no OpSy hook events".into());
                     }
                     opsy.add(&trace.elements, 0);
-                    for line in opsy::lines(&trace, &opsy) {
+                    for line in meaning::lines(&trace, &opsy) {
                         println!("{line}");
                     }
                     return Ok(());
