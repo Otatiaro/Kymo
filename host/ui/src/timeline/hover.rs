@@ -156,8 +156,8 @@ impl Timeline {
                 None => (cards, arrow) = self.span_cards(meaning, line, low, high, open),
             }
         }
-        if let Some(Line::Event(row)) = line {
-            let row = &self.rows[row];
+        if let Some(Line::Event(index)) = line {
+            let row = &self.rows[index];
             let cycles = row.levels.cycles();
             let from = cycles.partition_point(|&cycles| cycles < low);
             let to = cycles.partition_point(|&cycles| cycles <= high);
@@ -165,7 +165,7 @@ impl Timeline {
             if let Some(nearest) = (from..to).min_by_key(|&n| (cycles[n] - at).abs())
                 && let Element::Event { event, cycles, .. } = &self.trace.elements[row.elements[nearest]]
             {
-                let mut card = Card::new(row.name.clone(), "event", Swatch::Event);
+                let mut card = self.card(Line::Event(index), "event", Swatch::Event);
                 card.facts.push(("time", self.time((*cycles - self.origin()) as f64)));
                 card.facts.push(("index", event.index.to_string()));
                 let fields = self.fields(event);

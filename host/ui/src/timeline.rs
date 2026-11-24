@@ -24,6 +24,7 @@ pub use view::View;
 use crate::levels::Levels;
 use crate::listing::Events;
 use crate::meaning::Meaning;
+use crate::names;
 use crate::panel::Panel;
 use eframe::egui;
 use kymo::events::Catalogue;
@@ -122,15 +123,20 @@ impl Timeline {
             catalogue,
             trace,
             ids: catalogue.events.keys().copied().collect(),
-            rows: catalogue
-                .events
-                .values()
-                .map(|event| Row {
-                    name: event.name.clone(),
-                    levels: Levels::default(),
-                    elements: Vec::new(),
-                })
-                .collect(),
+            rows: names::types(
+                &catalogue
+                    .events
+                    .values()
+                    .map(|event| event.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|name| Row {
+                name,
+                levels: Levels::default(),
+                elements: Vec::new(),
+            })
+            .collect(),
             marks: Vec::new(),
             pending: Vec::new(),
             before: None,
