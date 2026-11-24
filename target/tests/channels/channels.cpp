@@ -87,6 +87,8 @@ void emitted(char const* ring_name, Ring& ring, Event const& event, char const* 
 	qemu::write(" ");
 	qemu::write_unsigned(index);
 	qemu::write(" ");
+	qemu::write_unsigned(kymo::slots_for<Event>);
+	qemu::write(" ");
 	qemu::write(fields);
 	qemu::write_unsigned(event.n);
 }

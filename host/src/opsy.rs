@@ -372,7 +372,8 @@ fn hooks(catalogue: &Catalogue) -> Result<HashMap<u16, Hook>> {
 pub struct Opsy<'a> {
     symbols: &'a Symbols,
     hooks: HashMap<u16, Hook>,
-    /// The first index recorded: past 0, what came before it is lost.
+    /// The first index recorded: past 0, what came before it is unknown, and
+    /// read as a loss edge without being counted as a loss.
     first: u32,
     pub tasks: Subjects,
     pub handlers: Subjects,

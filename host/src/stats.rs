@@ -554,7 +554,9 @@ pub fn json(report: &Report) -> String {
         report.to,
         report.origin,
         report.known,
-        report.joined.map_or_else(|| "null".to_owned(), |index| index.to_string()),
+        report
+            .joined
+            .map_or_else(|| "null".to_owned(), |index| index.to_string()),
         report.losses,
         report.suspects,
         report.contradictions,

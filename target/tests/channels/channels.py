@@ -63,8 +63,10 @@ def main() -> int:
     slots_offset = None
     for line in target.stdout.splitlines():
         if line.startswith("emitted "):
-            _, ring, index, rest = line.split(" ", 3)
-            lines[ring].append((int(index), f"event {index} 0 - {rest}"))
+            _, ring, index, slots, rest = line.split(" ", 4)
+            last = int(index) + int(slots) - 1
+            shown = index if slots == "1" else f"{index}-{last}"
+            lines[ring].append((int(index), f"event {shown} 0 - {rest}"))
         elif line.startswith("slots "):
             slots_offset = int(line.split()[1])
         elif line.startswith("ring "):

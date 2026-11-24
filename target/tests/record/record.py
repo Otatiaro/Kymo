@@ -141,10 +141,14 @@ def check(output: str, lap: str | None) -> list[str]:
             suspects.append((int(fields[1]), int(fields[2])))
             continue
         previous = "event"
-        index, name = int(fields[1]), fields[4]
+        # One index, or the range of the event's slots: "12-13".
+        first, _, last = fields[1].partition("-")
+        index, name = int(first), fields[4]
         if fields[0] != "event" or name not in types:
             errors.append(f"{line}: not an event of the image")
             continue
+        if (int(last) if last else index) - index + 1 != types[name]:
+            errors.append(f"{line}: expected {types[name]} slots")
         # QEMU has no cycle counter: no cycles, so 0 s at the frequency given.
         if fields[2:4] != ["0", "0.000000000"]:
             errors.append(f"{line}: expected 0 cycles at 0 s")
