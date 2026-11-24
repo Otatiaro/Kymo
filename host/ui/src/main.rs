@@ -4,6 +4,7 @@
 mod levels;
 mod meaning;
 mod names;
+mod palette;
 mod spans;
 mod timeline;
 
@@ -16,7 +17,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "\
-usage: kymo-ui <elf> <capture> [--clock <Hz>] [--measure]
+usage: kymo-ui <elf> <capture> [--clock <Hz>] [--theme <theme>] [--measure]
 
 Shows a capture made by kymo record --out: one row per event type of the
 image, the gaps (slots lost) and the overrun writes (a write interrupted for
@@ -30,11 +31,16 @@ row per task, by its last priority, and the idle task, where it holds the
 core; a row per interrupt handler, a nested one in the lower half, the
 whole row from a loss to the next task switch, the nesting unknown; a row
 per mutex, held, with its owner named where it fits, or waited for
-(lighter). Hovering a span shows its start, end and duration; a task's, its
+(fainter). Hovering a span shows its start, end and duration; a task's, its
 priority at the pointer, left out until an event gives it and from a loss
 to the next, and the last events up to the switch that ends it.
 
+The theme follows the system's unless chosen in the status bar; the choice
+is kept for the next runs.
+
   --clock <Hz>  the cycle counter's frequency, as for kymo decode
+  --theme <theme>
+                system, light or dark, as chosen in the status bar
   --measure     prints the time to read the capture and build the timeline,
                 shows the whole capture then the narrowest view, 300 frames
                 each without vsync, prints the frame times and quits
@@ -54,11 +60,20 @@ fn run() -> Result<()> {
     let mut paths = Vec::new();
     let mut clock = None;
     let mut measure = false;
+    let mut theme = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--clock" => clock = Some(arguments.next().ok_or("--clock needs a value")?.parse()?),
             "--measure" => measure = true,
+            "--theme" => {
+                theme = Some(match arguments.next().as_deref() {
+                    Some("system") => egui::ThemePreference::System,
+                    Some("light") => egui::ThemePreference::Light,
+                    Some("dark") => egui::ThemePreference::Dark,
+                    _ => return Err("--theme takes system, light or dark".into()),
+                })
+            }
             _ if !argument.starts_with("--") => paths.push(PathBuf::from(argument)),
             _ => return Err(format!("unknown option {argument}\n\n{USAGE}").into()),
         }
@@ -89,7 +104,18 @@ fn run() -> Result<()> {
     };
     if measure {
         options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+        // The window measured is the size above, not the last one used.
+        options.persist_window = false;
     }
-    eframe::run_native("kymo-ui", options, Box::new(move |_| Ok(Box::new(timeline))))?;
+    eframe::run_native(
+        "kymo-ui",
+        options,
+        Box::new(move |context| {
+            if let Some(theme) = theme {
+                context.egui_ctx.set_theme(theme);
+            }
+            Ok(Box::new(timeline))
+        }),
+    )?;
     Ok(())
 }

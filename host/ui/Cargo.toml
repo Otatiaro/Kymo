@@ -7,5 +7,5 @@ description = "Kymo timeline: shows a capture made by kymo record"
 publish = false
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "persistence", "wayland", "x11"] }
 kymo = { path = ".." }

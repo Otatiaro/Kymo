@@ -10,6 +10,7 @@
 
 use crate::levels::Levels;
 use crate::meaning::Meaning;
+use crate::palette::Palette;
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
 use kymo::decode;
@@ -31,14 +32,6 @@ const HOVER: f32 = 4.0;
 /// The ruler's spacing between ticks, in pixels, at least.
 const TICK: f64 = 110.0;
 
-const EVENT: Color32 = Color32::from_rgb(70, 130, 220);
-const LOSS: Color32 = Color32::from_rgba_premultiplied(110, 25, 25, 110);
-const SUSPECT: Color32 = Color32::from_rgba_premultiplied(115, 75, 15, 110);
-const RUN: Color32 = Color32::from_rgb(70, 130, 220);
-const IDLE: Color32 = Color32::from_rgb(125, 125, 125);
-const INTERRUPT: Color32 = Color32::from_rgb(225, 140, 40);
-const HOLD: Color32 = Color32::from_rgb(60, 160, 90);
-const WAIT: Color32 = Color32::from_rgba_premultiplied(25, 64, 36, 100);
 /// How many events a run's hover shows, the switch that ends it last.
 const SWITCH: usize = 4;
 
@@ -335,6 +328,7 @@ impl Timeline {
         let text = visuals.text_color();
         let faint = visuals.faint_bg_color;
         let grid = visuals.widgets.noninteractive.bg_stroke.color;
+        let palette = Palette::of(visuals);
         let labels = ui.painter_at(Rect::from_min_max(
             egui::pos2(rect.left(), area.top()),
             egui::pos2(area.left() - 4.0, rect.bottom()),
@@ -395,15 +389,23 @@ impl Timeline {
                 Line::Section(_) | Line::Fold => {}
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
-                        bars.mesh
-                            .add_colored_rect(Rect::from_min_max(egui::pos2(from, high), egui::pos2(to, low)), EVENT);
+                        bars.mesh.add_colored_rect(
+                            Rect::from_min_max(egui::pos2(from, high), egui::pos2(to, low)),
+                            palette.event,
+                        );
                     }
                 }
                 Line::Task(task) => {
                     let Some(meaning) = meaning else { continue };
                     let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
                     let open = open.runs.iter().filter(|run| run.task == task).map(|run| run.span);
-                    bars.paint(spans, open, high, low, if task.is_some() { RUN } else { IDLE });
+                    bars.paint(
+                        spans,
+                        open,
+                        high,
+                        low,
+                        if task.is_some() { palette.run } else { palette.idle },
+                    );
                 }
                 Line::Handler(handler) => {
                     let Some(meaning) = meaning else { continue };
@@ -420,7 +422,7 @@ impl Timeline {
                             .filter(|interrupt| interrupt.handler == handler && row(interrupt) == depth)
                             .map(|interrupt| interrupt.span);
                         let high = if depth == 0 { high } else { middle };
-                        bars.paint(depths.get(depth), open, high, low, INTERRUPT);
+                        bars.paint(depths.get(depth), open, high, low, palette.interrupt);
                     }
                 }
                 Line::Mutex(mutex) => {
@@ -431,7 +433,7 @@ impl Timeline {
                             .clone()
                             .filter(|hold| hold.waiting && hold.task == *task)
                             .map(|hold| hold.span);
-                        bars.paint(Some(waits), open, high, low, WAIT);
+                        bars.paint(Some(waits), open, high, low, palette.wait);
                     }
                     // Waiters not yet in a row: their waits are all open.
                     for hold in holders.clone().filter(|hold| {
@@ -441,12 +443,12 @@ impl Timeline {
                                 .get(mutex)
                                 .is_some_and(|waits| waits.iter().any(|wait| wait.0 == hold.task))
                     }) {
-                        bars.paint(None, std::iter::once(hold.span), high, low, WAIT);
+                        bars.paint(None, std::iter::once(hold.span), high, low, palette.wait);
                     }
                     let open: Vec<_> = holders.filter(|hold| !hold.waiting).collect();
                     let closed = meaning.holds.get(mutex);
                     let middle = top + ROW / 2.0;
-                    for band in bars.paint(closed, open.iter().map(|hold| hold.span), high, low, HOLD) {
+                    for band in bars.paint(closed, open.iter().map(|hold| hold.span), high, low, palette.hold) {
                         // A band of more spans than pixels is not walked, so
                         // that a frame costs at most its width: a long hold
                         // among them is named once zoomed in.
@@ -479,13 +481,13 @@ impl Timeline {
                         Align2::LEFT_CENTER,
                         name,
                         small.clone(),
-                        Color32::WHITE,
+                        palette.owner,
                     );
                 }
             }
         }
         let bottom = (area.top() + lines.len() as f32 * ROW).min(area.bottom());
-        for (kind, color) in [(false, LOSS), (true, SUSPECT)] {
+        for (kind, color) in [(false, palette.loss), (true, palette.suspect)] {
             let marks = self
                 .marks()
                 .filter(|mark| matches!(self.trace.elements[mark.element], Element::Suspect { .. }) == kind);
@@ -791,8 +793,30 @@ impl eframe::App for Timeline {
         if self.measure.is_some() {
             self.measure_frame(ui.ctx(), frame.info().cpu_usage.unwrap_or_default());
         }
-        egui::Panel::bottom("status").show(ui, |ui| ui.label(self.status()));
+        egui::Panel::bottom("status").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(self.status());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), theme_choice);
+            });
+        });
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
+    }
+}
+
+/// The theme's buttons, right to left, in words: egui's own draw icons the
+/// default fonts have no glyph for.
+fn theme_choice(ui: &mut egui::Ui) {
+    let chosen = ui.ctx().options(|options| options.theme_preference);
+    let mut choice = chosen;
+    for (preference, name) in [
+        (egui::ThemePreference::Dark, "Dark"),
+        (egui::ThemePreference::Light, "Light"),
+        (egui::ThemePreference::System, "System"),
+    ] {
+        ui.selectable_value(&mut choice, preference, name);
+    }
+    if choice != chosen {
+        ui.ctx().set_theme(choice);
     }
 }
 
