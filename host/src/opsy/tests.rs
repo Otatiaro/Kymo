@@ -25,6 +25,9 @@ const HOOKS: [(&str, &[&str]); 15] = [
     ("mutex_blocked", &["mutex", "waiter"]),
 ];
 
+/// OpSy's wake reasons, by value.
+const REASONS: [&str; 4] = ["notified", "timed_out", "sleep_elapsed", "mutex_granted"];
+
 fn catalogue() -> Catalogue {
     let mut events = BTreeMap::new();
     for (n, (hook, fields)) in HOOKS.iter().enumerate() {
@@ -40,7 +43,13 @@ fn catalogue() -> Catalogue {
                     size: Some(if name == "priority" { 1 } else { 4 }),
                     kind: match name {
                         "priority" => Kind::Base(DwAte(gimli::DW_ATE_unsigned.0)),
-                        "reason" => Kind::Enum(vec![(0, "signal".to_owned()), (1, "timeout".to_owned())]),
+                        "reason" => Kind::Enum(
+                            REASONS
+                                .iter()
+                                .zip(0..)
+                                .map(|(name, value)| (value, (*name).to_owned()))
+                                .collect(),
+                        ),
                         "handler" => Kind::Pointer(Pointee::Function),
                         _ => Kind::Pointer(Pointee::Record(format!("opsy::{name}"))),
                     },
@@ -401,6 +410,166 @@ fn a_recording_that_starts_late_starts_with_a_loss() {
     assert_eq!(spans(0, &[("isr_exit", &[H])]), ["contradiction 0"]);
 }
 
+/// The wake and ready lines of `steps`, in the order printed.
+fn wakes(steps: &[(&str, &[u32])]) -> Vec<String> {
+    spans(0, steps)
+        .into_iter()
+        .filter(|line| line.starts_with("wake ") || line.starts_with("ready "))
+        .collect()
+}
+
+const C: u32 = 0x2000_0400;
+
+#[test]
+fn a_wake_in_a_handler_is_caused_by_the_innermost() {
+    assert_eq!(
+        wakes(&[
+            ("task_started", &[A]),
+            ("isr_enter", &[H]),
+            ("isr_enter", &[G]),
+            ("task_ready", &[B, NOTIFIED]),
+            ("isr_exit", &[G]),
+            ("isr_exit", &[H]),
+            ("task_started", &[B]),
+            ("task_sleep", &[B]),
+        ]),
+        [
+            "wake at=3 task=0x20000200 reason=notified cause=handler:0x08000501",
+            "ready from=3 to=6 task=0x20000200",
+        ]
+    );
+}
+
+#[test]
+fn a_wake_in_a_task_is_caused_by_it_whatever_kernel_handler_is_open() {
+    assert_eq!(
+        wakes(&[
+            ("task_started", &[A]),
+            ("enter_systick", &[]),
+            ("task_ready", &[B, NOTIFIED]),
+            ("exit_systick", &[]),
+            ("task_ready", &[C, MUTEX_GRANTED]),
+            ("enter_idle", &[]),
+            ("isr_enter", &[H]),
+            ("isr_exit", &[H]),
+        ])[..2],
+        [
+            "wake at=2 task=0x20000200 reason=notified cause=task:0x20000100",
+            "wake at=4 task=0x20000400 reason=mutex_granted cause=task:0x20000100",
+        ]
+    );
+    assert_eq!(
+        wakes(&[("enter_idle", &[]), ("task_ready", &[B, NOTIFIED])])[0],
+        "wake at=1 task=0x20000200 reason=notified cause=task:idle"
+    );
+}
+
+#[test]
+fn a_delay_that_runs_out_is_the_cause_whatever_it_interrupts() {
+    let lines = wakes(&[
+        ("task_started", &[A]),
+        ("isr_enter", &[H]),
+        ("task_ready", &[B, TIMED_OUT]),
+        ("isr_exit", &[H]),
+        ("task_ready", &[C, SLEEP_ELAPSED]),
+    ]);
+    assert_eq!(
+        lines[..2],
+        [
+            "wake at=2 task=0x20000200 reason=timed_out cause=elapsed",
+            "wake at=4 task=0x20000400 reason=sleep_elapsed cause=elapsed",
+        ]
+    );
+}
+
+#[test]
+fn a_notify_all_gives_each_task_woken_the_same_cause() {
+    let lines = wakes(&[
+        ("task_started", &[A]),
+        ("isr_enter", &[H]),
+        ("task_ready", &[B, NOTIFIED]),
+        ("task_ready", &[C, NOTIFIED]),
+    ]);
+    assert_eq!(
+        lines[..2],
+        [
+            "wake at=2 task=0x20000200 reason=notified cause=handler:0x08000401",
+            "wake at=3 task=0x20000400 reason=notified cause=handler:0x08000401",
+        ]
+    );
+}
+
+#[test]
+fn a_loss_hides_the_cause_until_the_next_task_switch() {
+    let lines = wakes(&[
+        ("task_started", &[A]),
+        ("lost", &[]),
+        ("task_ready", &[B, NOTIFIED]),
+        ("isr_enter", &[H]),
+        ("task_ready", &[C, NOTIFIED]),
+        ("isr_exit", &[H]),
+        ("task_started", &[B]),
+        ("task_ready", &[A, NOTIFIED]),
+    ]);
+    assert_eq!(
+        lines[..3],
+        [
+            "wake at=4 task=0x20000200 reason=notified cause=unknown",
+            "wake at=6 task=0x20000400 reason=notified cause=handler:0x08000401",
+            "wake at=9 task=0x20000100 reason=notified cause=task:0x20000200",
+        ]
+    );
+}
+
+#[test]
+fn a_task_is_ready_until_it_runs_and_each_time_it_is_preempted() {
+    assert_eq!(
+        wakes(&[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, NOTIFIED]),
+            ("task_started", &[B]),
+            ("task_started", &[A]),
+            ("task_started", &[B]),
+            ("task_started", &[A]),
+            ("task_started", &[B]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+        ]),
+        [
+            "wake at=1 task=0x20000100 reason=notified cause=task:idle",
+            "ready from=1 to=3 task=0x20000100",
+            "ready from=4 to=5 task=0x20000100",
+            "ready from=6 to=7 task=0x20000100",
+        ]
+    );
+}
+
+#[test]
+fn a_time_ready_ends_at_a_loss_or_open_at_the_end() {
+    assert_eq!(
+        wakes(&[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, NOTIFIED]),
+            ("lost", &[]),
+            ("task_ready", &[B, NOTIFIED]),
+            ("task_started", &[B]),
+            ("task_started", &[A]),
+            ("task_started", &[B]),
+            ("task_started", &[A]),
+            ("tick", &[]),
+        ]),
+        [
+            "wake at=1 task=0x20000100 reason=notified cause=task:idle",
+            "wake at=5 task=0x20000200 reason=notified cause=unknown",
+            "ready from=1 to=lost task=0x20000100",
+            "ready from=5 to=6 task=0x20000200",
+            "ready from=7 to=8 task=0x20000200",
+            "ready from=9 to=open task=0x20000200",
+        ]
+    );
+}
+
 #[test]
 fn a_task_keeps_its_last_priority() {
     let catalogue = catalogue();
@@ -470,8 +639,10 @@ fn an_image_without_the_adapter_is_not_traced() {
     assert!(!Opsy::new(&catalogue, 0).unwrap().traced());
 }
 
-const SIGNAL: u32 = 0;
-const TIMEOUT: u32 = 1;
+const NOTIFIED: u32 = 0;
+const TIMED_OUT: u32 = 1;
+const SLEEP_ELAPSED: u32 = 2;
+const MUTEX_GRANTED: u32 = 3;
 
 /// The statistics of `steps` over `range`, after checking that every split
 /// in two pieces gives the same instances, and that the JSON fits the schema.
@@ -538,13 +709,13 @@ fn names(report: &stats::Report) -> Vec<String> {
 /// and by the kernel's tick.
 const PREEMPTED: [(&str, &[u32]); 15] = [
     ("enter_idle", &[]),
-    ("task_ready", &[A, SIGNAL]),
+    ("task_ready", &[A, NOTIFIED]),
     ("task_started", &[A]),
     ("isr_enter", &[H]),
     ("isr_enter", &[G]),
     ("isr_exit", &[G]),
     ("isr_exit", &[H]),
-    ("task_ready", &[B, TIMEOUT]),
+    ("task_ready", &[B, TIMED_OUT]),
     ("task_started", &[B]),
     ("task_sleep", &[B]),
     ("task_started", &[A]),
@@ -561,14 +732,14 @@ fn an_activation_splits_into_what_preempts_it() {
     // Ready at 10, runs 20 to 80 and 100 to 130, H from 30 to 60 with G
     // from 40 to 50 in it, the tick from 110 to 120.
     assert_eq!(a("wake_latency"), (1, 0, 0, 0, vec![10]));
-    assert_eq!(a("wake_latency signal"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(a("wake_latency notified"), (1, 0, 0, 0, vec![10]));
     assert_eq!(a("gross"), (1, 0, 0, 0, vec![110]));
     assert_eq!(a("preempted_by_tasks"), (1, 0, 0, 0, vec![20]));
     assert_eq!(a("preempted_by_handlers"), (1, 0, 0, 0, vec![40]));
     assert_eq!(a("net"), (1, 0, 0, 0, vec![50]));
     assert_eq!(a("response"), (1, 0, 0, 0, vec![120]));
     let b = |metric| group(&report, &format!("task 0x20000200 {metric}"));
-    assert_eq!(b("wake_latency timeout"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(b("wake_latency timed_out"), (1, 0, 0, 0, vec![10]));
     assert_eq!(b("net"), (1, 0, 0, 0, vec![10]));
     assert_eq!(b("response"), (1, 0, 0, 0, vec![20]));
     let handler = |name| group(&report, &format!("handler {name}"));
@@ -602,12 +773,12 @@ fn an_instance_that_touches_a_loss_is_excluded() {
     let report = report(
         &[
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("lost", &[]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
@@ -642,17 +813,17 @@ fn a_share_is_over_the_time_known_in_the_range() {
     let report = report(
         &[
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
             ("lost", &[]),
             ("tick", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
@@ -680,12 +851,12 @@ fn an_instance_that_covers_an_overrun_write_is_excluded() {
     let report = report(
         &[
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("suspect", &[]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
@@ -703,16 +874,16 @@ fn the_period_jitter_and_worst_instances_point_at_their_start() {
     let report = report(
         &[
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
-            ("task_ready", &[A, TIMEOUT]),
+            ("task_ready", &[A, TIMED_OUT]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
             ("tick", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
             ("task_sleep", &[A]),
             ("enter_idle", &[]),
@@ -737,8 +908,8 @@ fn the_period_jitter_and_worst_instances_point_at_their_start() {
     let response = find("response", None).distribution.as_ref().unwrap();
     let worst: Vec<(i64, u32)> = response.worst.iter().map(|point| (point.value, point.index)).collect();
     assert_eq!(worst, [(20, 1), (20, 5), (20, 10)]);
-    assert_eq!(find("wake_latency", Some("signal")).count, 2);
-    assert_eq!(find("wake_latency", Some("timeout")).count, 1);
+    assert_eq!(find("wake_latency", Some("notified")).count, 2);
+    assert_eq!(find("wake_latency", Some("timed_out")).count, 1);
     assert_eq!(find("response", None).jitter(), None);
 }
 
@@ -793,7 +964,7 @@ fn an_activation_still_open_at_the_end_is_cut() {
     let report = report(
         &[
             ("enter_idle", &[]),
-            ("task_ready", &[A, SIGNAL]),
+            ("task_ready", &[A, NOTIFIED]),
             ("task_started", &[A]),
         ],
         stats::Range::default(),

@@ -28,7 +28,14 @@ on the core (`run`, the idle task as `task=idle`), a handler running
 (`interrupt`, `depth` handlers below it, `unknown` from a loss to the next
 task switch), a mutex held (`hold`) or waited for (`wait`), from one event
 index to another; `lost` for an edge hidden by a loss, `to=open` for a span
-still open at the end. Then a line
+still open at the end. Then a line for each task_ready, `wake at=<index>`,
+with its reason and its cause: the context it is emitted in, the innermost
+handler open but the kernel's (`handler:<name>`) or else the task on the core
+(`task:<name>`, `task:idle`); `elapsed` for a delay that ran out, in SysTick;
+`unknown` from a loss to the next task switch. A handler not traced by the
+adapter hides in the task it interrupts. Then a line for each time a task is
+ready and not on the core (`ready`): from its task_ready to its first run,
+then each time it is preempted, to the end of its activation. Then a line
 `contradiction <index>` for each event against the order OpSy's hooks keep.
 
 The ring of a copy is the image's only kymo::ring object, or the one

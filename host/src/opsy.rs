@@ -30,6 +30,15 @@
 //! one that ends after a loss with no task_ready seen since, and none open
 //! at it, starts at the loss.
 //!
+//! A task is ready, within an activation, while it does not hold the core:
+//! from its task_ready to its first run, then each time it is preempted.
+//!
+//! Each task_ready has a cause, the context it is emitted in: the innermost
+//! handler open but the kernel's, or else the task on the core; unknown from
+//! a loss to the next task_started or enter_idle. A wake by a delay that ran
+//! out is emitted in SysTick, whatever it interrupts: its cause is the delay.
+//! A handler the adapter does not trace hides in the task it interrupts.
+//!
 //! The kernel's SysTick and service call handlers, when the kernel family is
 //! recorded, run as handlers named `systick` and `service_call`. PendSV has
 //! no exit event: it makes no span, and the task it puts on the core runs
@@ -45,6 +54,8 @@ use crate::target::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const PREFIX: &str = "kymo::opsy::";
+/// OpSy's wake reasons for a delay that ran out, given in SysTick.
+const ELAPSED: [&str; 2] = ["timed_out", "sleep_elapsed"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -77,12 +88,26 @@ pub struct Hold {
     pub span: Span,
 }
 
-/// A task's activation: from its task_ready, by `reason`, to the event that
-/// makes it not ready. Started at a loss, it has no reason.
+/// What made a task ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// The innermost handler open, the kernel's left out.
+    Handler(usize),
+    /// The task on the core, or the idle task for none.
+    Task(Option<usize>),
+    /// A delay that ran out.
+    Elapsed,
+    /// Hidden by a loss.
+    Unknown,
+}
+
+/// A task's activation: from its task_ready, by `reason` and `cause`, to the
+/// event that makes it not ready. Started at a loss, it has neither.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Activation {
     pub task: usize,
     pub reason: Option<String>,
+    pub cause: Option<Cause>,
     pub span: Span,
 }
 
@@ -91,7 +116,17 @@ pub struct Activation {
 pub struct Wake {
     pub task: usize,
     pub reason: String,
+    pub cause: Cause,
     pub edge: Edge,
+}
+
+/// A task ready and not on the core, within an activation; `open` when it
+/// ends with an activation still open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ready {
+    pub task: usize,
+    pub span: Span,
+    pub open: bool,
 }
 
 /// Spans, each list in the order its spans closed.
@@ -147,6 +182,11 @@ impl Subjects {
             });
             self.list.len() - 1
         })
+    }
+
+    /// Whether `subject` is one no event field gives.
+    fn is_named(&self, subject: usize) -> bool {
+        self.by_name.values().any(|&named| named == subject)
     }
 
     /// A subject no event field gives, by name; its address is 0.
@@ -351,8 +391,8 @@ pub struct Opsy<'a> {
     pub activations: Vec<Activation>,
     /// Every task_ready, in order.
     pub wakes: Vec<Wake>,
-    /// By task: its activation open, since when and why.
-    ready: BTreeMap<usize, (Edge, Option<String>)>,
+    /// By task: its activation open, since when, why and by what.
+    ready: BTreeMap<usize, (Edge, Option<String>, Option<Cause>)>,
     /// The tasks whose activations are known since the last loss: open at
     /// it, or made ready or not ready since.
     known: BTreeSet<usize>,
@@ -454,9 +494,19 @@ impl<'a> Opsy<'a> {
                     return self.contradictions.push(edge.element);
                 }
                 let reason = reason.label(payload);
-                self.ready.insert(task, (edge, Some(reason.clone())));
+                let cause = if ELAPSED.contains(&reason.as_str()) {
+                    Cause::Elapsed
+                } else {
+                    self.context()
+                };
+                self.ready.insert(task, (edge, Some(reason.clone()), Some(cause)));
                 self.known.insert(task);
-                self.wakes.push(Wake { task, reason, edge });
+                self.wakes.push(Wake {
+                    task,
+                    reason,
+                    cause,
+                    edge,
+                });
             }
             Hook::TaskBlocked { task } => {
                 let task = self.tasks.index(symbols, task, payload);
@@ -514,6 +564,21 @@ impl<'a> Opsy<'a> {
         }
     }
 
+    /// The context an event is emitted in: the innermost handler open but
+    /// the kernel's, or else the task on the core.
+    fn context(&self) -> Cause {
+        let handler = self
+            .entered
+            .iter()
+            .rev()
+            .find(|&&(handler, ..)| !self.handlers.is_named(handler));
+        match (handler, self.running) {
+            (Some(&(handler, ..)), _) => Cause::Handler(handler),
+            (None, Some((task, _))) => Cause::Task(task),
+            (None, None) => Cause::Unknown,
+        }
+    }
+
     /// Closes the innermost handler running, `handler`, at `edge`.
     fn exit(&mut self, handler: usize, edge: Edge) {
         let (from, depth) = match (self.entered.last(), self.loss) {
@@ -541,15 +606,16 @@ impl<'a> Opsy<'a> {
     /// loss that hid its start, one from the loss.
     fn not_ready(&mut self, task: usize, edge: Edge) {
         let start = match (self.ready.remove(&task), self.loss) {
-            (Some((from, reason)), _) => Some((from, reason)),
-            (None, Some(loss)) if !self.known.contains(&task) => Some((loss, None)),
+            (Some(start), _) => Some(start),
+            (None, Some(loss)) if !self.known.contains(&task) => Some((loss, None, None)),
             _ => None,
         };
         self.known.insert(task);
-        if let Some((from, reason)) = start {
+        if let Some((from, reason, cause)) = start {
             self.activations.push(Activation {
                 task,
                 reason,
+                cause,
                 span: Span { from, to: edge },
             });
         }
@@ -648,9 +714,10 @@ impl<'a> Opsy<'a> {
     fn activations_ended_at(&self, to: Edge) -> Vec<Activation> {
         self.ready
             .iter()
-            .map(|(&task, (from, reason))| Activation {
+            .map(|(&task, (from, reason, cause))| Activation {
                 task,
                 reason: reason.clone(),
+                cause: *cause,
                 span: Span { from: *from, to },
             })
             .collect()
@@ -686,6 +753,17 @@ impl<'a> Opsy<'a> {
             handlers: Covered::union(handlers.clone(), handler_open).within(&known),
             busy: Covered::union(handlers.chain(tasks), handler_open.into_iter().chain(task_open).min()).within(&known),
             known,
+        }
+    }
+
+    /// `cause` as `kymo decode --opsy` prints it: `handler:<name>`,
+    /// `task:<name>` (`task:idle` for the idle task), `elapsed` or `unknown`.
+    pub fn cause(&self, cause: Cause) -> String {
+        match cause {
+            Cause::Handler(handler) => format!("handler:{}", self.handlers.list[handler].name),
+            Cause::Task(task) => format!("task:{}", task.map_or("idle", |task| &self.tasks.list[task].name)),
+            Cause::Elapsed => "elapsed".to_owned(),
+            Cause::Unknown => "unknown".to_owned(),
         }
     }
 
@@ -765,6 +843,74 @@ fn parents(interrupts: &[(Interrupt, bool)]) -> Vec<Option<usize>> {
         .collect()
 }
 
+/// Each task's runs, closed or open, in order.
+fn task_runs(opsy: &Opsy) -> HashMap<usize, Vec<Span>> {
+    let open = opsy.open();
+    let mut runs: Vec<Run> = opsy.closed.runs.iter().chain(&open.runs).copied().collect();
+    runs.sort_by_key(|run| run.span.from.element);
+    let mut by_task: HashMap<usize, Vec<Span>> = HashMap::new();
+    for run in runs {
+        if let Some(task) = run.task {
+            by_task.entry(task).or_default().push(run.span);
+        }
+    }
+    by_task
+}
+
+/// The parts of `runs`, sorted and apart, within `span`, as edges.
+fn within(runs: &[Span], span: Span) -> Vec<(Edge, Edge)> {
+    let first = runs.partition_point(|run| run.to.element <= span.from.element);
+    runs[first..]
+        .iter()
+        .take_while(|run| run.from.element <= span.to.element)
+        .map(|run| {
+            let low = if run.from.element > span.from.element {
+                run.from
+            } else {
+                span.from
+            };
+            let high = if run.to.element < span.to.element {
+                run.to
+            } else {
+                span.to
+            };
+            (low, high)
+        })
+        .collect()
+}
+
+/// Each task's time ready, activation by activation, those that ended
+/// first, then those still open: the activation less the task's runs.
+pub fn ready(opsy: &Opsy) -> Vec<Ready> {
+    let runs = task_runs(opsy);
+    let still_open = opsy.open_activations();
+    let activations = opsy
+        .activations
+        .iter()
+        .map(|activation| (activation, false))
+        .chain(still_open.iter().map(|activation| (activation, true)));
+    let mut out = Vec::new();
+    for (activation, open) in activations {
+        let (task, span) = (activation.task, activation.span);
+        let mut push = |from: Edge, to: Edge, open| {
+            if to.element > from.element {
+                out.push(Ready {
+                    task,
+                    span: Span { from, to },
+                    open,
+                });
+            }
+        };
+        let mut from = span.from;
+        for (low, high) in runs.get(&task).map_or_else(Vec::new, |runs| within(runs, span)) {
+            push(from, low, false);
+            from = high;
+        }
+        push(from, span.to, open);
+    }
+    out
+}
+
 /// OpSy's instances for kymo::stats, by subject and metric:
 ///
 /// - a task's, of each activation from its task_ready to its end: the wake
@@ -783,9 +929,6 @@ fn parents(interrupts: &[(Interrupt, bool)]) -> Vec<Option<usize>> {
 /// hold or wait; those still open at the end of the trace are open.
 pub fn instances(opsy: &Opsy) -> Vec<Instance> {
     let open = opsy.open();
-    let mut runs: Vec<(Run, bool)> = opsy.closed.runs.iter().map(|&run| (run, false)).collect();
-    runs.extend(open.runs.iter().map(|&run| (run, true)));
-    runs.sort_by_key(|(run, _)| run.span.from.element);
     let mut interrupts: Vec<(Interrupt, bool)> = opsy
         .closed
         .interrupts
@@ -806,12 +949,7 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
         .filter(|(_, parent)| parent.is_none())
         .map(|((interrupt, _), _)| interrupt.span)
         .collect();
-    let mut task_runs: HashMap<usize, Vec<Span>> = HashMap::new();
-    for (run, _) in &runs {
-        if let Some(task) = run.task {
-            task_runs.entry(task).or_default().push(run.span);
-        }
-    }
+    let task_runs = task_runs(opsy);
 
     // Sorted by kind, subject, metric, detail and start before being handed out.
     type Order = (u8, usize, usize, Option<String>, usize);
@@ -858,27 +996,7 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
         let (task, span) = (activation.task, activation.span);
         let mut task_push = |metric, detail, value| push(TASK, task, &TASK_METRICS, metric, detail, value, span, open);
         task_push(RESPONSE, None, span.to.cycles - span.from.cycles);
-        let windows: Vec<(Edge, Edge)> = task_runs
-            .get(&task)
-            .map(|runs| {
-                runs.iter()
-                    .filter(|run| run.from.element <= span.to.element && run.to.element > span.from.element)
-                    .map(|run| {
-                        let low = if run.from.element > span.from.element {
-                            run.from
-                        } else {
-                            span.from
-                        };
-                        let high = if run.to.element < span.to.element {
-                            run.to
-                        } else {
-                            span.to
-                        };
-                        (low, high)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let windows = task_runs.get(&task).map_or_else(Vec::new, |runs| within(runs, span));
         let Some(&(first, _)) = windows.first() else {
             continue;
         };
@@ -996,8 +1114,9 @@ pub fn instances(opsy: &Opsy) -> Vec<Instance> {
 }
 
 /// `kymo decode --opsy`'s output: the spans of a capture's trace, a line
-/// each, those still open at its end last with `to=open`, then the
-/// contradictions. An edge is the index of its event, or `lost`.
+/// each, those still open at its end last with `to=open`; each task_ready
+/// and its cause; each time ready; then the contradictions. An edge is the
+/// index of its event, or `lost`.
 pub fn lines(trace: &Trace, opsy: &Opsy) -> Vec<String> {
     let mut lines = Vec::new();
     let edge = |edge: Edge| match &trace.elements[edge.element] {
@@ -1037,6 +1156,27 @@ pub fn lines(trace: &Trace, opsy: &Opsy) -> Vec<String> {
                 task(Some(hold.task))
             ));
         }
+    }
+    for wake in &opsy.wakes {
+        lines.push(format!(
+            "wake at={} task={} reason={} cause={}",
+            edge(wake.edge),
+            task(Some(wake.task)),
+            wake.reason,
+            opsy.cause(wake.cause)
+        ));
+    }
+    for ready in ready(opsy) {
+        lines.push(format!(
+            "ready from={} to={} task={}",
+            edge(ready.span.from),
+            if ready.open {
+                "open".to_owned()
+            } else {
+                edge(ready.span.to)
+            },
+            task(Some(ready.task))
+        ));
     }
     for &element in &opsy.contradictions {
         if let Element::Event { event, .. } = &trace.elements[element] {

@@ -27,7 +27,9 @@ that:
 - every family on by default was recorded;
 - `kymo decode --opsy` on the capture of the recording gives the spans
   computed here from its event lines: tasks on the core, handlers running,
-  mutexes held and waited for;
+  mutexes held and waited for, the cause of each wake and each time a task
+  is ready; and the suite wakes a task from a handler, from a task, by a
+  delay and by a mutex released;
 - `kymo stats --json`, on the whole capture and on its middle half, gives
   what oracle.py computes from the event lines `kymo decode` prints: every
   group, its counts, percentiles, histogram and worst instances.
@@ -38,6 +40,7 @@ meanwhile.
 """
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -62,6 +65,8 @@ WORST = 5
 EXIT = "_ZN4qemu4exitEi"
 
 PREFIX = "kymo::opsy::"
+# The wake reasons of a delay that ran out, given in SysTick.
+ELAPSED = {"timed_out", "sleep_elapsed"}
 # Each event of the adapter: its family and its fields, in order.
 EVENTS = {
     "starting": ("scheduling", ["core_clock"]),
@@ -218,43 +223,88 @@ def spans(output: str) -> list[str]:
     after one, with nothing open to close, starts at it. From a loss to the
     next task_started or enter_idle with no handler open, the depth is
     unknown. An event against that order is a contradiction.
+
+    Each task_ready has a cause: `elapsed` for a delay that ran out, or else
+    the innermost handler open but the kernel's, or else the task running;
+    `unknown` from a loss to the next task_started or enter_idle. A task is
+    ready, in an activation (from its task_ready to its task_sleep, task_wait,
+    task_wait_timeout, mutex_blocked or task_terminated), while it does not
+    run. A loss ends the activations open; one that ends after it with no
+    task_ready seen since, and none open at it, starts at it.
     """
     out = []
-    lost = False
+    lost = None  # the last loss, as an edge (position, label)
     nesting_known = True
     running = None  # (task, since), or None while unknown
     isrs = []  # (handler, since, depth)
     held = {}  # mutex: (owner, since)
     waits = {}  # (mutex, waiter): since
-    for line, name, fields in parse(output):
+    ready = {}  # task: since, of its activation open
+    seen = set()  # tasks whose activation is known since the last loss
+    activations = []  # (task, since, to, open), edges (position, label)
+    runs = []  # (task, since, to), edges (position, label)
+    last = None
+
+    def end_activation(task, edge):
+        if task in ready:
+            activations.append((task, ready.pop(task), edge, False))
+        elif lost is not None and task not in seen:
+            activations.append((task, lost, edge, False))
+        seen.add(task)
+
+    def cause(reason):
+        if reason in ELAPSED:
+            return "elapsed"
+        for handler, _, _ in reversed(isrs):
+            if handler not in oracle.KERNEL.values():
+                return f"handler:{handler}"
+        return "unknown" if running is None else f"task:{running[0]}"
+
+    for n, (line, name, fields) in enumerate(parse(output)):
         if name is None:
+            edge = (n, "lost")
             if running is not None:
-                out.append(f"run from={running[1]} to=lost task={running[0]}")
+                out.append(f"run from={running[1][1]} to=lost task={running[0]}")
+                runs.append((running[0], running[1], edge))
             for handler, since, depth in isrs:
                 out.append(f"interrupt from={since} to=lost depth={depth} handler={handler}")
             for mutex, (owner, since) in held.items():
                 out.append(f"hold from={since} to=lost mutex={mutex} task={owner}")
             for (mutex, waiter), since in waits.items():
                 out.append(f"wait from={since} to=lost mutex={mutex} task={waiter}")
-            lost, nesting_known, running, isrs, held, waits = True, False, None, [], {}, {}
+            activations.extend((task, since, edge, False) for task, since in ready.items())
+            seen = set(ready)
+            lost, nesting_known, running, isrs, held, waits, ready = edge, False, None, [], {}, {}, {}
             continue
         at = line.split(" ")[1]
+        last = (n, at)
         name = name[len(PREFIX):] if name.startswith(PREFIX) else name
         values = dict(fields)
         if name in ("task_started", "enter_idle"):
             task = values.get("task", "idle")
             if running is not None:
-                out.append(f"run from={running[1]} to={at} task={running[0]}")
-            running = (task, at)
+                out.append(f"run from={running[1][1]} to={at} task={running[0]}")
+                runs.append((running[0], running[1], last))
+            running = (task, last)
             if not isrs:
                 nesting_known = True
+        elif name == "task_ready":
+            task = values["task"]
+            if task in ready:
+                out.append(f"contradiction {at}")
+                continue
+            out.append(f"wake at={at} task={task} reason={values['reason']} cause={cause(values['reason'])}")
+            ready[task] = last
+            seen.add(task)
+        elif name in ("task_sleep", "task_wait", "task_wait_timeout"):
+            end_activation(values["task"], last)
         elif name in ("isr_enter", "enter_systick", "enter_service_call"):
             isrs.append((oracle.KERNEL.get(name) or values["handler"], at, len(isrs) if nesting_known else "unknown"))
         elif name in ("isr_exit", "exit_systick", "exit_service_call"):
             handler = oracle.KERNEL.get(name) or values["handler"]
             if isrs and isrs[-1][0] == handler:
                 _, since, depth = isrs.pop()
-            elif not isrs and lost:
+            elif not isrs and lost is not None:
                 since, depth = "lost", "unknown"
             else:
                 out.append(f"contradiction {at}")
@@ -272,7 +322,7 @@ def spans(output: str) -> list[str]:
             mutex, owner = values["mutex"], values["owner"]
             if mutex in held and held[mutex][0] == owner:
                 since = held.pop(mutex)[1]
-            elif mutex not in held and lost:
+            elif mutex not in held and lost is not None:
                 since = "lost"
             else:
                 out.append(f"contradiction {at}")
@@ -284,11 +334,32 @@ def spans(output: str) -> list[str]:
                 out.append(f"contradiction {at}")
                 continue
             waits[key] = at
+            end_activation(values["waiter"], last)
         elif name == "task_terminated":
             for mutex, waiter in [key for key in waits if key[1] == values["task"]]:
                 out.append(f"wait from={waits.pop((mutex, waiter))} to={at} mutex={mutex} task={waiter}")
+            end_activation(values["task"], last)
     if running is not None:
-        out.append(f"run from={running[1]} to=open task={running[0]}")
+        out.append(f"run from={running[1][1]} to=open task={running[0]}")
+        runs.append((running[0], running[1], last))
+    activations.extend((task, since, last, True) for task, since in ready.items())
+    # A task is ready in its activation but where it runs.
+    by_task = {}
+    for task, since, to in sorted(runs, key=lambda run: run[1][0]):
+        by_task.setdefault(task, []).append((since, to))
+    ends = {task: [run_to[0] for _, run_to in task_runs] for task, task_runs in by_task.items()}
+    for task, since, to, is_open in activations:
+        start = since
+        task_runs = by_task.get(task, [])
+        for run_from, run_to in task_runs[bisect.bisect_right(ends.get(task, []), since[0]):]:
+            if run_from[0] > to[0]:
+                break
+            low = run_from if run_from[0] > since[0] else since
+            if low[0] > start[0]:
+                out.append(f"ready from={start[1]} to={low[1]} task={task}")
+            start = run_to if run_to[0] < to[0] else to
+        if to[0] > start[0]:
+            out.append(f"ready from={start[1]} to={'open' if is_open else to[1]} task={task}")
     for handler, since, depth in isrs:
         out.append(f"interrupt from={since} to=open depth={depth} handler={handler}")
     for mutex, (owner, since) in held.items():
@@ -302,7 +373,11 @@ def check_spans(output: str, decoded: str) -> list[str]:
     """kymo decode --opsy's spans against those computed here, each kind seen."""
     expected, got = spans(output), sorted(decoded.splitlines())
     kinds = {kind: sum(line.startswith(kind + " ") for line in expected)
-             for kind in ("run", "interrupt", "hold", "wait")}
+             for kind in ("run", "interrupt", "hold", "wait", "wake", "ready")}
+    causes = {cause: sum(line.startswith("wake ") and f" cause={cause}" in line for line in expected)
+              for cause in ("handler:", "task:", "elapsed")}
+    granted = sum(line.startswith("wake ") and " reason=mutex_granted " in line for line in expected)
+    print(f"wakes by cause: {causes}, by a mutex released: {granted}")
     print(f"spans: {kinds}, {len(got)} printed by kymo decode --opsy")
     errors = [f"expected, not printed: {line}" for line in sorted(set(expected) - set(got))]
     errors += [f"printed, not expected: {line}" for line in sorted(set(got) - set(expected))]
@@ -310,6 +385,8 @@ def check_spans(output: str, decoded: str) -> list[str]:
         errors.append("the same spans, not as many times each")
     if 0 in kinds.values():
         errors.append(f"the recording left a kind of span unexercised: {kinds}")
+    if 0 in causes.values() or not granted:
+        errors.append(f"the recording left a cause of wake unexercised: {causes}, mutex_granted {granted}")
     return errors
 
 
