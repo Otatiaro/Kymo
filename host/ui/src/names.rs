@@ -41,6 +41,30 @@ pub fn shown(subjects: &[&[Subject]]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The names shown for event `types`, in their order: each type's last
+/// component, the anonymous namespaces left out; types alike in it take
+/// scopes from the left until they differ.
+pub fn types(types: &[&str]) -> Vec<String> {
+    let scopes: Vec<Vec<&str>> = types.iter().map(|name| scopes(name)).collect();
+    let mut kept = vec![1; types.len()];
+    loop {
+        let shown: Vec<&[&str]> = scopes
+            .iter()
+            .zip(&kept)
+            .map(|(scopes, &kept)| &scopes[scopes.len() - kept..])
+            .collect();
+        let alike: Vec<usize> = (0..shown.len())
+            .filter(|&n| kept[n] < scopes[n].len() && (0..shown.len()).any(|m| m != n && shown[m] == shown[n]))
+            .collect();
+        if alike.is_empty() {
+            return shown.iter().map(|scopes| scopes.join("::")).collect();
+        }
+        for n in alike {
+            kept[n] += 1;
+        }
+    }
+}
+
 /// The scopes of a qualified `name`, the anonymous namespaces left out: a
 /// `::` inside template arguments or a parameter list separates none.
 fn scopes(name: &str) -> Vec<&str> {
@@ -136,6 +160,53 @@ mod tests {
             ]),
             [vec!["g_logger"], vec!["timer_isr (IRQ45)"]]
         );
+    }
+
+    /// A type shows its last component, without the anonymous namespaces.
+    #[test]
+    fn a_type_shows_its_last_component() {
+        assert_eq!(
+            types(&["kymo::opsy::task_started", "app::(anonymous namespace)::sample", "tick"]),
+            ["task_started", "sample", "tick"]
+        );
+    }
+
+    /// Types alike in their last component take scopes until they differ;
+    /// the others keep theirs alone.
+    #[test]
+    fn types_alike_take_scopes_until_they_differ() {
+        assert_eq!(
+            types(&[
+                "app::sensors::sample_ready",
+                "app::comms::sample_ready",
+                "kymo::opsy::task_ready"
+            ]),
+            ["sensors::sample_ready", "comms::sample_ready", "task_ready"]
+        );
+        assert_eq!(
+            types(&["a::x::io::done", "b::x::io::done", "c::y::done"]),
+            ["a::x::io::done", "b::x::io::done", "y::done"]
+        );
+    }
+
+    /// Types alike in full, as two translation units' anonymous namespaces
+    /// give, keep all their scopes.
+    #[test]
+    fn types_alike_in_full_keep_all_their_scopes() {
+        assert_eq!(
+            types(&[
+                "app::(anonymous namespace)::sample",
+                "app::(anonymous namespace)::sample",
+                "tick"
+            ]),
+            ["app::sample", "app::sample", "tick"]
+        );
+    }
+
+    /// A `::` inside template arguments is no scope of the type.
+    #[test]
+    fn template_arguments_are_no_scope_of_a_type() {
+        assert_eq!(types(&["app::event<app::x>", "app::other"]), ["event<app::x>", "other"]);
     }
 
     /// A `::` inside template arguments or a parameter list is no namespace.

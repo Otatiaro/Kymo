@@ -101,15 +101,22 @@ impl Timeline {
         ui.separator();
         let symbols = &self.catalogue.symbols;
         // A line's cells: index, type, fields; a loss's or a suspect line's
-        // text in the fields, and the fields in full when they differ.
+        // text in the fields, and the type and fields in full when they
+        // differ.
         let cells = |entry: &Entry| -> (String, String, String, Option<String>) {
             match &self.trace.elements[entry.element] {
                 Element::Event { event, .. } => {
                     let fields = self.fields(event);
-                    let mut full = String::new();
-                    decode::fields(&mut full, symbols, event);
-                    let full = (full != fields).then_some(full);
-                    (event.index.to_string(), event.event.name.clone(), fields, full)
+                    let row = self
+                        .ids
+                        .binary_search(&event.event.id)
+                        .expect("an event of the catalogue");
+                    let kind = self.rows[row].name.clone();
+                    let mut in_full = String::new();
+                    decode::fields(&mut in_full, symbols, event);
+                    let full = (kind != event.event.name || fields != in_full)
+                        .then(|| format!("{}  {in_full}", event.event.name).trim_end().to_owned());
+                    (event.index.to_string(), kind, fields, full)
                 }
                 other => (String::new(), String::new(), marked(other).unwrap_or_default(), None),
             }

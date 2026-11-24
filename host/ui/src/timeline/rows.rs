@@ -4,7 +4,8 @@ use super::Timeline;
 use crate::levels::Levels;
 use kymo::model::Element;
 
-/// The events of one type, by cycles, and their elements in the trace.
+/// The events of one type, by cycles, and their elements in the trace; its
+/// name as shown (names.rs).
 pub(super) struct Row {
     pub(super) name: String,
     pub(super) levels: Levels,
@@ -147,6 +148,9 @@ impl Timeline {
             (Line::Mutex(n), Some(kernel)) => kernel.mutexes.list.get(n),
             _ => None,
         };
+        if let Line::Event(row) = line {
+            return self.catalogue.events[&self.ids[row]].name.clone();
+        }
         name.map_or_else(|| self.label(line), |subject| subject.name.clone())
     }
 
