@@ -78,6 +78,7 @@ mod tests {
             address,
             name: name.to_owned(),
             priority: None,
+            priorities: Vec::new(),
         }
     }
 
