@@ -208,7 +208,7 @@ impl Timeline {
             if let (Some(meaning), Some(subs)) = (meaning, &subs) {
                 let rows = &meaning.load;
                 let row = |covered: Option<&Covered>, color: Color32| {
-                    covered.map(|covered| (load::row(&view, subs, covered), vec![color]))
+                    covered.map(|covered| (load::row(&view, subs, covered), vec![color], 0.0))
                 };
                 let drawn = match line {
                     Line::Cpu => {
@@ -217,7 +217,7 @@ impl Timeline {
                         let colors = std::iter::once(palette.interrupt)
                             .chain(order.iter().map(|&task| meaning.task_color(Some(task), &palette)))
                             .collect();
-                        Some((load::cpu(&view, subs, &rows.cpu, &order), colors))
+                        Some((load::cpu(&view, subs, &rows.cpu, &order), colors, load::GAP))
                     }
                     Line::Task(task) if loaded => row(
                         task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),
@@ -227,8 +227,8 @@ impl Timeline {
                     Line::Mutex(mutex) if loaded => row(rows.holds.get(mutex), palette.hold),
                     _ => None,
                 };
-                if let Some((bins, colors)) = drawn {
-                    load::paint(bars.mesh, &bins, area, (high, low), &colors, palette.unknown);
+                if let Some((bins, colors, gap)) = drawn {
+                    load::paint(bars.mesh, &bins, area, (high, low), gap, &colors, palette.unknown);
                     drawn_rows.push((n, bins));
                     continue;
                 }
