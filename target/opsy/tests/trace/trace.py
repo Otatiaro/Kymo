@@ -27,7 +27,10 @@ that:
 - every family on by default was recorded;
 - `kymo decode --opsy` on the capture of the recording gives the spans
   computed here from its event lines: tasks on the core, handlers running,
-  mutexes held and waited for.
+  mutexes held and waited for;
+- `kymo stats --json`, on the whole capture and on its middle half, gives
+  what oracle.py computes from the event lines `kymo decode` prints: every
+  group, its counts, percentiles, histogram and worst instances.
 
 After a loss, the running task, the waiting ones, the open interrupts and the
 priorities are unknown until seen again: a check that needs them is skipped
@@ -35,6 +38,8 @@ meanwhile.
 """
 
 import argparse
+import json
+import math
 import os
 import re
 import socket
@@ -46,6 +51,11 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "tests", "record"))
 from record import TIMEOUT_SECONDS, free_port, wait_for  # noqa: E402
+
+import oracle  # noqa: E402
+
+# The worst instances kymo stats keeps for each group, in the comparison.
+WORST = 5
 
 # Where the suite ends the emulation: qemu::exit(int), out of line at every
 # optimisation level.
@@ -199,7 +209,9 @@ def spans(output: str) -> list[str]:
 
     A task runs from its task_started, or the idle task from enter_idle, to
     the next of either. A handler runs from its isr_enter to the isr_exit
-    that closes it, at the depth of the handlers still open below it. A mutex
+    that closes it, at the depth of the handlers still open below it; the
+    kernel's SysTick and SVCall handlers likewise, from their enter_ event to
+    their exit_ event. A mutex
     is held from mutex_taken to mutex_released by the same task, and waited
     for from mutex_blocked to its waiter's mutex_taken, or the waiter's
     task_terminated. A loss ends whatever is open; an exit or a release seen
@@ -236,10 +248,10 @@ def spans(output: str) -> list[str]:
             running = (task, at)
             if not isrs:
                 nesting_known = True
-        elif name == "isr_enter":
-            isrs.append((values["handler"], at, len(isrs) if nesting_known else "unknown"))
-        elif name == "isr_exit":
-            handler = values["handler"]
+        elif name in ("isr_enter", "enter_systick", "enter_service_call"):
+            isrs.append((oracle.KERNEL.get(name) or values["handler"], at, len(isrs) if nesting_known else "unknown"))
+        elif name in ("isr_exit", "exit_systick", "exit_service_call"):
+            handler = oracle.KERNEL.get(name) or values["handler"]
             if isrs and isrs[-1][0] == handler:
                 _, since, depth = isrs.pop()
             elif not isrs and lost:
@@ -298,6 +310,53 @@ def check_spans(output: str, decoded: str) -> list[str]:
         errors.append("the same spans, not as many times each")
     if 0 in kinds.values():
         errors.append(f"the recording left a kind of span unexercised: {kinds}")
+    return errors
+
+
+def check_stats(host: str, image: str, capture: str) -> list[str]:
+    """kymo stats --json against oracle.py, on the whole capture and on its
+    middle half, every kind of instance seen and some cut by the range."""
+    def run(*arguments) -> str:
+        done = subprocess.run([host, *arguments], capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+        if done.returncode != 0:
+            raise RuntimeError(f"kymo {arguments[0]} failed: {done.stderr.strip()}")
+        return done.stdout
+
+    try:
+        # The whole capture without a frequency: no seconds.
+        decoded = run("decode", image, capture)
+        whole = json.loads(run("stats", image, capture, "--json", "--worst", str(WORST)))
+        # The middle half, in seconds at the frequency measured, or else at
+        # the core clock the suite starts with; its bounds in cycles as kymo
+        # stats computes them, rounded half away from zero.
+        hz, clock, clocked = whole["frequency"], [], decoded
+        if hz is None:
+            hz = int(re.search(r" kymo::opsy::starting core_clock=(\d+)", decoded)[1])
+            clock = ["--clock", str(hz)]
+            clocked = run("decode", image, capture, *clock)
+        origin = whole["origin"]
+        bounds = [whole["from"] + (whole["to"] - whole["from"]) * quarter // 4 for quarter in (1, 3)]
+        seconds = [(bound - origin) / hz for bound in bounds]
+        low, high = (origin + math.floor(second * hz + 0.5) for second in seconds)
+        middle = json.loads(run("stats", image, capture, "--json", "--worst", str(WORST), *clock,
+                                "--from", repr(seconds[0]), "--to", repr(seconds[1])))
+    except (RuntimeError, ValueError, KeyError, TypeError) as error:
+        return [str(error)]
+    errors = []
+    for name, got, expected in (("whole", whole, oracle.report(decoded, None, None, WORST)),
+                                ("middle", middle, oracle.report(clocked, low, high, WORST))):
+        errors += [f"stats {name}: {error}" for error in oracle.compare(expected, got)]
+    kinds = {kind: sum(group["count"] for group in whole["groups"] if group["kind"] == kind)
+             for kind in ("task", "handler", "mutex")}
+    cut = sum(group["cut"] for group in middle["groups"])
+    print(f"stats: {len(whole['groups'])} groups, instances {kinds}, cycles {whole['from']} to {whole['to']}, "
+          f"{cut} cut by the middle half")
+    if 0 in kinds.values():
+        errors.append(f"the recording left a kind of instance unexercised: {kinds}")
+    # QEMU leaves the cycle counter at 0: every duration is 0, the range cuts
+    # nothing, and only the board's recording checks them.
+    if whole["to"] > whole["from"] and cut == 0:
+        errors.append("the middle half cut no instance")
     return errors
 
 
@@ -414,6 +473,7 @@ def main() -> int:
         errors.append(f"kymo decode --opsy failed: {decoded.stderr.strip()}")
     else:
         errors += check_spans(stdout, decoded.stdout)
+    errors += check_stats(args.host, args.image, capture)
     directory.cleanup()
     for error in errors[:20]:
         print(error)

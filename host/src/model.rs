@@ -10,6 +10,16 @@ use crate::events::Catalogue;
 use crate::target::Result;
 use crate::time::Timeline;
 
+/// Where something starts or ends: an element of the trace, and its cycles.
+/// At a loss, the edge is somewhere in what it hides; its cycles are those
+/// of the event before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edge {
+    pub element: usize,
+    pub cycles: i64,
+    pub lost: bool,
+}
+
 /// A capture, read back.
 pub struct Trace<'a> {
     /// The first index recorded.

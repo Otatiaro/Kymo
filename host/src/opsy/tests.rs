@@ -1,11 +1,18 @@
 use super::*;
 use crate::decode::Decoded;
 use crate::events::{Event, Field as EventField, Type};
+use crate::stats;
 use crate::symbols::Symbols;
 use gimli::DwAte;
 
-/// The adapter's events, their fields 4-byte pointers but `priority`.
-const HOOKS: [(&str, &[&str]); 10] = [
+/// The adapter's events, their fields 4-byte pointers but `priority` and
+/// `reason`, a byte and an enumeration.
+const HOOKS: [(&str, &[&str]); 15] = [
+    ("task_ready", &["task", "reason"]),
+    ("task_sleep", &["task"]),
+    ("task_wait", &["task"]),
+    ("enter_systick", &[]),
+    ("exit_systick", &[]),
     ("task_added", &["task", "priority"]),
     ("task_priority_changed", &["task", "priority"]),
     ("task_terminated", &["task"]),
@@ -33,6 +40,7 @@ fn catalogue() -> Catalogue {
                     size: Some(if name == "priority" { 1 } else { 4 }),
                     kind: match name {
                         "priority" => Kind::Base(DwAte(gimli::DW_ATE_unsigned.0)),
+                        "reason" => Kind::Enum(vec![(0, "signal".to_owned()), (1, "timeout".to_owned())]),
                         "handler" => Kind::Pointer(Pointee::Function),
                         _ => Kind::Pointer(Pointee::Record(format!("opsy::{name}"))),
                     },
@@ -79,6 +87,15 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
                 to: index + 3,
             });
             index += 3;
+            continue;
+        }
+        if step == "suspect" {
+            // A write overrun while the index went past the event before.
+            elements.push(Element::Suspect {
+                from: index - 1,
+                to: index,
+                writers: 1,
+            });
             continue;
         }
         let name = if step == "tick" {
@@ -451,4 +468,290 @@ fn an_image_without_the_adapter_is_not_traced() {
     let mut catalogue = catalogue();
     catalogue.events.retain(|_, event| !event.name.starts_with(PREFIX));
     assert!(!Opsy::new(&catalogue, 0).unwrap().traced());
+}
+
+const SIGNAL: u32 = 0;
+const TIMEOUT: u32 = 1;
+
+/// The statistics of `steps` over `range`, after checking that every split
+/// in two pieces gives the same instances, and that the JSON fits the schema.
+fn report(steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
+    let catalogue = catalogue();
+    let trace = trace(&catalogue, 0, steps);
+    let mut whole = Opsy::new(&catalogue, 0).unwrap();
+    whole.add(&trace.elements, 0);
+    let instances = instances(&whole);
+    for split in 1..trace.elements.len() {
+        let mut pieces = Opsy::new(&catalogue, 0).unwrap();
+        pieces.add(&trace.elements[..split], 0);
+        pieces.add(&trace.elements, split);
+        assert_eq!(super::instances(&pieces), instances, "split at {split}");
+    }
+    let report = stats::compute(&trace, &instances, &whole.contradictions, range, 100);
+    crate::stats::tests::check_schema(&stats::json(&report));
+    report
+}
+
+/// A group's counts: counted, excluded for a loss, for a suspect, cut; and
+/// the values counted, in ascending order.
+fn group(report: &stats::Report, name: &str) -> (usize, usize, usize, usize, Vec<i64>) {
+    let group = report
+        .groups
+        .iter()
+        .find(|group| {
+            let mut full = format!("{} {} {}", group.kind, group.subject, group.metric.name);
+            if let Some(detail) = &group.detail {
+                full += &format!(" {detail}");
+            }
+            full == name
+        })
+        .unwrap_or_else(|| panic!("no group {name} in\n{}", stats::text(report).join("\n")));
+    let mut values: Vec<i64> = group
+        .distribution
+        .iter()
+        .flat_map(|distribution| distribution.worst.iter().map(|point| point.value))
+        .collect();
+    values.sort();
+    (
+        group.count,
+        group.excluded_loss,
+        group.excluded_suspect,
+        group.cut,
+        values,
+    )
+}
+
+fn names(report: &stats::Report) -> Vec<String> {
+    report
+        .groups
+        .iter()
+        .map(|group| format!("{} {} {}", group.kind, group.subject, group.metric.name))
+        .collect()
+}
+
+/// A task preempted by a task, by a handler that a second one interrupts,
+/// and by the kernel's tick.
+const PREEMPTED: [(&str, &[u32]); 15] = [
+    ("enter_idle", &[]),
+    ("task_ready", &[A, SIGNAL]),
+    ("task_started", &[A]),
+    ("isr_enter", &[H]),
+    ("isr_enter", &[G]),
+    ("isr_exit", &[G]),
+    ("isr_exit", &[H]),
+    ("task_ready", &[B, TIMEOUT]),
+    ("task_started", &[B]),
+    ("task_sleep", &[B]),
+    ("task_started", &[A]),
+    ("enter_systick", &[]),
+    ("exit_systick", &[]),
+    ("task_wait", &[A]),
+    ("enter_idle", &[]),
+];
+
+#[test]
+fn an_activation_splits_into_what_preempts_it() {
+    let report = report(&PREEMPTED, stats::Range::default());
+    let a = |metric| group(&report, &format!("task 0x20000100 {metric}"));
+    // Ready at 10, runs 20 to 80 and 100 to 130, H from 30 to 60 with G
+    // from 40 to 50 in it, the tick from 110 to 120.
+    assert_eq!(a("wake_latency"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(a("wake_latency signal"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(a("gross"), (1, 0, 0, 0, vec![110]));
+    assert_eq!(a("preempted_by_tasks"), (1, 0, 0, 0, vec![20]));
+    assert_eq!(a("preempted_by_handlers"), (1, 0, 0, 0, vec![40]));
+    assert_eq!(a("net"), (1, 0, 0, 0, vec![50]));
+    assert_eq!(a("response"), (1, 0, 0, 0, vec![120]));
+    let b = |metric| group(&report, &format!("task 0x20000200 {metric}"));
+    assert_eq!(b("wake_latency timeout"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(b("net"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(b("response"), (1, 0, 0, 0, vec![20]));
+    let handler = |name| group(&report, &format!("handler {name}"));
+    assert_eq!(handler("0x08000401 gross"), (1, 0, 0, 0, vec![30]));
+    assert_eq!(handler("0x08000401 net"), (1, 0, 0, 0, vec![20]));
+    assert_eq!(handler("0x08000501 net"), (1, 0, 0, 0, vec![10]));
+    assert_eq!(handler("systick net"), (1, 0, 0, 0, vec![10]));
+    assert_eq!((report.from, report.to, report.known, report.losses), (0, 140, 140, 0));
+    let net = report
+        .groups
+        .iter()
+        .find(|group| group.subject == "0x20000100" && group.metric.name == "net");
+    assert_eq!(net.unwrap().share(report.known), Some(50.0 / 140.0));
+    assert_eq!(
+        names(&report)[..8],
+        [
+            "task 0x20000100 wake_latency",
+            "task 0x20000100 wake_latency",
+            "task 0x20000100 preempted_by_tasks",
+            "task 0x20000100 preempted_by_handlers",
+            "task 0x20000100 net",
+            "task 0x20000100 gross",
+            "task 0x20000100 response",
+            "task 0x20000200 wake_latency",
+        ]
+    );
+}
+
+#[test]
+fn an_instance_that_touches_a_loss_is_excluded() {
+    let report = report(
+        &[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("lost", &[]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+        ],
+        stats::Range::default(),
+    );
+    let a = |metric| group(&report, &format!("task 0x20000100 {metric}"));
+    assert_eq!(a("response"), (1, 1, 0, 0, vec![20]));
+    assert_eq!(a("wake_latency"), (1, 1, 0, 0, vec![10]));
+    // The period from one task_ready to the next spans the loss.
+    assert_eq!(a("period"), (0, 1, 0, 0, vec![]));
+    assert!(
+        report
+            .groups
+            .iter()
+            .all(|group| group.lower_bound() == (group.excluded_loss > 0))
+    );
+    // The loss hides 20 to 40.
+    assert_eq!((report.losses, report.known), (1, 70));
+    let text = stats::text(&report).join("\n");
+    assert!(
+        text.contains("task 0x20000100 response: 1, min 20 cycles at #8, p50 20 cycles, p90 ≥ 20 cycles"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_instance_that_covers_an_overrun_write_is_excluded() {
+    let report = report(
+        &[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("suspect", &[]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+        ],
+        stats::Range::default(),
+    );
+    let a = |metric| group(&report, &format!("task 0x20000100 {metric}"));
+    assert_eq!(a("response"), (1, 0, 1, 0, vec![20]));
+    assert_eq!(a("period"), (0, 0, 1, 0, vec![]));
+    assert_eq!((report.suspects, report.losses), (1, 0));
+}
+
+#[test]
+fn the_period_jitter_and_worst_instances_point_at_their_start() {
+    let report = report(
+        &[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("task_ready", &[A, TIMEOUT]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+            ("tick", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+            ("task_sleep", &[A]),
+            ("enter_idle", &[]),
+        ],
+        stats::Range::default(),
+    );
+    let find = |metric: &str, detail: Option<&str>| {
+        report
+            .groups
+            .iter()
+            .find(|group| group.metric.name == metric && group.detail.as_deref() == detail)
+            .unwrap()
+    };
+    let period = find("period", None);
+    let distribution = period.distribution.as_ref().unwrap();
+    assert_eq!((distribution.min.value, distribution.min.index), (40, 1));
+    assert_eq!(
+        (distribution.max.value, distribution.max.index, distribution.max.cycles),
+        (50, 5, 50)
+    );
+    assert_eq!(period.jitter(), Some(10));
+    let response = find("response", None).distribution.as_ref().unwrap();
+    let worst: Vec<(i64, u32)> = response.worst.iter().map(|point| (point.value, point.index)).collect();
+    assert_eq!(worst, [(20, 1), (20, 5), (20, 10)]);
+    assert_eq!(find("wake_latency", Some("signal")).count, 2);
+    assert_eq!(find("wake_latency", Some("timeout")).count, 1);
+    assert_eq!(find("response", None).jitter(), None);
+}
+
+#[test]
+fn a_range_counts_what_it_holds_and_cuts_what_crosses_it() {
+    let report = report(
+        &PREEMPTED,
+        stats::Range {
+            from: Some(0),
+            to: Some(100),
+        },
+    );
+    assert_eq!(group(&report, "task 0x20000100 response"), (0, 0, 0, 1, vec![]));
+    assert_eq!(group(&report, "task 0x20000200 response"), (1, 0, 0, 0, vec![20]));
+    assert_eq!(group(&report, "handler 0x08000401 gross"), (1, 0, 0, 0, vec![30]));
+    assert!(!names(&report).iter().any(|name| name.contains("systick")));
+    assert_eq!((report.from, report.to, report.known), (0, 100, 100));
+    let empty = self::report(
+        &PREEMPTED,
+        stats::Range {
+            from: Some(200),
+            to: None,
+        },
+    );
+    assert!(empty.groups.is_empty());
+    assert_eq!(empty.known, 0);
+}
+
+#[test]
+fn a_handler_net_is_less_its_direct_children_only() {
+    // H from 0 to 50, G from 10 to 40 in it, the kernel's tick from 20 to 30
+    // in G.
+    let report = report(
+        &[
+            ("isr_enter", &[H]),
+            ("isr_enter", &[G]),
+            ("enter_systick", &[]),
+            ("exit_systick", &[]),
+            ("isr_exit", &[G]),
+            ("isr_exit", &[H]),
+        ],
+        stats::Range::default(),
+    );
+    assert_eq!(group(&report, "handler 0x08000401 gross"), (1, 0, 0, 0, vec![50]));
+    assert_eq!(group(&report, "handler 0x08000401 net"), (1, 0, 0, 0, vec![20]));
+    assert_eq!(group(&report, "handler 0x08000501 net"), (1, 0, 0, 0, vec![20]));
+    assert_eq!(group(&report, "handler systick net"), (1, 0, 0, 0, vec![10]));
+}
+
+#[test]
+fn an_activation_still_open_at_the_end_is_cut() {
+    let report = report(
+        &[
+            ("enter_idle", &[]),
+            ("task_ready", &[A, SIGNAL]),
+            ("task_started", &[A]),
+        ],
+        stats::Range::default(),
+    );
+    assert_eq!(group(&report, "task 0x20000100 response"), (0, 0, 0, 1, vec![]));
+    assert_eq!(group(&report, "task 0x20000100 wake_latency"), (0, 0, 0, 1, vec![]));
 }
