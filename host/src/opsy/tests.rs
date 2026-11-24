@@ -1161,15 +1161,27 @@ fn the_cpu_stacks_handlers_at_any_depth_then_tasks_other_than_idle() {
     );
     let mut opsy = Meaning::new(&catalogue, 0).unwrap();
     opsy.add(&trace.elements, 0);
-    let bin = |from, to, known, handlers, tasks| CpuBin {
-        from,
-        to,
-        known,
-        handlers,
-        tasks,
+    let tasks = opsy.tasks.list.len();
+    let a = opsy
+        .tasks
+        .list
+        .iter()
+        .position(|task| task.address == u64::from(A))
+        .unwrap();
+    let bin = |from, to, known, handlers, of_a: i64| {
+        let mut each = vec![0; tasks];
+        each[a] = of_a;
+        CpuBin {
+            from,
+            to,
+            known,
+            handlers,
+            tasks: of_a,
+            each,
+        }
     };
     // Known from 10 to the loss at 80, and from 120 on; handlers 20-50,
-    // 70-80 and from 130; task A 60-80.
+    // 70-80 and from 130; task A 60-80, 60-70 without a handler.
     assert_eq!(
         cpu_bins(&opsy.cpu(), 50, 0, (0, 150), (0, 150)),
         [
@@ -1209,7 +1221,8 @@ fn random_steps(state: &mut u64) -> Vec<(&'static str, Vec<u32>)> {
 
 /// Over random traces, each cycle of the CPU row is the oracle's: known
 /// where a run covers it, handlers where a handler covers it, busy where a
-/// handler or a task other than idle does, the spans still open to the end.
+/// handler or a task other than idle does, a task's own where it runs and no
+/// handler does, the spans still open to the end.
 #[test]
 fn the_cpu_row_covers_each_cycle_as_the_oracle_does() {
     let catalogue = catalogue();
@@ -1249,6 +1262,13 @@ fn the_cpu_row_covers_each_cycle_as_the_oracle_does() {
                 known && (handler || run.flatten().is_some()),
                 "busy at {cycle}: {steps:?}"
             );
+            for (task, covered) in cpu.tasks.iter().enumerate() {
+                assert_eq!(
+                    at(covered, cycle),
+                    !handler && run == Some(Some(task)),
+                    "task {task} at {cycle}: {steps:?}"
+                );
+            }
             idle_interrupted += usize::from(run == Some(None) && handler);
             hidden += usize::from(!known && handler);
         }

@@ -81,7 +81,7 @@ fn largest(covered: &[bool], known: &[bool], first: i64, origin: i64, sub: i64, 
 #[test]
 fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
     let mut state = 0x2545_f491_4f6c_dd1d;
-    let (mut kept, mut edges) = (0, 0);
+    let (mut kept, mut edges, mut several) = (0, 0, 0);
     for _ in 0..300 {
         let length = 200 + (random(&mut state) % 20_000) as usize;
         let origin = 1_000_000_007;
@@ -91,17 +91,39 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
         let known = cycles(&mut state, length, None);
         let set = cycles(&mut state, length, Some(&known));
         let handlers = cycles(&mut state, length, Some(&known));
-        let busy: Vec<bool> = cycles(&mut state, length, Some(&known))
+        // A task other than idle runs: a few tasks, switching every fifty
+        // cycles on average.
+        let running = cycles(&mut state, length, Some(&known));
+        let many = 1 + (random(&mut state) % 4) as usize;
+        let mut owner = vec![0; length];
+        for n in 1..length {
+            owner[n] = if running[n] && running[n - 1] && !random(&mut state).is_multiple_of(50) {
+                owner[n - 1]
+            } else {
+                random(&mut state) as usize % many
+            };
+        }
+        let busy: Vec<bool> = running
             .iter()
             .zip(&handlers)
             .map(|(task, handler)| task | handler)
+            .collect();
+        let tasks: Vec<Vec<bool>> = (0..many)
+            .map(|task| {
+                (0..length)
+                    .map(|n| running[n] && owner[n] == task && !handlers[n])
+                    .collect()
+            })
             .collect();
         let (known_covered, row_covered) = (covered(&known, first, open), covered(&set, first, open));
         let cpu_row = Cpu {
             known: covered(&known, first, open),
             handlers: covered(&handlers, first, open),
             busy: covered(&busy, first, open),
+            tasks: tasks.iter().map(|task| covered(task, first, open)).collect(),
         };
+        // The stack's order, not the tasks'.
+        let order: Vec<usize> = (0..many).rev().collect();
         let span = 50.0 + (random(&mut state) % (length as u64 + 1000)) as f64;
         let view = View {
             origin,
@@ -117,7 +139,15 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
             (view.origin + (view.start + view.span).ceil() as i64).min(capture.1),
         );
         let drawn = row(&view, capture, &row_covered, &known_covered);
-        let drawn_cpu = cpu(&view, capture, &cpu_row);
+        let drawn_cpu = cpu(&view, capture, &cpu_row, &order);
+        for bin in &drawn_cpu {
+            let each: Vec<i64> = order
+                .iter()
+                .map(|&task| count(&tasks[task], first, bin.from, bin.to))
+                .collect();
+            assert_eq!(bin.stack[1..], each, "{capture:?} {bin:?}");
+            several += usize::from(each.iter().filter(|&&each| each > 0).count() > 1);
+        }
         for (bins, layers) in [(&drawn, [&set, &set]), (&drawn_cpu, [&handlers, &busy])] {
             let context = format!("{capture:?} {} {} {}", view.start, view.span, view.width);
             if shown.0 < shown.1 {
@@ -161,12 +191,15 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
         for bin in row(&panned, capture, &row_covered, &known_covered) {
             // The edge bins hold only the part of the capture they cover.
             if let Some(same) = drawn.iter().find(|same| same.from == bin.from && same.to == bin.to) {
-                assert_eq!((same.known, same.stack, same.max), (bin.known, bin.stack, bin.max));
+                assert_eq!((same.known, &same.stack, same.max), (bin.known, &bin.stack, bin.max));
                 kept += 1;
             }
         }
     }
-    assert!(kept > 10_000 && edges > 10_000, "{kept} kept, {edges} edges");
+    assert!(
+        kept > 10_000 && edges > 10_000 && several > 500,
+        "{kept} kept, {edges} edges, {several} CPU bins with several tasks"
+    );
 }
 
 #[test]
@@ -185,14 +218,14 @@ fn a_sub_bin_divides_its_bin() {
     }
 }
 
-fn bin(known: i64, stack: [i64; 2], max: Option<f64>) -> Drawn {
+fn bin<const N: usize>(known: i64, stack: [i64; N], max: Option<f64>) -> Drawn {
     Drawn {
         left: 0.0,
         right: 4.0,
         from: 0,
         to: 1_000_000,
         known,
-        stack,
+        stack: stack.to_vec(),
         max,
     }
 }
@@ -204,35 +237,53 @@ fn bin(known: i64, stack: [i64; 2], max: Option<f64>) -> Drawn {
 fn heights_show_the_part_covered_and_the_part_unknown() {
     let all = 1_000_000;
     let heights = |bin: Drawn| super::heights(&bin, 12.0);
-    let expect = |stack: [f32; 2], known: f32, max: Option<f32>| Heights { stack, known, max };
+    let expect = |stack: &[f32], known: f32, max: Option<f32>| Heights {
+        stack: stack.to_vec(),
+        known,
+        max,
+    };
     assert_eq!(
         heights(bin(all, [0, 0], Some(0.0))),
-        expect([0.0, 0.0], 12.0, Some(0.0))
+        expect(&[0.0, 0.0], 12.0, Some(0.0))
     );
-    assert_eq!(heights(bin(all, [1, 0], None)), expect([1.0, 1.0], 12.0, None));
+    assert_eq!(heights(bin(all, [1, 0], None)), expect(&[1.0, 1.0], 12.0, None));
     assert_eq!(
         heights(bin(all, [all / 2, 0], Some(1.0))),
-        expect([6.0, 6.0], 12.0, Some(12.0))
+        expect(&[6.0, 6.0], 12.0, Some(12.0))
     );
     assert_eq!(
         heights(bin(all, [all, 0], Some(1.0))),
-        expect([12.0, 12.0], 12.0, Some(12.0))
+        expect(&[12.0, 12.0], 12.0, Some(12.0))
     );
     // Handlers, then a task for a cycle.
-    assert_eq!(heights(bin(all, [all / 4, 1], None)), expect([3.0, 4.0], 12.0, None));
+    assert_eq!(heights(bin(all, [all / 4, 1], None)), expect(&[3.0, 4.0], 12.0, None));
     // ... all known: the time unknown stays above the stack's floors.
     assert_eq!(
         heights(bin(all / 4 + 1, [all / 4, 1], None)),
-        expect([3.0, 4.0], 4.0, None)
+        expect(&[3.0, 4.0], 4.0, None)
     );
     // Half the bin unknown: the half known is the scale of the max.
     assert_eq!(
         heights(bin(all / 2, [all / 4, 0], Some(1.0))),
-        expect([3.0, 3.0], 6.0, Some(6.0))
+        expect(&[3.0, 3.0], 6.0, Some(6.0))
     );
-    assert_eq!(heights(bin(0, [0, 0], None)), expect([0.0, 0.0], 0.0, None));
+    assert_eq!(heights(bin(0, [0, 0], None)), expect(&[0.0, 0.0], 0.0, None));
+    // Handlers, then tasks: each layer with a cycle a pixel high, an empty
+    // one none.
+    assert_eq!(
+        heights(bin(all, [all / 4, 0, 1, 1], None)),
+        expect(&[3.0, 3.0, 4.0, 5.0], 12.0, None)
+    );
+    // ... past the time known, cut to it.
+    assert_eq!(
+        heights(bin(all / 4 + 2, [all / 4, 1, 1, 0], None)),
+        expect(&[3.0, 4.0, 5.0, 5.0], 5.0, None)
+    );
+    // ... past the bar, cut to it.
+    let floors: Vec<f32> = (1..=14).map(|n| (n as f32).min(12.0)).collect();
+    assert_eq!(heights(bin(all, [1; 14], None)), expect(&floors, 12.0, None));
     // A cycle known, covered: a pixel known.
-    assert_eq!(heights(bin(1, [1, 0], Some(1.0))), expect([1.0, 1.0], 1.0, Some(1.0)));
+    assert_eq!(heights(bin(1, [1, 0], Some(1.0))), expect(&[1.0, 1.0], 1.0, Some(1.0)));
 }
 
 #[test]

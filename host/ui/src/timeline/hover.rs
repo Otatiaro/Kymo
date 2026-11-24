@@ -47,8 +47,6 @@ impl Card {
 #[derive(Clone, Copy, Debug)]
 enum Swatch {
     Event,
-    /// The CPU line's.
-    Run,
     Task(Shade),
     Idle,
     Ready,
@@ -68,7 +66,6 @@ impl Swatch {
     fn color(self, palette: &Palette) -> egui::Color32 {
         match self {
             Self::Event => palette.event,
-            Self::Run => palette.run,
             Self::Task(shade) => palette.task(shade),
             Self::Idle => palette.idle,
             Self::Ready => palette.ready,
@@ -402,13 +399,21 @@ impl Timeline {
     /// time known, how much is known, and the longest span reaching into it.
     fn load_card(&self, meaning: &Meaning, line: Line, bin: &Drawn, open: &kymo::meaning::Spans) -> Option<Card> {
         let (kind, swatch) = match line {
-            Line::Cpu => ("load", Swatch::Run),
-            Line::Task(task) => ("load", Swatch::task(meaning, task)),
-            Line::Handler(_) => ("load", Swatch::Interrupt),
-            Line::Mutex(_) => ("held, load", Swatch::Hold),
+            Line::Cpu => ("load", None),
+            Line::Task(task) => ("load", Some(Swatch::task(meaning, task))),
+            Line::Handler(_) => ("load", Some(Swatch::Interrupt)),
+            Line::Mutex(_) => ("held, load", Some(Swatch::Hold)),
             Line::Section(_) | Line::Fold | Line::Event(_) => return None,
         };
-        let mut card = self.card(line, kind, swatch);
+        // The CPU's line has a colour per layer, and so no swatch.
+        let mut card = match swatch {
+            Some(swatch) => self.card(line, kind, swatch),
+            None => Card {
+                title: self.label(line),
+                kind,
+                ..Card::default()
+            },
+        };
         let origin = self.origin();
         let length = bin.to - bin.from;
         card.facts.extend([
@@ -424,7 +429,8 @@ impl Timeline {
         }
         if line == Line::Cpu && bin.known > 0 {
             card.facts.push(("handlers", percent(bin.stack[0], bin.known)));
-            card.facts.push(("other tasks", percent(bin.stack[1], bin.known)));
+            card.facts
+                .push(("other tasks", percent(bin.covered() - bin.stack[0], bin.known)));
         }
         if let Some((who, span, still)) = self.longest(meaning, line, bin.from, bin.to, open) {
             let extent = self.extent(span, still);

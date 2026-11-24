@@ -8,7 +8,6 @@ use eframe::egui::{Color32, CornerRadius, Stroke, Theme, Visuals};
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub event: Color32,
-    pub run: Color32,
     pub idle: Color32,
     pub interrupt: Color32,
     pub hold: Color32,
@@ -76,7 +75,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 const LIGHT: Palette = Palette {
     event: Color32::from_rgb(0x2f, 0x6f, 0xdb),
-    run: Color32::from_rgb(0x2f, 0x6f, 0xdb),
     idle: Color32::from_rgb(0x76, 0x7f, 0x8a),
     interrupt: Color32::from_rgb(0xc4, 0x61, 0x0a),
     hold: Color32::from_rgb(0x1a, 0x7f, 0x4b),
@@ -112,7 +110,6 @@ const LIGHT: Palette = Palette {
 
 const DARK: Palette = Palette {
     event: Color32::from_rgb(0x5b, 0x9b, 0xf0),
-    run: Color32::from_rgb(0x5b, 0x9b, 0xf0),
     idle: Color32::from_rgb(0x74, 0x7c, 0x88),
     interrupt: Color32::from_rgb(0xf0, 0xa2, 0x4a),
     hold: Color32::from_rgb(0x3f, 0xb9, 0x7f),

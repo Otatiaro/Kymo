@@ -2,7 +2,20 @@
 
 use super::Timeline;
 use crate::levels::Levels;
+use crate::meaning::Meaning;
 use kymo::model::Element;
+
+/// The tasks other than idle in the order of their lines: by priority value,
+/// those without one last, then by name.
+pub(super) fn tasks(meaning: &Meaning) -> Vec<usize> {
+    let list = &meaning.kernel.tasks.list;
+    let mut tasks: Vec<usize> = (0..list.len()).collect();
+    tasks.sort_by_key(|&task| {
+        let task = &list[task];
+        (task.priority.is_none(), task.priority, &task.name)
+    });
+    tasks
+}
 
 /// The events of one type, by cycles, and their elements in the trace; its
 /// name as shown (names.rs).
@@ -25,7 +38,7 @@ pub(super) struct Mark {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Line {
     Section(&'static str),
-    /// The CPU's load: handlers, then tasks other than idle.
+    /// The CPU's load: handlers, then each task other than idle.
     Cpu,
     /// The line that folds and unfolds the rows of event types.
     Fold,
@@ -97,13 +110,8 @@ impl Timeline {
             return events.collect();
         };
         let kernel = &meaning.kernel;
-        let mut tasks: Vec<usize> = (0..kernel.tasks.list.len()).collect();
-        tasks.sort_by_key(|&task| {
-            let task = &kernel.tasks.list[task];
-            (task.priority.is_none(), task.priority, &task.name)
-        });
         let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
-        lines.extend(tasks.into_iter().map(|task| Line::Task(Some(task))));
+        lines.extend(tasks(meaning).into_iter().map(|task| Line::Task(Some(task))));
         lines.push(Line::Task(None));
         if !kernel.handlers.list.is_empty() {
             lines.push(Line::Section("INTERRUPTS"));
