@@ -60,16 +60,8 @@ impl Timeline {
             self.start -= f64::from(scroll.x) * self.span / width;
         }
         self.clamp();
-        let mut lines = self.lines();
-        if response.clicked()
-            && let Some(pointer) = response.interact_pointer_pos()
-            && pointer.y >= area.top()
-            && rows::at(&rows::tops(&lines), pointer.y - area.top()).map(|n| lines[n]) == Some(Line::Fold)
-        {
-            self.folded = !self.folded;
-            lines = self.lines();
-        }
-        let tops = rows::tops(&lines);
+        let lines = self.lines();
+        let tops = rows::tops(&lines, area.height());
         let line_at = |y: f32| rows::at(&tops, y - area.top());
         let open = self
             .meaning
@@ -110,8 +102,8 @@ impl Timeline {
             palette.surface,
         );
         for (n, &line) in lines.iter().enumerate().take(shown) {
-            let (top, height) = (area.top() + tops[n], line.height());
-            let header = matches!(line, Line::Section(_) | Line::Fold);
+            let (top, height) = (area.top() + tops[n], tops[n + 1] - tops[n]);
+            let header = matches!(line, Line::Section(_));
             if header || n % 2 == 1 {
                 painter.rect_filled(
                     Rect::from_min_max(egui::pos2(area.left(), top), egui::pos2(area.right(), top + height)),
@@ -170,40 +162,21 @@ impl Timeline {
             .as_ref()
             .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu.known));
         for (n, &line) in lines.iter().enumerate() {
-            let (top, height) = (area.top() + tops[n], line.height());
+            let (top, height) = (area.top() + tops[n], tops[n + 1] - tops[n]);
             if top > area.bottom() {
                 break;
             }
             let (font, color) = match line {
                 Line::Section(_) => (heading.clone(), strong),
-                Line::Fold => (font.clone(), strong),
                 _ => (font.clone(), text),
             };
             // Cut with an ellipsis at the column's edge.
-            let x = rect.left() + 8.0 + self.indent(line);
+            let x = rect.left() + 8.0 + Self::indent(line);
             let mut job = egui::text::LayoutJob::simple_singleline(self.label(line), font, color);
             job.wrap = egui::text::TextWrapping::truncate_at_width(area.left() - 8.0 - x);
             let galley = labels.layout_job(job);
             elided.push(galley.elided);
             labels.galley(egui::pos2(x, top + (height - galley.size().y) / 2.0), galley, color);
-            if line == Line::Fold {
-                // Pointing right folded, down unfolded.
-                let (x, y) = (rect.left() + 13.0, top + height / 2.0);
-                let points = if self.folded {
-                    vec![
-                        egui::pos2(x - 3.0, y - 4.0),
-                        egui::pos2(x + 3.0, y),
-                        egui::pos2(x - 3.0, y + 4.0),
-                    ]
-                } else {
-                    vec![
-                        egui::pos2(x - 4.0, y - 3.0),
-                        egui::pos2(x + 4.0, y - 3.0),
-                        egui::pos2(x, y + 3.0),
-                    ]
-                };
-                labels.add(egui::Shape::convex_polygon(points, strong, egui::Stroke::NONE));
-            }
             let (high, low) = (top + 4.0, top + height - 4.0);
             let middle = top + height / 2.0;
             let meaning = self.meaning.as_ref();
@@ -236,7 +209,7 @@ impl Timeline {
                 }
             }
             match line {
-                Line::Section(_) | Line::Fold | Line::Cpu => {}
+                Line::Section(_) | Line::Cpu => {}
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
                         bars.mesh.add_colored_rect(
@@ -424,7 +397,7 @@ impl Timeline {
             let row = |line: Line| lines.iter().position(|&other| other == line);
             let to = line_at(pointer.y).and_then(|n| row(lines[n]));
             if let Some((arrow, from, to)) = arrow.and_then(|arrow| Some((arrow, row(arrow.from)?, to?))) {
-                let middle = |n: usize| area.top() + tops[n] + lines[n].height() / 2.0;
+                let middle = |n: usize| area.top() + (tops[n] + tops[n + 1]) / 2.0;
                 let x = view.column(arrow.cycles) + 0.5;
                 if x >= area.left() && x < area.right() {
                     let (from, to) = (middle(from), middle(to));
