@@ -367,7 +367,9 @@ fn reports_suspect_the_lapped_writers_a_host_fallen_behind_missed() {
 /// pass that met them counted, and every event is read back as written, with
 /// no suspect line. Whole passes asleep are counted one each. What a read
 /// met asleep is read again, later: on this small ring, the ring may lap
-/// it meanwhile, but no more than one slot in a hundred shown.
+/// it meanwhile, or lap a writer read unpublished before the core fell
+/// asleep, whose slots are then endangered for a lap: no more than three
+/// slots lost in two hundred shown.
 #[test]
 fn drops_what_it_reads_of_a_target_asleep() {
     let catalogue = catalogue();
@@ -428,7 +430,7 @@ fn drops_what_it_reads_of_a_target_asleep() {
         if doze || naps {
             assert!(zeros > 0, "doze {doze} naps {naps}: no pass met the core asleep");
             assert!(
-                dropped * 100 <= shown,
+                dropped * 200 <= shown * 3,
                 "doze {doze} naps {naps}: {dropped} slots lost, {shown} shown, {awake} lost awake"
             );
         } else {
@@ -650,6 +652,114 @@ fn endangers_the_lost_slots_before_a_following_slot_read_unpublished() {
             .iter()
             .any(|item| matches!(item, Item::Event(event, _) if event.index == newer)),
         "event {newer} read as intact, the lapped writer's words in it: {}",
+        recorder.state()
+    );
+}
+
+/// A read the ring laps before the next pass settles it halves the window,
+/// unless the core slept in between: that lap says nothing of the probe's pace.
+#[test]
+fn halves_the_window_on_a_lapped_read_but_after_a_sleep() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let header = |index: u32| 1 | HEAD_BIT | ((index / SLOTS + 1) & 0x7fff) << LAP_SHIFT;
+    let slot = |index: u32| ((SLOTS_OFFSET + index % SLOTS * 16) / 4) as usize;
+    let write_index = (WRITE_INDEX_OFFSET / 4) as usize;
+    for asleep in [false, true] {
+        let mut target = Scripted {
+            memory: vec![0; ((SLOTS_OFFSET + SLOTS * 16) / 4) as usize],
+            counter_reads: 0,
+            at: u32::MAX,
+            change: Vec::new(),
+        };
+        // Recording starts at the third lap, the second written whole with
+        // one-slot events.
+        let start = 2 * SLOTS;
+        let mut written = start;
+        let mut write = |target: &mut Scripted, to: u32| {
+            for index in written..to {
+                target.memory[slot(index)] = header(index);
+            }
+            written = to;
+            target.memory[write_index] = to;
+        };
+        write(&mut target, start);
+        for index in SLOTS..start {
+            target.memory[slot(index)] = header(index);
+        }
+        let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+        let mut items = Vec::new();
+        // A pass reads four events.
+        write(&mut target, start + 4);
+        recorder.pass(&mut target, &mut items).unwrap();
+        if asleep {
+            target.memory[write_index] = 0;
+            assert_eq!(recorder.pass(&mut target, &mut items).unwrap(), None);
+        }
+        // The ring laps them before the next pass settles them.
+        write(&mut target, start + SLOTS + 8);
+        recorder.pass(&mut target, &mut items).unwrap();
+        let expected = if asleep { SLOTS } else { SLOTS / 2 };
+        assert_eq!(recorder.window, expected, "asleep {asleep}: {}", recorder.state());
+    }
+}
+
+/// A one-slot writer read unpublished, whose next read the core's sleep
+/// dropped: the pass after finds the ring a lap past it and cuts it out of
+/// its window. Lapped, the writer writes its word into the newer event that
+/// reserved its slot again, then counts itself lapped: a danger covers that
+/// event, which is reported lost, not read as intact.
+#[test]
+fn endangers_a_writer_read_unpublished_then_cut_a_lap_on_after_a_sleep() {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let header = |type_id: u32, index: u32| type_id | HEAD_BIT | ((index / SLOTS + 1) & 0x7fff) << LAP_SHIFT;
+    let slot = |index: u32| ((SLOTS_OFFSET + index % SLOTS * 16) / 4) as usize;
+    let write_index = (WRITE_INDEX_OFFSET / 4) as usize;
+    let lapped = (LAPPED_OFFSET / 4) as usize;
+    let mut target = Scripted {
+        memory: vec![0; ((SLOTS_OFFSET + SLOTS * 16) / 4) as usize],
+        counter_reads: 0,
+        at: u32::MAX,
+        change: Vec::new(),
+    };
+    // Recording starts at the third lap, the second written whole with
+    // one-slot events.
+    let writer = 2 * SLOTS;
+    target.memory[write_index] = writer;
+    for index in SLOTS..writer {
+        target.memory[slot(index)] = header(1, index);
+    }
+    let mut recorder = Recorder::start(&mut target, &catalogue, ring).unwrap();
+    let mut items = Vec::new();
+    // The writer reserves its slot; two passes read it unpublished.
+    target.memory[write_index] = writer + 1;
+    recorder.pass(&mut target, &mut items).unwrap();
+    recorder.pass(&mut target, &mut items).unwrap();
+    // The core sleeps: the counters read as zeros.
+    target.memory[write_index] = 0;
+    assert_eq!(recorder.pass(&mut target, &mut items).unwrap(), None);
+    // Awake, the ring a lap past the writer: newer one-slot events, the one
+    // in the writer's slot holding the writer's word, its header not yet.
+    let end = writer + SLOTS + 2;
+    for index in writer + 1..end {
+        target.memory[slot(index)] = header(1, index);
+    }
+    let newer = writer + SLOTS;
+    target.memory[slot(newer) + 2] = 0xdead_beef;
+    target.memory[write_index] = end;
+    recorder.pass(&mut target, &mut items).unwrap();
+    // The writer publishes, then counts itself lapped.
+    target.memory[slot(newer)] = header(1, writer);
+    target.memory[lapped] = 1;
+    recorder.pass(&mut target, &mut items).unwrap();
+    let suspect = items.iter().any(|item| matches!(item, Item::Suspect { .. }));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, Item::Event(event, _) if event.index == newer)),
+        "event {newer} read as intact, the lapped writer's word in it; dangers {:?}, suspect line {suspect}: {}",
+        recorder.dangers(),
         recorder.state()
     );
 }
