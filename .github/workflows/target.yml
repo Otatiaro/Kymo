@@ -172,7 +172,8 @@ jobs:
           python3 target/tidy.py --clang-tidy clang-tidy --build build/opsy \
             --headers target/opsy/include target/opsy/tests/ring_check.cpp
           python3 target/tidy.py --clang-tidy clang-tidy --build build/freertos \
-            --headers target/freertos/include target/freertos/kymo_freertos.cpp target/freertos/tests/application.cpp
+            --headers target/freertos/include target/freertos/kymo_freertos.cpp target/freertos/tests/application.cpp \
+            target/freertos/tests/bench/bench.cpp
 
   # OpSy's on-target suite with the adapter's hooks, the adapter's events
   # read back from the ring, and the suite recorded by the host with its trace
@@ -284,7 +285,8 @@ jobs:
           --expected target/opsy/tests/bench/overhead-${{ matrix.target }}.json
 
   # The FreeRTOS adapter: the test application on the Cortex-M4 (ARM_CM4F) and
-  # the Cortex-M33 (ARM_CM33_NTZ), recorded by the host with its trace checked
+  # the Cortex-M33 (ARM_CM33_NTZ), recorded by the host with its trace checked,
+  # and the adapter's cost per path held against its record
   # (target/freertos/tests).
   freertos:
     name: FreeRTOS adapter
@@ -329,3 +331,24 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      # profile.py, which counts the instructions between the bench's markers.
+      - uses: actions/checkout@v5
+        with:
+          repository: Otatiaro/OpSy
+          ref: ${{ env.OPSY_COMMIT }}
+          path: opsy
+
+      - name: Cost per path against the record
+        run: |
+          set -euo pipefail
+          for pair in m4:mps2-an386:cortex-m4 m33:mps2-an505:cortex-m33; do
+            IFS=: read -r target machine cpu <<< "$pair"
+            echo "== $cpu"
+            python3 target/opsy/tests/bench/overhead.py \
+              --profile opsy/tests/qemu/bench/profile.py \
+              --machine "$machine" \
+              --plain "build/freertos-bench-$cpu-untraced.elf" \
+              --traced "build/freertos-bench-$cpu-traced.elf" \
+              --expected "target/freertos/tests/bench/overhead-$target.json"
+          done

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""What tracing adds to each path of OpSy's bench, held against the record.
+"""What tracing adds to each path of a bench, held against the record.
 
 Runs OpSy's bench/profile.py on the bench image built without Kymo and on the
-one built with the adapter (bench/opsy_hooks.hpp here), and takes, for each
-scenario, the instructions the traced image executes beyond the plain one.
+one built with the adapter: OpSy's bench with bench/opsy_hooks.hpp here, or
+target/freertos/tests/bench/bench.cpp untraced and traced. It takes, for
+each scenario, the instructions the traced image executes beyond the plain one.
 That is the adapter's cost on the path: the events it emits, times what each
 costs. The expected costs are in overhead-<target>.json; a path that costs
 more than its record plus the tolerance fails, which an extra event on the

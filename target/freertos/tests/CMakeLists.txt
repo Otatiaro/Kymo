@@ -49,11 +49,10 @@ foreach(tool KYMO_QEMU KYMO_HOST Python3_EXECUTABLE)
 	endif()
 endforeach()
 
-foreach(cpu cortex-m4 cortex-m33)
-	set(cpu_options -mcpu=${cpu} -mthumb ${float_${cpu}})
-
-	# The kernel, built as its sources are, without Kymo's warnings as errors.
-	set(kernel freertos-${cpu})
+# The kernel, built as its sources are, without Kymo's warnings as errors;
+# `untraced` defines KYMO_UNTRACED, which leaves the adapter out of
+# FreeRTOSConfig.h.
+function(kymo_freertos_kernel kernel cpu untraced)
 	add_library(${kernel} STATIC
 		${KYMO_FREERTOS_DIR}/tasks.c ${KYMO_FREERTOS_DIR}/queue.c ${KYMO_FREERTOS_DIR}/list.c
 		${KYMO_FREERTOS_DIR}/event_groups.c ${KYMO_FREERTOS_DIR}/stream_buffer.c
@@ -61,15 +60,21 @@ foreach(cpu cortex-m4 cortex-m33)
 	target_include_directories(${kernel} PUBLIC
 		${CMAKE_CURRENT_SOURCE_DIR} ${target_dir}/freertos/include
 		${KYMO_FREERTOS_DIR}/include ${port_${cpu}})
-	target_compile_options(${kernel} PRIVATE ${cpu_options} -Os -g -ffunction-sections -fdata-sections)
+	target_compile_options(${kernel} PRIVATE
+		-mcpu=${cpu} -mthumb ${float_${cpu}} -Os -g -ffunction-sections -fdata-sections)
+	if(untraced)
+		target_compile_definitions(${kernel} PUBLIC KYMO_UNTRACED)
+	endif()
+endfunction()
 
-	set(image freertos-${cpu}-Os)
-	add_executable(${image}
-		${target_dir}/freertos/kymo_freertos.cpp application.cpp ${qemu_dir}/startup.cpp)
+# An image under QEMU, on a kernel.
+function(kymo_freertos_image image cpu kernel)
+	add_executable(${image} ${ARGN} ${qemu_dir}/startup.cpp)
 	set_target_properties(${image} PROPERTIES SUFFIX ".elf"
 		LINK_DEPENDS "${script_${cpu}};${qemu_dir}/sections.ld")
 	target_include_directories(${image} PRIVATE ${target_dir}/include ${qemu_dir})
 	target_link_libraries(${image} PRIVATE ${kernel})
+	set(cpu_options -mcpu=${cpu} -mthumb ${float_${cpu}})
 	target_compile_options(${image} PRIVATE ${cpu_options} -Os
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections
@@ -77,6 +82,22 @@ foreach(cpu cortex-m4 cortex-m33)
 	target_link_options(${image} PRIVATE ${cpu_options}
 		-nostdlib -nostartfiles -Wl,--gc-sections
 		-L${qemu_dir} -T ${script_${cpu}})
+endfunction()
+
+foreach(cpu cortex-m4 cortex-m33)
+	set(kernel freertos-${cpu})
+	kymo_freertos_kernel(${kernel} ${cpu} OFF)
+	set(image freertos-${cpu}-Os)
+	kymo_freertos_image(${image} ${cpu} ${kernel}
+		${target_dir}/freertos/kymo_freertos.cpp application.cpp)
+
+	# The cost bench, untraced and traced: bench/bench.cpp.
+	kymo_freertos_kernel(${kernel}-untraced ${cpu} ON)
+	kymo_freertos_image(freertos-bench-${cpu}-untraced ${cpu} ${kernel}-untraced bench/bench.cpp)
+	target_include_directories(freertos-bench-${cpu}-untraced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+	kymo_freertos_image(freertos-bench-${cpu}-traced ${cpu} ${kernel}
+		${target_dir}/freertos/kymo_freertos.cpp bench/bench.cpp)
+	target_include_directories(freertos-bench-${cpu}-traced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 	if(missing)
 		add_test(NAME ${image} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
