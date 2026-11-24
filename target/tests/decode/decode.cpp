@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ratio>
 
 enum class level : std::int8_t
 {
@@ -37,8 +38,8 @@ enum class level : std::int8_t
 
 struct tiny
 {
-	bool on;
-	level grade;
+	bool on{};
+	level grade{};
 	std::chrono::time_point<std::chrono::steady_clock, std::chrono::duration<std::int16_t, std::milli>> at;
 };
 
@@ -157,8 +158,8 @@ void emit_number(std::uint32_t n)
 		using milliseconds = std::chrono::duration<std::int16_t, std::milli>;
 		// Negative every other one: the count is signed.
 		auto const magnitude = static_cast<int>(n * 7);
-		auto const at = static_cast<std::int16_t>(n % 2 == 0 ? magnitude : -magnitude);
-		tiny const event{n % 2 == 0, static_cast<level>(static_cast<int>(n / 5 % 3) - 1), decltype(tiny::at){milliseconds{at}}};
+		auto const count = static_cast<std::int16_t>(n % 2 == 0 ? magnitude : -magnitude);
+		tiny const event{n % 2 == 0, static_cast<level>(static_cast<int>(n / 5 % 3) - 1), decltype(tiny::at){milliseconds{count}}};
 		emitted("tiny", event, [](tiny const& event) {
 			qemu::write(event.on ? " on=true grade=" : " on=false grade=");
 			write_grade(event.grade);
@@ -186,7 +187,7 @@ void emit_number(std::uint32_t n)
 		                {value, static_cast<std::int16_t>(-value), -32768},
 		                &origin,
 		                static_cast<std::uint8_t>(n),
-		                std::chrono::duration<std::int16_t, std::micro>{static_cast<std::int16_t>(n * 3)}},
+		                std::chrono::duration<std::int16_t, std::micro>{static_cast<std::int16_t>(n * 3)},},
 		        [](reading const& event) {
 			        qemu::write(" grade=");
 			        write_grade(event.grade);
