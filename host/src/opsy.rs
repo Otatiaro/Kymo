@@ -36,6 +36,7 @@
 //! from the task_started it emits.
 
 use crate::events::{Catalogue, Kind, Pointee};
+use crate::load::Covered;
 pub use crate::model::Edge;
 use crate::model::{Element, Trace};
 use crate::stats::{Instance, Metric};
@@ -653,6 +654,18 @@ impl<'a> Opsy<'a> {
                 span: Span { from: *from, to },
             })
             .collect()
+    }
+
+    /// The time the task on the core is known: from each task_started or
+    /// enter_idle to the next, or to a loss, the last one to the end of the
+    /// capture. Which handlers are open is known from the same events.
+    pub fn known(&self) -> Covered {
+        let mut known = Covered::default();
+        for run in &self.closed.runs {
+            known.push(run.span.from.cycles, run.span.to.cycles);
+        }
+        known.open(self.running.map(|(_, from)| from.cycles));
+        known
     }
 
     /// The activations still open, ended at the last event.

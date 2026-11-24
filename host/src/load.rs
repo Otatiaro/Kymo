@@ -4,6 +4,10 @@
 //! view's edge: panning changes neither their bounds nor their values. The
 //! cycles a row covers before any point are a prefix sum and a binary search
 //! away, so a bin's count is exact to the cycle at any zoom.
+//!
+//! A row's share of a bin is over the time its state is known: a loss hides
+//! it, and only the next event that gives the state again makes it known.
+//! A capture records one ring, so a loss hides every row it shows.
 
 /// The narrowest a bin is drawn, in pixels.
 pub const PIXELS: f64 = 4.0;
@@ -49,6 +53,36 @@ impl Covered {
         }
         covered
     }
+
+    /// The spans, the open one last, ended at `i64::MAX`.
+    fn spans(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
+        self.from
+            .iter()
+            .zip(&self.to)
+            .map(|(&from, &to)| (from, to))
+            .chain(self.open.map(|open| (open, i64::MAX)))
+    }
+
+    /// The cycles both `self` and `known` cover: a row's spans, cut to the
+    /// time its state is known.
+    pub fn within(&self, known: &Covered) -> Covered {
+        let mut within = Covered::default();
+        let (mut row, mut known) = (self.spans().peekable(), known.spans().peekable());
+        while let (Some(&(a, b)), Some(&(c, d))) = (row.peek(), known.peek()) {
+            let (from, to) = (a.max(c), b.min(d));
+            if to == i64::MAX {
+                within.open = Some(from);
+            } else if from < to {
+                within.push(from, to);
+            }
+            if b <= d {
+                row.next();
+            } else {
+                known.next();
+            }
+        }
+        within
+    }
 }
 
 /// The cycles a bin lasts in a view of `per_pixel` cycles per pixel: the
@@ -66,19 +100,28 @@ pub fn width(per_pixel: f64) -> i64 {
     }
 }
 
-/// A bin from `from` to `to` cycles, and the cycles a row covers in it.
+/// A bin from `from` to `to` cycles, the cycles a row covers in it and
+/// those in which its state is known. Its share is `covered / known`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bin {
     pub from: i64,
     pub to: i64,
     pub covered: i64,
+    pub known: i64,
 }
 
 /// The bins of `width` cycles counted from `origin` that hold cycles of
 /// `range` within `capture`, both from their first cycle to the one after
-/// their last: each cut to the capture, with the cycles `covered` covers in
-/// it.
-pub fn bins(covered: &Covered, width: i64, origin: i64, range: (i64, i64), capture: (i64, i64)) -> Vec<Bin> {
+/// their last: each cut to the capture, with the cycles `covered` and
+/// `known` cover in it. `covered` lies within `known` (`Covered::within`).
+pub fn bins(
+    covered: &Covered,
+    known: &Covered,
+    width: i64,
+    origin: i64,
+    range: (i64, i64),
+    capture: (i64, i64),
+) -> Vec<Bin> {
     let (low, high) = (range.0.max(capture.0), range.1.min(capture.1));
     if low >= high {
         return Vec::new();
@@ -86,15 +129,16 @@ pub fn bins(covered: &Covered, width: i64, origin: i64, range: (i64, i64), captu
     let first = (low - origin).div_euclid(width);
     let last = (high - 1 - origin).div_euclid(width);
     let mut at = (origin + first * width).max(capture.0);
-    let mut before = covered.until(at);
+    let mut before = (covered.until(at), known.until(at));
     (first..=last)
         .map(|n| {
             let (from, to) = (at, (origin + (n + 1) * width).min(capture.1));
-            let after = covered.until(to);
+            let after = (covered.until(to), known.until(to));
             let bin = Bin {
                 from,
                 to,
-                covered: after - before,
+                covered: after.0 - before.0,
+                known: after.1 - before.1,
             };
             (at, before) = (to, after);
             bin
