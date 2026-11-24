@@ -207,7 +207,7 @@ impl Timeline {
                     Line::Cpu => Some((load::cpu(&view, capture, &rows.cpu), [palette.interrupt, palette.run])),
                     Line::Task(task) if loaded => row(
                         task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),
-                        if task.is_some() { palette.run } else { palette.idle },
+                        meaning.task_color(task, &palette),
                     ),
                     Line::Handler(handler) if loaded => row(rows.handlers.get(handler), palette.interrupt),
                     Line::Mutex(mutex) if loaded => row(rows.holds.get(mutex), palette.hold),
@@ -238,13 +238,7 @@ impl Timeline {
                     }
                     let spans = task.map_or(Some(&meaning.idle), |task| meaning.runs.get(task));
                     let open = open.runs.iter().filter(|run| run.task == task).map(|run| run.span);
-                    bars.paint(
-                        spans,
-                        open,
-                        high,
-                        low,
-                        if task.is_some() { palette.run } else { palette.idle },
-                    );
+                    bars.paint(spans, open, high, low, meaning.task_color(task, &palette));
                 }
                 Line::Handler(handler) => {
                     let Some(meaning) = meaning else { continue };

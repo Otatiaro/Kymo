@@ -4,7 +4,9 @@
 //! what woke it. They grow with the trace.
 
 use crate::names;
+use crate::palette::{Palette, Shade};
 use crate::spans::Spans;
+use eframe::egui::Color32;
 use kymo::events::Catalogue;
 use kymo::load::{Covered, Cpu};
 use kymo::meaning::{Edge, Meaning as Kernel, Ready, Span, Subject};
@@ -33,6 +35,9 @@ pub struct Meaning {
     pub ready: Vec<Spans>,
     /// The names the rows show: tasks, handlers, mutexes.
     pub names: Vec<Vec<String>>,
+    /// By task, its shade, from its name in full and the shades of the
+    /// tasks before it; a task's never changes.
+    pub shades: Vec<Shade>,
     pub load: Load,
 }
 
@@ -51,6 +56,7 @@ impl Meaning {
             readies: Vec::new(),
             ready: Vec::new(),
             names: Vec::new(),
+            shades: Vec::new(),
             load: Load::default(),
         }))
     }
@@ -95,7 +101,16 @@ impl Meaning {
             grown(&mut self.ready, ready.task).push(ready.span, n);
         }
         self.names = names::shown(&[&kernel.tasks.list, &kernel.handlers.list, &kernel.mutexes.list]);
+        for task in &kernel.tasks.list[self.shades.len()..] {
+            let shade = Shade::of(&task.name, &self.shades);
+            self.shades.push(shade);
+        }
         self.load = Load::of(kernel);
+    }
+
+    /// The colour of `task`'s runs, the idle task's grey for None.
+    pub fn task_color(&self, task: Option<usize>, palette: &Palette) -> Color32 {
+        task.map_or(palette.idle, |task| palette.task(self.shades[task]))
     }
 
     /// The lists of subjects with the names shown.
@@ -113,6 +128,12 @@ impl Meaning {
     /// address.
     pub fn shown_at(&self, address: u64) -> Option<&str> {
         shown_at(&self.named(), address)
+    }
+
+    /// The task at `address`, if one is.
+    pub fn task_at(&self, address: u64) -> Option<usize> {
+        let tasks = &self.kernel.tasks.list;
+        tasks.iter().position(|task| task.address == address && address != 0)
     }
 
     /// `instances` with the names shown; see [`shorten`].

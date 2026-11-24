@@ -6,12 +6,14 @@ use super::hover::marked;
 use super::status::counted;
 use super::view::centred;
 use crate::listing::Entry;
-use crate::palette::Palette;
+use crate::palette::{Palette, Shade};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use kymo::decode::{self, Decoded};
 use kymo::events::Pointee;
 use kymo::model::Element;
+use std::cell::RefCell;
+use std::ops::Range;
 
 /// The width of the bar that marks a loss or a suspect line, in pixels.
 const MARK: f32 = 4.0;
@@ -73,17 +75,33 @@ impl Timeline {
     /// An event's fields, a subject by the name its row shows, anything else
     /// as decode names it.
     pub(super) fn fields(&self, event: &Decoded) -> String {
+        self.fields_and_tasks(event).0
+    }
+
+    /// `fields`, and where in them each task is named, with its shade.
+    fn fields_and_tasks(&self, event: &Decoded) -> (String, Vec<(Range<usize>, Shade)>) {
         let symbols = &self.catalogue.symbols;
-        let shown = |pointee: &Pointee, address: u64| {
-            self.meaning
-                .as_ref()
-                .and_then(|meaning| meaning.shown_at(address))
-                .map(str::to_owned)
-                .or_else(|| symbols.name(pointee, address))
+        let tasks = RefCell::new(Vec::new());
+        let shown = |out: &mut String, pointee: &Pointee, address: u64| {
+            let meaning = self.meaning.as_ref();
+            let from = out.len();
+            match meaning.and_then(|meaning| meaning.shown_at(address)) {
+                Some(name) => out.push_str(name),
+                None => match symbols.name(pointee, address) {
+                    Some(name) => out.push_str(&name),
+                    None => return false,
+                },
+            }
+            if let Some(meaning) = meaning
+                && let Some(task) = meaning.task_at(address)
+            {
+                tasks.borrow_mut().push((from..out.len(), meaning.shades[task]));
+            }
+            true
         };
         let mut fields = String::new();
         decode::fields_named(&mut fields, &shown, event);
-        fields
+        (fields, tasks.into_inner())
     }
 
     fn list(&mut self, ui: &mut egui::Ui) {
@@ -103,10 +121,11 @@ impl Timeline {
         // A line's cells: index, type, fields; a loss's or a suspect line's
         // text in the fields, and the type and fields in full when they
         // differ.
-        let cells = |entry: &Entry| -> (String, String, String, Option<String>) {
+        type Fields = (String, Vec<(Range<usize>, Shade)>);
+        let cells = |entry: &Entry| -> (String, String, Fields, Option<String>) {
             match &self.trace.elements[entry.element] {
                 Element::Event { event, .. } => {
-                    let fields = self.fields(event);
+                    let (fields, tasks) = self.fields_and_tasks(event);
                     let row = self
                         .ids
                         .binary_search(&event.event.id)
@@ -116,9 +135,14 @@ impl Timeline {
                     decode::fields(&mut in_full, symbols, event);
                     let full = (kind != event.event.name || fields != in_full)
                         .then(|| format!("{}  {in_full}", event.event.name).trim_end().to_owned());
-                    (event.index.to_string(), kind, fields, full)
+                    (event.index.to_string(), kind, (fields, tasks), full)
                 }
-                other => (String::new(), String::new(), marked(other).unwrap_or_default(), None),
+                other => (
+                    String::new(),
+                    String::new(),
+                    (marked(other).unwrap_or_default(), Vec::new()),
+                    None,
+                ),
             }
         };
         let height = ui.spacing().interact_size.y;
@@ -133,6 +157,20 @@ impl Timeline {
             let text = egui::RichText::new(text).font(font.clone());
             let text = if strong { text.strong() } else { text };
             ui.add(egui::Label::new(text).selectable(false).extend());
+        };
+        // The fields, each task named in its colour.
+        let fields = |ui: &mut egui::Ui, (fields, tasks): Fields| {
+            let plain = egui::TextFormat::simple(font.clone(), ui.visuals().text_color());
+            let mut job = egui::text::LayoutJob::default();
+            let mut at = 0;
+            for (range, shade) in tasks {
+                job.append(&fields[at..range.start], 0.0, plain.clone());
+                let color = palette.task(shade);
+                job.append(&fields[range.clone()], 0.0, egui::TextFormat { color, ..plain.clone() });
+                at = range.end;
+            }
+            job.append(&fields[at..], 0.0, plain);
+            ui.add(egui::Label::new(job).selectable(false).extend());
         };
         // A cell's text on one line, centred in its height; a number's at
         // the right.
@@ -174,7 +212,7 @@ impl Timeline {
                 body.rows(height, entries.len(), |mut row| {
                     let entry = entries[row.index()];
                     row.set_selected(self.chosen == Some(entry.element));
-                    let (index, kind, fields, full) = cells(&entry);
+                    let (index, kind, line, full) = cells(&entry);
                     let mark = match self.trace.elements[entry.element] {
                         Element::Lost { .. } => Some(palette.loss),
                         Element::Suspect { .. } => Some(palette.suspect),
@@ -196,7 +234,7 @@ impl Timeline {
                         text(ui, kind, false);
                     });
                     row.col(|ui| {
-                        text(ui, fields, false);
+                        fields(ui, line);
                     });
                     let response = row.response();
                     let response = match full {

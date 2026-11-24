@@ -205,12 +205,16 @@ pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f
     line
 }
 
-/// What a pointer to its pointee holding an address is called, if anything.
-pub type Names<'a> = &'a dyn Fn(&Pointee, u64) -> Option<String>;
+/// Writes what a pointer to its pointee holding an address is called, if
+/// anything, at the end of the text; false when it has no name.
+pub type Names<'a> = &'a dyn Fn(&mut String, &Pointee, u64) -> bool;
 
 /// Each field of the event as `name=value`, separated by spaces.
 pub fn fields(out: &mut String, symbols: &Symbols, decoded: &Decoded) {
-    fields_named(out, &|pointee, address| symbols.name(pointee, address), decoded);
+    let names = |out: &mut String, pointee: &Pointee, address| {
+        symbols.name(pointee, address).map(|name| out.push_str(&name)).is_some()
+    };
+    fields_named(out, &names, decoded);
 }
 
 /// Each field of the event as `name=value`, separated by spaces, pointers
@@ -264,12 +268,11 @@ fn value(out: &mut String, names: Names, ty: &Type, bytes: &[u8]) {
                 }
             }
         }
-        Kind::Pointer(pointee) if size <= 8 => match names(pointee, unsigned()) {
-            Some(name) => out.push_str(&name),
-            None => {
+        Kind::Pointer(pointee) if size <= 8 => {
+            if !names(out, pointee, unsigned()) {
                 let _ = write!(out, "0x{:0width$x}", unsigned(), width = 2 * size);
             }
-        },
+        }
         Kind::Duration(count, num, den) => {
             value(out, names, count, bytes);
             unit(out, *num, *den);
@@ -384,7 +387,7 @@ mod tests {
 
     fn shown(ty: &Type, bytes: &[u8]) -> String {
         let mut out = String::new();
-        value(&mut out, &|_, _| None, ty, bytes);
+        value(&mut out, &|_, _, _| false, ty, bytes);
         out
     }
 
