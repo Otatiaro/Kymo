@@ -41,7 +41,7 @@
 //! hides in the task it interrupts.
 //!
 //! An interrupt handler is one subject per handler and exception it runs for,
-//! named `<interrupt> → <handler>` (interrupts.rs names the interrupt), so
+//! named `<handler> (<interrupt>)` (interrupts.rs names the interrupt), so
 //! that a handler several interrupts share is told apart. Its exit, which
 //! gives the handler alone, closes the innermost one entered.
 //!
@@ -194,7 +194,7 @@ impl Subjects {
     }
 
     /// The handler at the address `field` gives, run for `exception`: one
-    /// subject per handler and interrupt, named `<interrupt> → <handler>`, or
+    /// subject per handler and interrupt, named `<handler> (<interrupt>)`, or
     /// by the handler alone when the exception is unknown or the interrupt
     /// bears the handler's name.
     fn interrupt(
@@ -213,7 +213,7 @@ impl Subjects {
                 .and_then(|pointee| symbols.name(pointee, address))
                 .unwrap_or_else(|| format!("0x{address:08x}"));
             let name = match exception.map(|exception| interrupts.name(exception)) {
-                Some(interrupt) if interrupt != handler => format!("{interrupt} → {handler}"),
+                Some(interrupt) if interrupt != handler => format!("{handler} ({interrupt})"),
                 _ => handler,
             };
             self.list.push(Subject {

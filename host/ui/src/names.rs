@@ -125,6 +125,19 @@ mod tests {
         assert_eq!(names(&[&[("app::a", 1)]]), [vec!["a"]]);
     }
 
+    /// A handler's interrupt, after its name, keeps the namespaces it shares
+    /// with the other subjects.
+    #[test]
+    fn a_handler_named_with_its_interrupt_shares_the_namespaces() {
+        assert_eq!(
+            names(&[
+                &[("app::(anonymous namespace)::g_logger", 1)],
+                &[("app::(anonymous namespace)::timer_isr (IRQ45)", 2)],
+            ]),
+            [vec!["g_logger"], vec!["timer_isr (IRQ45)"]]
+        );
+    }
+
     /// A `::` inside template arguments or a parameter list is no namespace.
     #[test]
     fn template_arguments_are_no_namespace() {
