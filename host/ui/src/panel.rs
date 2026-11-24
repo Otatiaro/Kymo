@@ -4,6 +4,7 @@
 
 use crate::timeline::counted;
 use eframe::egui;
+use kymo::load::Covered;
 use kymo::model::Trace;
 use kymo::stats::{self, Group, Instance, Point, Range, Report};
 
@@ -86,9 +87,14 @@ impl Panel {
 
     /// The report over `range`, computed again only when the range is not
     /// the last one's.
-    pub fn report(&mut self, trace: &Trace, contradictions: &[usize], range: Range) -> &Report {
+    pub fn report(&mut self, trace: &Trace, contradictions: &[usize], known: &Covered, range: Range) -> &Report {
         if self.report.as_ref().is_none_or(|(last, _)| *last != range) {
-            let report = stats::compute(trace, &self.instances, contradictions, range, WORST);
+            let found = stats::Found {
+                instances: &self.instances,
+                contradictions,
+                known,
+            };
+            let report = stats::compute(trace, found, range, WORST);
             self.report = Some((range, report));
         }
         &self.report.as_ref().expect("computed above").1
