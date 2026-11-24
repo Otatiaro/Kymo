@@ -69,6 +69,7 @@ pub struct Timeline {
     /// The status line's counts, kept as elements are added.
     events: usize,
     losses: usize,
+    lost: u64,
     suspects: u64,
     /// Milliseconds the last frame took to lay the timeline out.
     painted: f64,
@@ -132,6 +133,7 @@ impl Timeline {
             span: 0.0,
             events: 0,
             losses: 0,
+            lost: 0,
             suspects: 0,
             painted: 0.0,
             measure: measure.then(Measure::default),
@@ -167,8 +169,9 @@ impl Timeline {
                     *highest = (*highest).max(cycles);
                     self.events += 1;
                 }
-                Element::Lost { .. } => {
+                Element::Lost { from, to } => {
                     self.losses += 1;
+                    self.lost += u64::from(to.wrapping_sub(*from));
                     self.pending.push(n);
                 }
                 Element::Suspect { writers, .. } => {
@@ -575,12 +578,15 @@ impl Timeline {
             }
             match self.trace.elements[mark.element] {
                 Element::Lost { from, to } => {
-                    let _ = write!(text, "lost {from} {to}: {} indexes", to.wrapping_sub(from));
+                    let slots = counted(u64::from(to.wrapping_sub(from)), "slot", "slots");
+                    let _ = write!(text, "gap between indexes {from} and {to}: {slots} lost");
                 }
                 Element::Suspect { from, to, writers } => {
+                    let writes = counted(u64::from(writers), "write", "writes");
                     let _ = write!(
                         text,
-                        "suspect {from} {to}: {writers} lapped writers no danger accounts for"
+                        "write overrun between indexes {from} and {to}: {writes} interrupted for a full ring lap; \
+                         events recorded near it may be wrong"
                     );
                 }
                 Element::Event { .. } => {}
@@ -737,9 +743,15 @@ impl Timeline {
 
     fn status(&self) -> String {
         let mut status = format!(
-            "{} events, {} losses, {} suspect writers",
-            self.events, self.losses, self.suspects
+            "{}, {} ({} lost)",
+            counted(self.events as u64, "event", "events"),
+            counted(self.losses as u64, "gap", "gaps"),
+            counted(self.lost, "slot", "slots")
         );
+        if self.suspects > 0 {
+            let writes = counted(self.suspects, "write", "writes");
+            let _ = write!(status, ", {writes} overrun: nearby events may be wrong");
+        }
         if let Some(meaning) = &self.meaning {
             let _ = write!(status, ", {} against OpSy's order", meaning.opsy.contradictions.len());
         }
@@ -831,6 +843,11 @@ impl View {
 /// The widest view of a capture from `first` to `last` cycles.
 fn widest(first: f64, last: f64) -> f64 {
     ((last - first) * 1.05).max(NARROWEST)
+}
+
+/// `n` and the noun that counts it: `one` for 1, `many` otherwise.
+fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The view of the whole capture from `first` to `last` cycles: its left

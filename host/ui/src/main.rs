@@ -19,7 +19,9 @@ const USAGE: &str = "\
 usage: kymo-ui <elf> <capture> [--clock <Hz>] [--measure]
 
 Shows a capture made by kymo record --out: one row per event type of the
-image, the losses and suspect lines marked across the rows. Wheel: zoom at
+image, the gaps (slots lost) and the overrun writes (a write interrupted for
+a full ring lap: events recorded near it may be wrong) marked across the
+rows. Wheel: zoom at
 the pointer; drag or horizontal wheel: scroll; double click: the whole
 capture. Hovering an event shows its line as kymo decode prints it.
 
