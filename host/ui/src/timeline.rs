@@ -274,25 +274,18 @@ impl Timeline {
     }
     /// Shows the whole capture.
     fn whole(&mut self) {
-        self.span = self.widest() / 1.05;
-        self.start = self.first() - (self.span * 0.025);
-    }
-
-    fn widest(&self) -> f64 {
-        ((self.last() - self.first()) * 1.05).max(NARROWEST)
+        (self.start, self.span) = whole(self.first(), self.last());
     }
 
     /// Zooms by `factor` about the point `at` of the view's width, 0 to 1.
     fn zoom(&mut self, at: f64, factor: f64) {
         let pivot = self.start + at * self.span;
-        self.span = (self.span * factor).clamp(NARROWEST, self.widest());
+        self.span = (self.span * factor).clamp(NARROWEST, widest(self.first(), self.last()));
         self.start = pivot - at * self.span;
     }
 
     fn clamp(&mut self) {
-        let low = self.first() - self.span / 2.0;
-        let high = (self.last() - self.span / 2.0).max(low);
-        self.start = self.start.clamp(low, high);
+        self.start = clamped(self.start, self.span, self.first(), self.last());
     }
 
     fn frequency(&self) -> Option<f64> {
@@ -532,30 +525,8 @@ impl Timeline {
         text: Color32,
         grid: Color32,
     ) {
-        // Ticks in seconds when the frequency is known, else in cycles.
-        let hz = self.frequency().unwrap_or(1.0);
-        let wanted = TICK * view.span / view.width / hz;
-        let magnitude = 10f64.powf(wanted.log10().floor());
-        let step = [1.0, 2.0, 5.0, 10.0]
-            .into_iter()
-            .map(|n| n * magnitude)
-            .find(|step| *step >= wanted)
-            .unwrap_or(10.0 * magnitude);
-        let (unit, suffix) = match self.frequency() {
-            None => (1.0, " cycles"),
-            Some(_) if step < 1e-6 => (1e-9, " ns"),
-            Some(_) if step < 1e-3 => (1e-6, " µs"),
-            Some(_) if step < 1.0 => (1e-3, " ms"),
-            Some(_) => (1.0, " s"),
-        };
-        let decimals = (-(step / unit).log10().floor()).max(0.0) as usize;
         let font = FontId::proportional(11.0);
-        let mut tick = (view.start / hz / step).ceil();
-        loop {
-            let at = tick * step * hz;
-            if at > view.start + view.span {
-                break;
-            }
+        for (at, label) in ticks(view.start, view.span, view.width, self.frequency()) {
             let x = view.x(at);
             painter.line_segment(
                 [egui::pos2(x, top + RULER - 6.0), egui::pos2(x, bottom)],
@@ -564,11 +535,10 @@ impl Timeline {
             painter.text(
                 egui::pos2(x + 3.0, top + 2.0),
                 Align2::LEFT_TOP,
-                format!("{:.decimals$}{suffix}", tick * step / unit),
+                label,
                 font.clone(),
                 text,
             );
-            tick += 1.0;
         }
         painter.line_segment(
             [
@@ -861,6 +831,57 @@ impl View {
     }
 }
 
+/// The widest view of a capture from `first` to `last` cycles.
+fn widest(first: f64, last: f64) -> f64 {
+    ((last - first) * 1.05).max(NARROWEST)
+}
+
+/// The view of the whole capture from `first` to `last` cycles: its left
+/// edge and its width, a margin after the last event.
+fn whole(first: f64, last: f64) -> (f64, f64) {
+    (first, widest(first, last))
+}
+
+/// `start` within the bounds a view of `span` cycles may start at: no
+/// earlier than the first event, no later than half a view before the last.
+fn clamped(start: f64, span: f64, first: f64, last: f64) -> f64 {
+    start.clamp(first, (last - span / 2.0).max(first))
+}
+
+/// The ruler's ticks in a view from `start` over `span` cycles, `width`
+/// pixels wide: each one's cycles and label, in seconds when the frequency is
+/// known, else in cycles.
+fn ticks(start: f64, span: f64, width: f64, frequency: Option<f64>) -> Vec<(f64, String)> {
+    let hz = frequency.unwrap_or(1.0);
+    let wanted = TICK * span / width / hz;
+    let magnitude = 10f64.powf(wanted.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|n| n * magnitude)
+        .find(|step| *step >= wanted)
+        .unwrap_or(10.0 * magnitude);
+    let (unit, suffix) = match frequency {
+        None => (1.0, " cycles"),
+        Some(_) if step < 1e-6 => (1e-9, " ns"),
+        Some(_) if step < 1e-3 => (1e-6, " µs"),
+        Some(_) if step < 1.0 => (1e-3, " ms"),
+        Some(_) => (1.0, " s"),
+    };
+    let decimals = (-(step / unit).log10().floor()).max(0.0) as usize;
+    let mut ticks = Vec::new();
+    let mut tick = (start / hz / step).ceil();
+    loop {
+        let at = tick * step * hz;
+        if at > start + span {
+            break;
+        }
+        // Adding zero turns the -0 of a tick at the origin into 0.
+        ticks.push((at, format!("{:.decimals$}{suffix}", tick * step / unit + 0.0)));
+        tick += 1.0;
+    }
+    ticks
+}
+
 /// The rectangles of a frame's rows, in one mesh.
 struct Bars<'a> {
     mesh: &'a mut egui::Mesh,
@@ -980,6 +1001,43 @@ impl Timeline {
                 );
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole view shows every event and no time before the first.
+    #[test]
+    fn the_whole_view_starts_at_the_first_event_and_shows_the_last() {
+        for (first, last) in [(0.0, 1e6), (-500.0, 2e9), (0.0, 10.0), (3.0, 3.0)] {
+            let (start, span) = whole(first, last);
+            assert_eq!(start, first, "{first} {last}");
+            assert!(start + span >= last, "{first} {last}: ends at {}", start + span);
+        }
+    }
+
+    /// Panning or zooming never shows time before the first event.
+    #[test]
+    fn a_view_never_starts_before_the_first_event() {
+        for start in [-1e9, -1.0, 0.0] {
+            assert_eq!(clamped(start, 1000.0, 0.0, 1e6), 0.0);
+        }
+        assert_eq!(clamped(5e5, 1000.0, 0.0, 1e6), 5e5);
+    }
+
+    /// A tick at the origin reads 0, not -0, from a view starting just
+    /// before it, in seconds and in cycles.
+    #[test]
+    fn no_tick_reads_minus_zero() {
+        for frequency in [Some(250e6), None] {
+            let ticks = ticks(-3.0, 1e6, 1000.0, frequency);
+            assert!(!ticks.is_empty());
+            for (_, label) in ticks {
+                assert!(!label.starts_with("-0"), "{label}");
+            }
         }
     }
 }
