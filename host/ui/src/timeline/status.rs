@@ -1,6 +1,7 @@
 //! The status bar, and the times and durations it and the hovers print.
 
 use super::Timeline;
+use super::load::Mode;
 use eframe::egui;
 use std::fmt::Write;
 
@@ -76,6 +77,13 @@ pub(super) fn theme_choice(ui: &mut egui::Ui) {
     }
     if choice != chosen {
         ui.ctx().set_theme(choice);
+    }
+}
+
+/// The modes of OpSy's rows, right to left.
+pub(super) fn mode_choice(ui: &mut egui::Ui, mode: &mut Mode) {
+    for (choice, name) in [(Mode::Load, "Load"), (Mode::Bars, "Bars"), (Mode::Auto, "Auto")] {
+        ui.selectable_value(mode, choice, name);
     }
 }
 

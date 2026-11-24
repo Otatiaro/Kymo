@@ -13,6 +13,8 @@ pub struct Palette {
     pub interrupt: Color32,
     pub hold: Color32,
     pub wait: Color32,
+    /// The hatching of the time unknown, in the load view.
+    pub unknown: Color32,
     /// The bands of a loss and of a suspect line, over the rows.
     pub loss: Color32,
     pub suspect: Color32,
@@ -27,6 +29,7 @@ const LIGHT: Palette = Palette {
     interrupt: Color32::from_rgb(190, 100, 10),
     hold: Color32::from_rgb(30, 120, 60),
     wait: Color32::from_rgb(80, 150, 100),
+    unknown: Color32::from_rgb(110, 110, 110),
     loss: Color32::from_rgba_premultiplied(150, 0, 0, 200),
     suspect: Color32::from_rgba_premultiplied(120, 70, 0, 200),
     owner: Color32::WHITE,
@@ -39,6 +42,7 @@ const DARK: Palette = Palette {
     interrupt: Color32::from_rgb(240, 160, 60),
     hold: Color32::from_rgb(80, 185, 110),
     wait: Color32::from_rgb(55, 125, 80),
+    unknown: Color32::from_rgb(150, 150, 150),
     loss: Color32::from_rgba_premultiplied(210, 60, 60, 210),
     suspect: Color32::from_rgba_premultiplied(200, 140, 30, 200),
     owner: Color32::BLACK,

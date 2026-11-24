@@ -10,6 +10,7 @@
 
 mod draw;
 mod hover;
+mod load;
 mod measure;
 mod rows;
 mod status;
@@ -27,9 +28,10 @@ use kymo::model::Trace;
 use kymo::opsy;
 use kymo::stats;
 use kymo::target::Result;
+use load::Mode;
 use measure::Measure;
 use rows::{Mark, Row};
-use status::theme_choice;
+use status::{mode_choice, theme_choice};
 use view::{clamped, whole, widest};
 
 /// The width of the column of row names.
@@ -88,6 +90,8 @@ pub struct Timeline {
     picked: Option<(i64, i64)>,
     /// Whether the last frame moved the view or the selection.
     moving: bool,
+    /// How OpSy's rows are drawn.
+    mode: Mode,
 }
 
 impl Timeline {
@@ -126,6 +130,7 @@ impl Timeline {
             anchor: None,
             picked: None,
             moving: false,
+            mode: Mode::Auto,
         };
         timeline.add(0);
         timeline.panel = timeline
@@ -177,7 +182,13 @@ impl eframe::App for Timeline {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(self.status());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), theme_choice);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme_choice(ui);
+                    if self.meaning.is_some() {
+                        ui.separator();
+                        mode_choice(ui, &mut self.mode);
+                    }
+                });
             });
         });
         if self.panel.is_some() {

@@ -1,11 +1,13 @@
 //! A frame of the timeline: the view moved by the pointer, then every line drawn.
 
+use super::load::{self, Drawn};
 use super::rows::Line;
 use super::view::{View, ticks};
 use super::{LABELS, ROW, RULER, Timeline};
 use crate::palette::Palette;
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
+use kymo::load::Covered;
 use kymo::model::Element;
 use kymo::opsy::Span;
 use std::time::Instant;
@@ -102,6 +104,13 @@ impl Timeline {
         };
         // A mutex's holders, named in their bars wide enough.
         let mut owners: Vec<(f32, f32, f32, usize)> = Vec::new();
+        // The load drawn, by line: the bins the pointer reads.
+        let mut drawn_rows: Vec<(usize, Vec<Drawn>)> = Vec::new();
+        let capture = self.bounds.unwrap_or_default();
+        let loaded = self
+            .meaning
+            .as_ref()
+            .is_some_and(|meaning| self.mode.load(load::busiest(meaning, &view), width));
         for (n, &line) in lines.iter().enumerate() {
             let top = area.top() + n as f32 * ROW;
             if top > area.bottom() {
@@ -141,8 +150,30 @@ impl Timeline {
             }
             let (high, low) = (top + 3.0, top + ROW - 3.0);
             let meaning = self.meaning.as_ref();
+            if let Some(meaning) = meaning {
+                let rows = &meaning.load;
+                let known = &rows.cpu.known;
+                let row = |covered: Option<&Covered>, color: Color32| {
+                    covered.map(|covered| (load::row(&view, capture, covered, known), [color; 2]))
+                };
+                let drawn = match line {
+                    Line::Cpu => Some((load::cpu(&view, capture, &rows.cpu), [palette.interrupt, palette.run])),
+                    Line::Task(task) if loaded => row(
+                        task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),
+                        if task.is_some() { palette.run } else { palette.idle },
+                    ),
+                    Line::Handler(handler) if loaded => row(rows.handlers.get(handler), palette.interrupt),
+                    Line::Mutex(mutex) if loaded => row(rows.holds.get(mutex), palette.hold),
+                    _ => None,
+                };
+                if let Some((bins, colors)) = drawn {
+                    load::paint(bars.mesh, &bins, area, (high, low), colors, palette.unknown);
+                    drawn_rows.push((n, bins));
+                    continue;
+                }
+            }
             match line {
-                Line::Section(_) | Line::Fold => {}
+                Line::Section(_) | Line::Fold | Line::Cpu => {}
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
                         bars.mesh.add_colored_rect(
@@ -283,7 +314,7 @@ impl Timeline {
         self.painted = began.elapsed().as_secs_f64() * 1e3;
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
-            && let Some(hovered) = self.hovered(&view, area, pointer, &lines, &open)
+            && let Some(hovered) = self.hovered(&view, area, pointer, &lines, &open, &drawn_rows)
         {
             response.on_hover_ui_at_pointer(|ui| {
                 ui.label(egui::RichText::new(hovered).monospace());
