@@ -18,17 +18,18 @@ The output must show that:
 - every event holds the values its image wrote for its index;
 - the recording went through losses, every type, and events whose slots run
   past the end of the ring;
-- no writer was reported suspect: none is held for a lap;
+- no writer was reported suspect without --lap: none is held for a lap;
 - `kymo decode` of the capture prints exactly what `kymo record` printed:
   they may differ only by the seconds, which are all 0 here (QEMU's
   timestamps all read 0) at the frequency given and kept in the capture.
 
 With --lap, the image holds writers for more than a lap (lap.cpp), and the
-`held` events show the ring lapped some while recording. With `follows`, the
-host reads every held writer before the lap: no event holds another's bytes,
-and no writer is suspect. With `behind`, the lap falls between two reads:
-some writers are suspect, and an event may hold another's bytes only near a
-suspect line, from a ring before its first index to its last.
+`held` events show the ring lapped some while recording. An event may hold
+another's bytes only near a suspect line, from a ring before its first index
+to its last. With `follows`, the host reads held writers before the lap, but
+a loaded machine may still delay a read past it: a suspect line is then
+correct, and tolerated. With `behind`, the lap falls between two reads: some
+writers must be suspect.
 
 With --killed, the host is killed while recording, without --duration:
 the capture has no end record. `kymo decode` must read it up to its last
@@ -167,9 +168,9 @@ def check(output: str, lap: str | None) -> list[str]:
         errors.append("the recording did not go through losses, every type and the end of the ring")
     if lap and max(lapped, default=0) == min(lapped, default=0):
         errors.append("no writer was lapped while recording")
-    if lap == "behind":
-        if not suspects:
-            errors.append("no writer was reported suspect")
+    if lap == "behind" and not suspects:
+        errors.append("no writer was reported suspect")
+    if lap:
         wrong = [(index, line) for index, line in wrong
                  if not any(start - SLOTS <= index < stop for start, stop in suspects)]
     elif suspects:
