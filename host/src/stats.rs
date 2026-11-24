@@ -141,6 +141,10 @@ pub struct Report {
     pub origin: i64,
     /// The cycles of the range in which the adapter knows the state.
     pub known: i64,
+    /// The first index recorded, when the recording started after index 0:
+    /// what came before it is unknown, without being a loss.
+    pub joined: Option<u32>,
+    /// The losses read in the range.
     pub losses: usize,
     pub suspects: u64,
     pub contradictions: usize,
@@ -296,12 +300,11 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
     let high = range.to.unwrap_or(i64::MAX);
     let (from, to) = (low.max(origin), high.min(last).max(low.max(origin)));
     let inside = |cycles: i64| cycles >= low && cycles < high;
-    let losses = usize::from(trace.first != 0 && low <= origin)
-        + places
-            .losses
-            .iter()
-            .filter(|&&loss| inside(places.cycles[loss]))
-            .count();
+    let losses = places
+        .losses
+        .iter()
+        .filter(|&&loss| inside(places.cycles[loss]))
+        .count();
     let suspects = trace
         .elements
         .iter()
@@ -367,6 +370,7 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         to,
         origin,
         known: known.until(to) - known.until(from),
+        joined: (trace.first != 0).then_some(trace.first),
         losses,
         suspects,
         contradictions,
@@ -421,6 +425,9 @@ pub fn text(report: &Report) -> Vec<String> {
         report.suspects,
         report.contradictions
     )];
+    if let Some(index) = report.joined {
+        lines[0] += &format!(", joined at index {index}");
+    }
     for group in &report.groups {
         let mut line = format!("{} {} {}", group.kind, group.subject, group.metric.name);
         if let Some(detail) = &group.detail {
@@ -541,12 +548,13 @@ pub fn json(report: &Report) -> String {
         .collect();
     format!(
         "{{\"schema\":\"kymo-stats\",\"version\":1,\"frequency\":{},\"from\":{},\"to\":{},\"origin\":{},\
-         \"known\":{},\"losses\":{},\"suspects\":{},\"contradictions\":{},\"groups\":[{}]}}",
+         \"known\":{},\"joined\":{},\"losses\":{},\"suspects\":{},\"contradictions\":{},\"groups\":[{}]}}",
         number(report.frequency),
         report.from,
         report.to,
         report.origin,
         report.known,
+        report.joined.map_or_else(|| "null".to_owned(), |index| index.to_string()),
         report.losses,
         report.suspects,
         report.contradictions,

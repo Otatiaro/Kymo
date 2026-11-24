@@ -793,8 +793,9 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
             cut.at, cut.next
         );
     }
+    let (taken, lost) = trace.slots();
     eprintln!(
-        "{} events{}{}",
+        "{} events in {taken} slots, {lost} lost{}{}",
         trace.events(),
         suspect(trace.suspects()),
         measured(trace.measured)

@@ -396,8 +396,8 @@ fn the_parser_and_the_validator_reject_what_they_should() {
     let schema = Json::parse(SCHEMA);
     let point = r#"{"value":1,"index":0,"cycles":5,"seconds":null}"#;
     let report = format!(
-        r#"{{"schema":"kymo-stats","version":1,"frequency":null,"from":0,"to":10,"origin":0,"known":10,"losses":0,
-        "suspects":0,"contradictions":0,"groups":[{{"kind":"task","subject":"a","metric":"net","detail":null,"count":1,
+        r#"{{"schema":"kymo-stats","version":1,"frequency":null,"from":0,"to":10,"origin":0,"known":10,"joined":null,
+        "losses":0,"suspects":0,"contradictions":0,"groups":[{{"kind":"task","subject":"a","metric":"net","detail":null,"count":1,
         "excluded_loss":0,"excluded_suspect":0,"cut":0,"lower_bound":false,"jitter":null,"share":0.1,"distribution":
         {{"min":{point},"p50":1,"p90":1,"p99":1,"max":{point},"mean":1.0,"total":1,"histogram":{{"width":1,"first":1,
         "counts":[1]}},"worst":[{point}]}}}}]}}"#
@@ -411,6 +411,8 @@ fn the_parser_and_the_validator_reject_what_they_should() {
     for (from, to) in [
         (r#""version":1"#, r#""version":2"#),
         (r#""known":10"#, r#""known":-1"#),
+        (r#""joined":null"#, r#""joined":0"#),
+        (r#""joined":null"#, r#""joined":"1""#),
         (r#""from":0"#, r#""from":0.5"#),
         (r#""detail":null"#, r#""detail":3"#),
         (r#""count":1,"#, ""),
@@ -442,7 +444,7 @@ fn every_member_the_output_writes_is_in_the_schema() {
         unreachable!()
     };
     let report = r#"{"schema":"kymo-stats","version":1,"frequency":null,"from":0,"to":10,"origin":0,"known":10,
-        "losses":0,"suspects":0,"contradictions":0,"groups":[]}"#;
+        "joined":12,"losses":0,"suspects":0,"contradictions":0,"groups":[]}"#;
     for name in required {
         let Json::String(name) = name else { unreachable!() };
         let mut cut = top.clone();

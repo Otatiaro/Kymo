@@ -647,13 +647,18 @@ const MUTEX_GRANTED: u32 = 3;
 /// The statistics of `steps` over `range`, after checking that every split
 /// in two pieces gives the same instances, and that the JSON fits the schema.
 fn report(steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
+    report_from(0, steps, range)
+}
+
+/// The report of a trace recorded from index `first`.
+fn report_from(first: u32, steps: &[(&str, &[u32])], range: stats::Range) -> stats::Report {
     let catalogue = catalogue();
-    let trace = trace(&catalogue, 0, steps);
-    let mut whole = Opsy::new(&catalogue, 0).unwrap();
+    let trace = trace(&catalogue, first, steps);
+    let mut whole = Opsy::new(&catalogue, first).unwrap();
     whole.add(&trace.elements, 0);
     let instances = instances(&whole);
     for split in 1..trace.elements.len() {
-        let mut pieces = Opsy::new(&catalogue, 0).unwrap();
+        let mut pieces = Opsy::new(&catalogue, first).unwrap();
         pieces.add(&trace.elements[..split], 0);
         pieces.add(&trace.elements, split);
         assert_eq!(super::instances(&pieces), instances, "split at {split}");
@@ -783,6 +788,34 @@ fn an_activation_splits_into_what_preempts_it() {
             "task 0x20000200 wake_latency",
         ]
     );
+}
+
+/// A recording that starts after index 0 joined the trace: the state before
+/// it is unknown, so the instance it cuts is excluded, but it is not a loss.
+#[test]
+fn a_recording_that_joined_late_is_not_a_loss() {
+    let steps: &[(&str, &[u32])] = &[
+        ("task_started", &[A]),
+        ("task_sleep", &[A]),
+        ("enter_idle", &[]),
+        ("task_ready", &[A, NOTIFIED]),
+        ("task_started", &[A]),
+        ("task_sleep", &[A]),
+        ("enter_idle", &[]),
+    ];
+    let from_zero = report_from(0, steps, stats::Range::default());
+    let joined = report_from(5, steps, stats::Range::default());
+    assert_eq!((from_zero.joined, from_zero.losses), (None, 0));
+    assert_eq!((joined.joined, joined.losses), (Some(5), 0));
+    // The first run started before the recording: what woke it is unknown.
+    let net = |report: &stats::Report| group(report, "task 0x20000100 net");
+    assert_eq!(net(&from_zero), (1, 0, 0, 0, vec![10]));
+    assert_eq!(net(&joined), (1, 1, 0, 0, vec![10]));
+    let text = stats::text(&joined).join("\n");
+    assert!(text.contains(", 0 losses, 0 suspect writers, 0 contradictions, joined at index 5\n"), "{text}");
+    let json = stats::json(&joined);
+    assert!(json.contains(r#""joined":5,"losses":0,"#), "{json}");
+    assert!(stats::json(&from_zero).contains(r#""joined":null,"#));
 }
 
 #[test]

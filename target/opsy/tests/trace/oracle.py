@@ -57,7 +57,8 @@ def elements(decoded: str) -> tuple[int, list[dict]]:
             first = int(words[1])
         elif words[0] == "event":
             fields = re.split(r" (?=\w+=)", words[5]) if len(words) > 5 else []
-            out.append({"kind": "event", "index": int(words[1]), "cycles": int(words[2]),
+            # One index, or the range of the event's slots: "11439-11440".
+            out.append({"kind": "event", "index": int(words[1].split("-")[0]), "cycles": int(words[2]),
                         "seconds": None if words[3] == "-" else float(words[3]),
                         "name": words[4].removeprefix(PREFIX),
                         "values": dict(field.split("=", 1) for field in fields)})
@@ -315,7 +316,8 @@ def report(decoded: str, low: int | None, high: int | None, worst: int) -> dict:
             before = (item["cycles"], item["index"])
         place.append(before)
     lost = [n for n, item in enumerate(items) if item["kind"] == "lost"]
-    losses = int(first != 0 and low <= origin) + sum(inside(place[n][0]) for n in lost)
+    # A recording that started late joined the trace: not a loss.
+    losses = sum(inside(place[n][0]) for n in lost)
     # The time known: while the task on the core is, in a run.
     known = sum(max(min(to[1], end) - max(since[1], start), 0) for _, since, to, _ in found["runs"])
     suspects = sum(item["writers"] for n, item in enumerate(items)
@@ -354,7 +356,7 @@ def report(decoded: str, low: int | None, high: int | None, worst: int) -> dict:
         total = group["distribution"]["total"] if points else 0
         group["jitter"] = values[-1] - values[0] if metric == "period" and points else None
         group["share"] = total / known if metric == "net" and known > 0 else None
-    return {"from": start, "to": end, "origin": origin, "known": known, "losses": losses,
+    return {"from": start, "to": end, "origin": origin, "known": known, "joined": first or None, "losses": losses,
             "suspects": suspects, "contradictions": sum(inside(place[n][0]) for n in found["contradictions"]),
             "groups": groups}
 
@@ -368,7 +370,7 @@ def close(a, b) -> bool:
 def compare(expected: dict, got: dict) -> list[str]:
     """kymo stats --json against the oracle, value by value."""
     errors = []
-    for key in ("from", "to", "origin", "known", "losses", "suspects", "contradictions"):
+    for key in ("from", "to", "origin", "known", "joined", "losses", "suspects", "contradictions"):
         if got[key] != expected[key]:
             errors.append(f"{key}: kymo stats says {got[key]}, the oracle {expected[key]}")
     printed = {(group["kind"], group["subject"], group["metric"], group["detail"]): group for group in got["groups"]}

@@ -39,6 +39,7 @@ fn report(groups: Vec<Group>, frequency: Option<f64>) -> Report {
         to: 1_000_000,
         origin: 0,
         known: 100,
+        joined: None,
         losses: 2,
         suspects: 0,
         contradictions: 0,

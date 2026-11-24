@@ -4,7 +4,7 @@
   "description": "Statistics of a range of a capture. Durations and instants are in cycles of the trace's cycle counter; seconds are since the first event, at the frequency given, null without one.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "version", "frequency", "from", "to", "origin", "known", "losses", "suspects", "contradictions", "groups"],
+  "required": ["schema", "version", "frequency", "from", "to", "origin", "known", "joined", "losses", "suspects", "contradictions", "groups"],
   "properties": {
     "schema": { "const": "kymo-stats" },
     "version": { "const": 1 },
@@ -13,7 +13,8 @@
     "to": { "type": "integer", "description": "The range's end, within the trace's events." },
     "origin": { "type": "integer", "description": "The cycles of the first event, where the seconds start." },
     "known": { "type": "integer", "minimum": 0, "description": "The range less what its losses hid." },
-    "losses": { "type": "integer", "minimum": 0 },
+    "joined": { "type": ["integer", "null"], "minimum": 1, "description": "The first index recorded, when the recording started after index 0: the state before it is unknown, without being a loss. Null from index 0." },
+    "losses": { "type": "integer", "minimum": 0, "description": "The losses read in the range; the start of a recording is not one." },
     "suspects": { "type": "integer", "minimum": 0, "description": "The writers reported overrun in the range." },
     "contradictions": { "type": "integer", "minimum": 0 },
     "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } }
