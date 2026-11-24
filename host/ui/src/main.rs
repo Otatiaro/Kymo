@@ -3,6 +3,7 @@
 
 mod levels;
 mod meaning;
+mod names;
 mod spans;
 mod timeline;
 

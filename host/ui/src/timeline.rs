@@ -222,27 +222,24 @@ impl Timeline {
     }
 
     fn label(&self, line: Line) -> String {
-        let opsy = self.meaning.as_ref().map(|meaning| &meaning.opsy);
-        let subject = |n: usize| match (opsy, line) {
-            (Some(opsy), Line::Task(_)) => Some(&opsy.tasks.list[n]),
-            (Some(opsy), Line::Handler(_)) => Some(&opsy.handlers.list[n]),
-            (Some(opsy), Line::Mutex(_)) => Some(&opsy.mutexes.list[n]),
-            _ => None,
+        let shown = |kind: usize, n: usize| {
+            let meaning = self.meaning.as_ref().expect("a subject's line has OpSy's meaning");
+            &meaning.names[kind][n]
         };
         match line {
             Line::Section(name) => name.to_owned(),
             // After the triangle `timeline` draws: the font has no glyph for it.
             Line::Fold => format!("    EVENTS ({} types)", self.rows.len()),
             Line::Task(None) => "  idle".to_owned(),
-            Line::Task(Some(n)) | Line::Handler(n) | Line::Mutex(n) => match subject(n) {
-                Some(opsy::Subject {
-                    name,
-                    priority: Some(priority),
-                    ..
-                }) => format!("  {}  p{priority}", short(name)),
-                Some(subject) => format!("  {}", short(&subject.name)),
-                None => String::new(),
-            },
+            Line::Task(Some(n)) => {
+                let meaning = self.meaning.as_ref().expect("a task's line has OpSy's meaning");
+                match meaning.opsy.tasks.list[n].priority {
+                    Some(priority) => format!("  {}  prio {priority}", shown(0, n)),
+                    None => format!("  {}", shown(0, n)),
+                }
+            }
+            Line::Handler(n) => format!("  {}", shown(1, n)),
+            Line::Mutex(n) => format!("  {}", shown(2, n)),
             Line::Event(row) => self.rows[row].name.clone(),
         }
     }
@@ -475,7 +472,7 @@ impl Timeline {
             // Small enough that the descenders stay inside the bar's 12 pixels.
             let small = FontId::proportional(10.0);
             for (from, to, y, owner) in owners {
-                let name = short(&meaning.opsy.tasks.list[owner].name);
+                let name = &meaning.names[0][owner];
                 let (from, to) = (from.max(area.left()), to.min(area.right()));
                 // An estimate of the name's width: a narrower bar stays bare.
                 if to - from >= 6.0 * name.chars().count() as f32 + 6.0 {
@@ -887,12 +884,6 @@ struct Bars<'a> {
     mesh: &'a mut egui::Mesh,
     view: &'a View,
     area: Rect,
-}
-
-/// A subject's name in a row: the anonymous namespaces add nothing there,
-/// and the hover gives the name in full.
-fn short(name: &str) -> String {
-    name.replace("(anonymous namespace)::", "")
 }
 
 /// The pixel columns `from..to` of an open span.
