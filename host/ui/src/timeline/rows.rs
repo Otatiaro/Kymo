@@ -45,8 +45,6 @@ pub(super) enum Line {
     Section(&'static str),
     /// The CPU's load: handlers, then each task other than idle.
     Cpu,
-    /// The line that folds and unfolds the rows of event types.
-    Fold,
     /// A task, or the idle task.
     Task(Option<usize>),
     Handler(usize),
@@ -68,11 +66,27 @@ impl Line {
 }
 
 /// The top of each of `lines` below the top of the first, then the bottom of
-/// the last.
-pub(super) fn tops(lines: &[Line]) -> Vec<f32> {
+/// the last, in `room` pixels: each line its height, the lines other than
+/// sections stretched alike to fill the room they leave.
+pub(super) fn tops(lines: &[Line], room: f32) -> Vec<f32> {
+    let height = |line: &Line| line.height();
+    let fixed: f32 = lines
+        .iter()
+        .filter(|line| matches!(line, Line::Section(_)))
+        .map(height)
+        .sum();
+    let stretched: f32 = lines.iter().map(height).sum::<f32>() - fixed;
+    let scale = if stretched > 0.0 {
+        ((room - fixed) / stretched).max(1.0)
+    } else {
+        1.0
+    };
     std::iter::once(0.0)
         .chain(lines.iter().scan(0.0, |top, line| {
-            *top += line.height();
+            *top += match line {
+                Line::Section(_) => line.height(),
+                _ => line.height() * scale,
+            };
             Some(*top)
         }))
         .collect()
@@ -137,12 +151,11 @@ impl Timeline {
     }
 
     /// The lines: the CPU's load, the kernel's sections, the tasks by priority,
-    /// highest first, then the rows of event types unless folded; those rows
-    /// alone without a kernel adapter.
+    /// highest first; the rows of event types without a kernel adapter, which
+    /// the event list shows with one.
     pub(super) fn lines(&self) -> Vec<Line> {
-        let events = (0..self.rows.len()).map(Line::Event);
         let Some(meaning) = &self.meaning else {
-            return events.collect();
+            return (0..self.rows.len()).map(Line::Event).collect();
         };
         let kernel = &meaning.kernel;
         let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
@@ -155,10 +168,6 @@ impl Timeline {
         if !kernel.mutexes.list.is_empty() {
             lines.push(Line::Section("MUTEXES"));
             lines.extend((0..kernel.mutexes.list.len()).map(Line::Mutex));
-        }
-        lines.push(Line::Fold);
-        if !self.folded {
-            lines.extend(events);
         }
         lines
     }
@@ -174,7 +183,6 @@ impl Timeline {
         match line {
             Line::Section(name) => name.to_owned(),
             Line::Cpu => "CPU".to_owned(),
-            Line::Fold => format!("EVENTS ({} types)", self.rows.len()),
             Line::Task(None) => "idle".to_owned(),
             // No priority: it changes over the capture, with inheritance.
             Line::Task(Some(n)) => shown(0, n),
@@ -201,14 +209,11 @@ impl Timeline {
     }
 
     /// How far a line's label is indented, in pixels: a section's lines
-    /// under it, the fold's label after its triangle, and the rows of event
-    /// types under the fold.
-    pub(super) fn indent(&self, line: Line) -> f32 {
+    /// under it.
+    pub(super) fn indent(line: Line) -> f32 {
         match line {
-            Line::Section(_) | Line::Cpu => 0.0,
-            Line::Fold => 16.0,
-            Line::Event(_) if self.meaning.is_none() => 0.0,
-            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) | Line::Event(_) => 12.0,
+            Line::Section(_) | Line::Cpu | Line::Event(_) => 0.0,
+            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) => 12.0,
         }
     }
 
