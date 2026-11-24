@@ -40,11 +40,17 @@
 //! interrupts: its cause is the delay. A handler the adapter does not trace
 //! hides in the task it interrupts.
 //!
+//! An interrupt handler is one subject per handler and exception it runs for,
+//! named `<interrupt> → <handler>` (interrupts.rs names the interrupt), so
+//! that a handler several interrupts share is told apart. Its exit, which
+//! gives the handler alone, closes the innermost one entered.
+//!
 //! The kernel's handlers the dialect names run as handlers of those names.
 //! PendSV has no exit event: it makes no span, and the task it puts on the
 //! core runs from the task_started it emits.
 
 use crate::events::{Catalogue, Event, Kind, Pointee};
+use crate::interrupts::Interrupts;
 use crate::load::{Covered, Cpu};
 pub use crate::model::Edge;
 use crate::model::{Element, Trace};
@@ -163,6 +169,8 @@ impl Subject {
 pub struct Subjects {
     pub list: Vec<Subject>,
     by_address: HashMap<u64, usize>,
+    /// Handlers, by address and exception.
+    by_interrupt: HashMap<(u64, Option<u16>), usize>,
     by_name: HashMap<&'static str, usize>,
 }
 
@@ -175,6 +183,39 @@ impl Subjects {
                 .as_ref()
                 .and_then(|pointee| symbols.name(pointee, address))
                 .unwrap_or_else(|| format!("0x{address:08x}"));
+            self.list.push(Subject {
+                address,
+                name,
+                priority: None,
+                priorities: Vec::new(),
+            });
+            self.list.len() - 1
+        })
+    }
+
+    /// The handler at the address `field` gives, run for `exception`: one
+    /// subject per handler and interrupt, named `<interrupt> → <handler>`, or
+    /// by the handler alone when the exception is unknown or the interrupt
+    /// bears the handler's name.
+    fn interrupt(
+        &mut self,
+        symbols: &Symbols,
+        interrupts: &Interrupts,
+        field: &Field,
+        exception: Option<u16>,
+        payload: &[u8],
+    ) -> usize {
+        let address = field.read(payload);
+        *self.by_interrupt.entry((address, exception)).or_insert_with(|| {
+            let handler = field
+                .pointee
+                .as_ref()
+                .and_then(|pointee| symbols.name(pointee, address))
+                .unwrap_or_else(|| format!("0x{address:08x}"));
+            let name = match exception.map(|exception| interrupts.name(exception)) {
+                Some(interrupt) if interrupt != handler => format!("{interrupt} → {handler}"),
+                _ => handler,
+            };
             self.list.push(Subject {
                 address,
                 name,
@@ -284,9 +325,12 @@ pub(crate) enum Hook {
     TaskBlocked {
         task: Field,
     },
+    /// A handler entered for an exception, IPSR's.
     IsrEnter {
         handler: Field,
+        exception: Field,
     },
+    /// The innermost handler entered at that address returns.
     IsrExit {
         handler: Field,
     },
@@ -320,6 +364,7 @@ pub(crate) struct Dialect {
 
 pub struct Meaning<'a> {
     symbols: &'a Symbols,
+    interrupts: &'a Interrupts,
     hooks: HashMap<u16, Hook>,
     /// The wake reasons for a delay that ran out.
     elapsed: &'static [&'static str],
@@ -367,6 +412,7 @@ impl<'a> Meaning<'a> {
         let Dialect { hooks, elapsed } = crate::opsy::dialect(catalogue)?;
         Ok(Self {
             symbols: &catalogue.symbols,
+            interrupts: &catalogue.interrupts,
             hooks,
             elapsed,
             first,
@@ -472,12 +518,29 @@ impl<'a> Meaning<'a> {
                 let task = self.tasks.index(symbols, task, payload);
                 self.not_ready(task, edge);
             }
-            Hook::IsrEnter { handler } => {
-                let handler = self.handlers.index(symbols, handler, payload);
+            Hook::IsrEnter { handler, exception } => {
+                // 0 is thread mode: the handler was called, not taken.
+                let exception = u16::try_from(exception.read(payload))
+                    .ok()
+                    .filter(|&exception| exception != 0);
+                let handler = self
+                    .handlers
+                    .interrupt(symbols, self.interrupts, handler, exception, payload);
                 self.enter(handler, edge);
             }
             Hook::IsrExit { handler } => {
-                let handler = self.handlers.index(symbols, handler, payload);
+                let address = handler.read(payload);
+                let open = self
+                    .entered
+                    .last()
+                    .map(|&(open, ..)| open)
+                    .filter(|&open| !self.handlers.is_named(open) && self.handlers.list[open].address == address);
+                let handler = match open {
+                    Some(open) => open,
+                    None => self
+                        .handlers
+                        .interrupt(symbols, self.interrupts, handler, None, payload),
+                };
                 self.exit(handler, edge);
             }
             Hook::KernelEnter { handler } => {

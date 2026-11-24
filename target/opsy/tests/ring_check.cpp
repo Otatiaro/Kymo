@@ -10,7 +10,8 @@
  * OpSy's own handlers are family kernel, off by default, and none of their
  * events is written. With kernel enabled, PendSV comes in before the task
  * starts. SysTick may come in between and is skipped. Each event carries the
- * address of its handler, condition variable or task.
+ * address of its handler, condition variable or task; the handler's entry also
+ * carries the exception it runs for, read from IPSR.
  */
 
 #include "qemu_test.hpp"
@@ -65,7 +66,8 @@ void wake_worker()
 struct read_event
 {
 	std::uint32_t type;
-	std::uint32_t first_word; ///< the first payload word
+	std::uint32_t first_word;      ///< the first payload word
+	std::uint32_t second_word = 0; ///< the second payload word
 };
 
 using read_events = std::array<read_event, 16>;
@@ -96,7 +98,7 @@ std::size_t read_since(std::uint32_t from, std::span<read_event> out)
 			continue;
 		if (type == systick_in || type == systick_out)
 			continue;
-		out[count++] = {.type = type, .first_word = slot.words[1]};
+		out[count++] = {.type = type, .first_word = slot.words[1], .second_word = slot.words[2]};
 	}
 	return count;
 }
@@ -167,6 +169,7 @@ OPSY_QEMU_TEST(the_adapter_records_an_interrupt_waking_a_task)
 		CHECK(events[i].type == by_default[i].type);
 		CHECK(events[i].first_word == by_default[i].first_word);
 	}
+	CHECK(events[0].second_word == 16 + g_irq);
 	for (std::size_t i = 0; i < count; ++i)
 	{
 		CHECK(events[i].type != id<kymo::opsy::enter_pend_sv>());
@@ -186,6 +189,7 @@ OPSY_QEMU_TEST(the_adapter_records_an_interrupt_waking_a_task)
 		CHECK(events[i].type == with_kernel[i].type);
 		CHECK(events[i].first_word == with_kernel[i].first_word);
 	}
+	CHECK(events[0].second_word == 16 + g_irq);
 
 	opsy::cortex_m::disable_interrupt(g_irq);
 	(void) g_worker.kill();

@@ -2,6 +2,7 @@ use super::*;
 use crate::decode::Decoded;
 use crate::events::{Event, Field as EventField, Type};
 use crate::events::{Kind, Pointee};
+use crate::interrupts::Interrupts;
 use crate::load::Covered;
 use crate::meaning::*;
 use crate::model::{Element, Trace};
@@ -23,7 +24,7 @@ const HOOKS: [(&str, &[&str]); 15] = [
     ("task_terminated", &["task"]),
     ("task_started", &["task"]),
     ("enter_idle", &[]),
-    ("isr_enter", &["handler"]),
+    ("isr_enter", &["handler", "exception"]),
     ("isr_exit", &["handler"]),
     ("mutex_taken", &["mutex", "owner"]),
     ("mutex_released", &["mutex", "owner"]),
@@ -47,7 +48,7 @@ fn catalogue() -> Catalogue {
                     name: name.to_owned(),
                     size: Some(if name == "priority" { 1 } else { 4 }),
                     kind: match name {
-                        "priority" => Kind::Base(DwAte(gimli::DW_ATE_unsigned.0)),
+                        "priority" | "exception" => Kind::Base(DwAte(gimli::DW_ATE_unsigned.0)),
                         "reason" => Kind::Enum(
                             REASONS
                                 .iter()
@@ -85,6 +86,7 @@ fn catalogue() -> Catalogue {
         events,
         rings: Vec::new(),
         symbols: Symbols::default(),
+        interrupts: Interrupts::from_enumerators(&[(45, "TIM2_IRQn".to_owned())]),
         warnings: Vec::new(),
     }
 }
@@ -122,7 +124,9 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
             .values()
             .find(|event| event.name == name)
             .expect("a hook of the catalogue");
-        let payload = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        // A field left out is 0.
+        let mut payload: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        payload.resize(payload.len().max(event.size as usize), 0);
         elements.push(Element::Event {
             event: Decoded {
                 index,
@@ -222,6 +226,38 @@ fn nested_interrupts_close_innermost_first() {
             "interrupt from=1 to=2 depth=1 handler=0x08000501",
             "interrupt from=0 to=3 depth=0 handler=0x08000401",
         ]
+    );
+}
+
+#[test]
+fn a_handler_shared_by_two_interrupts_is_told_apart_by_them() {
+    // TIM2 is named by the catalogue's IRQn_Type, IRQ46 by its number; H
+    // called from thread mode by itself.
+    assert_eq!(
+        spans(
+            0,
+            &[
+                ("isr_enter", &[H, 16 + 45]),
+                ("isr_exit", &[H]),
+                ("isr_enter", &[H, 16 + 46]),
+                ("isr_enter", &[H, 16 + 45]),
+                ("isr_exit", &[H]),
+                ("isr_exit", &[H]),
+                ("isr_enter", &[H, 0]),
+                ("isr_exit", &[H]),
+            ]
+        ),
+        [
+            "interrupt from=0 to=1 depth=0 handler=TIM2 → 0x08000401",
+            "interrupt from=3 to=4 depth=1 handler=TIM2 → 0x08000401",
+            "interrupt from=2 to=5 depth=0 handler=IRQ46 → 0x08000401",
+            "interrupt from=6 to=7 depth=0 handler=0x08000401",
+        ]
+    );
+    // An exit after a loss, its entry unseen: by the handler alone.
+    assert_eq!(
+        spans(0, &[("lost", &[]), ("isr_exit", &[H])]),
+        ["interrupt from=lost to=3 depth=unknown handler=0x08000401"]
     );
 }
 

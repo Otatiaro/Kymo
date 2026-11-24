@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An SVD file reduced to the interrupts the host reads: one the DWARF
+     names otherwise, and one it does not name. -->
+<device>
+  <name>DEVICE</name>
+  <peripherals>
+    <peripheral>
+      <name>TIM2</name>
+      <interrupt>
+        <name>TIMER2</name>
+        <value>45</value>
+      </interrupt>
+    </peripheral>
+    <peripheral>
+      <name>TIM3</name>
+      <interrupt>
+        <name>TIM3</name>
+        <description>TIM3 global interrupt</description>
+        <value>0x2E</value>
+      </interrupt>
+    </peripheral>
+  </peripherals>
+</device>

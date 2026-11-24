@@ -8,6 +8,7 @@
 //! the anchor, so the type is found by name: the symbol is demangled, and the
 //! structure of the same qualified name is looked up in the debug info.
 
+use crate::interrupts::Interrupts;
 use crate::symbols::Symbols;
 use crate::target::Result;
 use gimli::{AttributeValue, DebugInfoOffset, DwAte, EndianSlice, Operation, RunTimeEndian, UnitOffset};
@@ -94,9 +95,14 @@ pub struct Catalogue {
     pub rings: Vec<Ring>,
     /// The functions and static objects pointer fields are named by.
     pub symbols: Symbols,
+    /// The device interrupts the DWARF names (interrupts.rs).
+    pub interrupts: Interrupts,
     /// What the image seems to lack, for the user to read: it decodes all the same.
     pub warnings: Vec<String>,
 }
+
+/// The enumeration of IRQ numbers, SvdGenerator's and CMSIS's (interrupts.rs).
+const IRQN_TYPE: &str = "IRQn_Type";
 
 /// The namespace of the OpSy adapter's events (target/opsy).
 const OPSY_ADAPTER: &str = "kymo::opsy::";
@@ -145,10 +151,22 @@ pub fn read(path: &Path) -> Result<Catalogue> {
             Ok((id, Event { id, name, size, fields }))
         })
         .collect::<Result<_>>()?;
+    let interrupts = match debug.irq_enumerations.as_slice() {
+        [enumerators] => Interrupts::from_enumerators(enumerators),
+        [] => Interrupts::default(),
+        _ => {
+            warnings.push(format!(
+                "the DWARF has {} different {IRQN_TYPE}: none names the interrupts",
+                debug.irq_enumerations.len()
+            ));
+            Interrupts::default()
+        }
+    };
     Ok(Catalogue {
         events,
         rings: debug.rings,
         symbols: Symbols::read(&file, &debug.bases),
+        interrupts,
         warnings,
     })
 }
@@ -216,6 +234,8 @@ struct DebugInfo {
     rings: Vec<Ring>,
     /// The base class subobjects of each static object, by address.
     bases: BTreeMap<u64, Vec<(u64, String)>>,
+    /// The enumerators of each different `IRQn_Type`.
+    irq_enumerations: Vec<Vec<(i64, String)>>,
 }
 
 /// The layout of each structure named in `wanted`, the same in every unit
@@ -247,6 +267,7 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     let mut definitions: BTreeMap<String, Vec<DebugInfoOffset>> = BTreeMap::new();
     let mut variables = Vec::new();
     let mut variable_names = Names::new();
+    let mut irq_enumerations: Vec<Vec<(i64, String)>> = Vec::new();
     for unit in &units {
         let mut scope: Vec<(isize, String)> = Vec::new();
         let mut entries = unit.entries();
@@ -256,6 +277,15 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
                 scope.pop();
             }
             let tag = entry.tag();
+            if matches!(tag, gimli::DW_TAG_enumeration_type | gimli::DW_TAG_typedef)
+                && entry.attr(gimli::DW_AT_declaration).is_none()
+                && let Some(value) = entry.attr_value(gimli::DW_AT_name)
+                && dwarf.attr_string(unit, value)?.slice() == IRQN_TYPE.as_bytes()
+                && let Kind::Enum(enumerators) = describe(&dwarf, unit, &Names::new(), entry.offset(), true)?.kind
+                && !irq_enumerations.contains(&enumerators)
+            {
+                irq_enumerations.push(enumerators);
+            }
             let scoping = matches!(
                 tag,
                 gimli::DW_TAG_namespace
@@ -349,7 +379,12 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
         }
     }
     rings.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(DebugInfo { layouts, rings, bases })
+    Ok(DebugInfo {
+        layouts,
+        rings,
+        bases,
+        irq_enumerations,
+    })
 }
 
 fn global(unit: &Unit, offset: UnitOffset) -> Result<DebugInfoOffset> {
@@ -904,6 +939,9 @@ pub fn print(catalogue: &Catalogue) {
             let size = field.ty.size.unwrap_or_default();
             println!("  field {} {} {} {}", field.name, field.offset, size, field.ty.name);
         }
+    }
+    for (exception, name) in catalogue.interrupts.iter() {
+        println!("interrupt {exception} {name}");
     }
 }
 

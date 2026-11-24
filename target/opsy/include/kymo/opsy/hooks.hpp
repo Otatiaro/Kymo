@@ -65,6 +65,18 @@ using condition_variable_t = ::opsy::condition_variable const*;
 using mutex_t = ::opsy::mutex const*;
 using handler_t = void (*)();
 
+/**
+ * @brief The exception the core is handling, IPSR as read: its other bits read
+ * as zero, and 0 is thread mode. A full word, so that the event it goes in has
+ * no padding to clear.
+ */
+inline std::uint32_t exception()
+{
+	std::uint32_t ipsr;
+	asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+	return ipsr;
+}
+
 // Scheduling
 
 /// The scheduler starts.
@@ -196,11 +208,14 @@ struct enter_pend_sv
 
 // Interrupts
 
-/// A decorated interrupt handler is entered.
+/// A decorated interrupt handler is entered, for the exception IPSR holds:
+/// the host names the interrupt from the exception, the handler from its
+/// address, so that a handler shared by several interrupts is told apart.
 struct isr_enter
 {
 	static constexpr family kymo_family = family::interrupts;
 	handler_t handler;
+	std::uint32_t exception; ///< IPSR: 16 + the IRQ number
 };
 
 /// A decorated interrupt handler returns.
@@ -297,7 +312,7 @@ struct hooks
 	{
 		return +[]
 		{
-			Trace::emit(isr_enter{Handler});
+			Trace::emit(isr_enter{.handler = Handler, .exception = exception()});
 			Handler();
 			Trace::emit(isr_exit{Handler});
 		};

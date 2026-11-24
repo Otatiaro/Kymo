@@ -5,8 +5,11 @@ cmake_minimum_required(VERSION 3.25)
 #   cmake -S target/tests -B build/tests -G Ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=$PWD/target/cmake/arm-none-eabi.cmake
 #   cmake --build build/tests && ctest --test-dir build/tests
-project(kymo_tests CXX)
+project(kymo_tests CXX C)
 
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -88,7 +91,7 @@ function(kymo_qemu_image name cpu level)
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections
-		-fno-exceptions -fno-rtti -fno-threadsafe-statics ${lto})
+		$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -fno-threadsafe-statics> ${lto})
 	target_link_options(${name} PRIVATE -mcpu=${cpu} -mthumb ${lto}
 		-nostdlib -nostartfiles -Wl,--gc-sections
 		-L${CMAKE_CURRENT_SOURCE_DIR}/qemu -T ${script})
@@ -157,6 +160,44 @@ foreach(test layout decode record symbols)
 				add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
 				set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
 			endif()
+		endforeach()
+	endforeach()
+endforeach()
+
+# - interrupts: the device interrupts named from the DWARF's IRQn_Type, in
+#   SvdGenerator's convention, in a vendor's CMSIS one, or in both (none
+#   named, a warning); then with an SVD file naming those the DWARF does not.
+#   kymo events reads the image, which does not run.
+foreach(convention svdgenerator cmsis both)
+	set(sources interrupts/interrupts.cpp)
+	set(definitions "")
+	if(NOT convention STREQUAL cmsis)
+		list(APPEND definitions KYMO_TEST_SVDGENERATOR)
+	endif()
+	if(NOT convention STREQUAL svdgenerator)
+		list(APPEND sources interrupts/cmsis.c)
+		list(APPEND definitions KYMO_TEST_CMSIS)
+	endif()
+	foreach(cpu cortex-m33 cortex-m4)
+		foreach(level Og Os Os-lto)
+			set(image interrupts-${convention}-${cpu}-${level})
+			kymo_qemu_image(${image} ${cpu} ${level} SOURCES ${sources} DEFINITIONS ${definitions})
+			foreach(svd none device)
+				set(name ${image})
+				set(option "")
+				if(svd STREQUAL device)
+					set(name ${image}-svd)
+					set(option --svd ${CMAKE_CURRENT_SOURCE_DIR}/interrupts/device.svd)
+				endif()
+				if(KYMO_HOST AND Python3_EXECUTABLE)
+					add_test(NAME ${name} COMMAND ${Python3_EXECUTABLE}
+						${CMAKE_CURRENT_SOURCE_DIR}/interrupts/interrupts.py --host ${KYMO_HOST}
+						--image $<TARGET_FILE:${image}> --convention ${convention} ${option})
+				else()
+					add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST or Python")
+					set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+				endif()
+			endforeach()
 		endforeach()
 	endforeach()
 endforeach()

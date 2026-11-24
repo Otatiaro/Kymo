@@ -1,5 +1,6 @@
 //! Kymo command line.
 
+use kymo::interrupts::Interrupts;
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
 use kymo::{bench, capture, check, decode, elf, events, meaning, record, stats};
@@ -8,15 +9,17 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 const USAGE: &str = "\
-usage: kymo events <elf>
-       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--opsy]
+usage: kymo events <elf> [--svd <file>]
+       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--opsy] [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
-       kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--worst <n>] [--json]
-       kymo check <elf> <capture> <rules.json> [--from <s>] [--to <s>] [--clock <Hz>]
+       kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
+       kymo check <elf> <capture> <rules.json> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.
+Then the device interrupts its DWARF, or else the SVD file --svd gives,
+names: `interrupt <exception> <name>` (see decode).
 
 decode: lists the events a copy of a trace ring holds, oldest first; the
 copy is the bytes of a kymo::ring object, dumped from a stopped target
@@ -37,6 +40,11 @@ adapter hides in the task it interrupts. Then a line for each time a task is
 ready and not on the core (`ready`): from its task_ready to its first run,
 then each time it is preempted, to the end of its activation. Then a line
 `contradiction <index>` for each event against the order OpSy's hooks keep.
+
+A handler is named `<interrupt> → <handler>`, once for each interrupt it
+runs for. The interrupt is named by the image's IRQn_Type enumeration, from
+its DWARF (SvdGenerator's or a vendor's CMSIS header), else by the SVD file
+--svd gives, else IRQ<n>; the core's exceptions by the architecture.
 
 The ring of a copy is the image's only kymo::ring object, or the one
 --channel names by its qualified name (e.g. app::trace_ring) when the image
@@ -154,12 +162,13 @@ fn parsed<T: std::str::FromStr>(option: &str, value: Option<String>) -> Result<T
         .map_err(|_| usage(format!("{option}: cannot read {value}")))
 }
 
-/// The range and clock options of stats and check.
-#[derive(Clone, Copy, Default)]
+/// The range, clock and SVD options of stats and check.
+#[derive(Clone, Default)]
 struct Window {
     clock: Option<u64>,
     from: Option<f64>,
     to: Option<f64>,
+    svd: Option<PathBuf>,
 }
 
 impl Window {
@@ -169,6 +178,7 @@ impl Window {
             "--from" => self.from = Some(parsed(option, arguments.next())?),
             "--to" => self.to = Some(parsed(option, arguments.next())?),
             "--clock" => self.clock = Some(parsed(option, arguments.next())?),
+            "--svd" => self.svd = Some(parsed(option, arguments.next())?),
             _ => return Ok(false),
         }
         Ok(true)
@@ -232,8 +242,9 @@ fn check(elf: &str, copy: &str, rules: &str, mut arguments: impl Iterator<Item =
 
 /// The statistics of the capture `copy` of the image `elf`, over the window.
 fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
-    let Window { clock, from, to } = *window;
-    let catalogue = catalogue(Path::new(elf))?;
+    let Window { clock, from, to, svd } = window;
+    let (clock, from, to) = (*clock, *from, *to);
+    let catalogue = catalogue(Path::new(elf), svd.as_deref())?;
     let bytes = std::fs::read(copy).map_err(|error| format!("{copy}: {error}"))?;
     if !capture::is_capture(&bytes) {
         return Err(format!("{copy} is not a capture of kymo record").into());
@@ -269,9 +280,13 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
     Ok(stats::compute(&trace, found, range, worst))
 }
 
-/// The catalogue of the image at `path`, its warnings printed.
-fn catalogue(path: &Path) -> Result<events::Catalogue> {
-    let catalogue = events::read(path)?;
+/// The catalogue of the image at `path`, its warnings printed, the
+/// interrupts its DWARF does not name named by the SVD file `svd`.
+fn catalogue(path: &Path, svd: Option<&Path>) -> Result<events::Catalogue> {
+    let mut catalogue = events::read(path)?;
+    if let Some(svd) = svd {
+        catalogue.interrupts = catalogue.interrupts.or(&Interrupts::from_svd(svd)?);
+    }
     for warning in &catalogue.warnings {
         eprintln!("warning: {warning}");
     }
@@ -284,11 +299,16 @@ fn run() -> Result<()> {
     match command.as_deref() {
         Some("bench" | "record") => {}
         Some("events") => {
-            let elf = match (arguments.next(), arguments.next()) {
-                (Some(elf), None) => PathBuf::from(elf),
+            let elf = PathBuf::from(arguments.next().ok_or_else(|| usage(USAGE))?);
+            let svd = match (arguments.next().as_deref(), arguments.next()) {
+                (None, _) => None,
+                (Some("--svd"), value) => Some(parsed::<PathBuf>("--svd", value)?),
                 _ => return Err(usage(USAGE)),
             };
-            events::print(&catalogue(&elf)?);
+            if arguments.next().is_some() {
+                return Err(usage(USAGE));
+            }
+            events::print(&catalogue(&elf, svd.as_deref())?);
             return Ok(());
         }
         Some("decode") => {
@@ -298,6 +318,7 @@ fn run() -> Result<()> {
             let mut channel = None;
             let mut clock = None;
             let mut spans = false;
+            let mut svd = None;
             while let Some(option) = arguments.next() {
                 if option == "--opsy" {
                     spans = true;
@@ -307,10 +328,11 @@ fn run() -> Result<()> {
                 match option.as_str() {
                     "--channel" => channel = Some(parsed::<String>(&option, value)?),
                     "--clock" => clock = Some(parsed(&option, value)?),
+                    "--svd" => svd = Some(parsed::<PathBuf>(&option, value)?),
                     _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
                 }
             }
-            let catalogue = catalogue(Path::new(&elf))?;
+            let catalogue = catalogue(Path::new(&elf), svd.as_deref())?;
             let bytes = std::fs::read(&copy).map_err(|error| format!("{copy}: {error}"))?;
             if capture::is_capture(&bytes) {
                 if channel.is_some() {
@@ -388,7 +410,7 @@ fn run() -> Result<()> {
     };
     let elf_path = elf.ok_or_else(|| usage(USAGE))?;
     if command.as_deref() == Some("record") {
-        let catalogue = catalogue(&elf_path)?;
+        let catalogue = catalogue(&elf_path, None)?;
         let ring = catalogue.ring(channel.as_deref())?;
         let mut target = target::open(&connection)?;
         return record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock);

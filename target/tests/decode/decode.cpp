@@ -68,6 +68,8 @@ struct point
 struct span
 {
 	std::array<std::uint32_t, 6> words;
+	// The host shows a char array as a string, up to its first NUL.
+	std::array<char, 8> label;
 };
 
 struct block
@@ -216,9 +218,22 @@ void emit_number(std::uint32_t n)
 		span event{};
 		for (std::uint32_t k = 0; k < 6; ++k)
 			event.words[k] = (n * 100) + k;
+		// "span <last digit of n>", a NUL, then a byte that must not show.
+		std::size_t length = 0;
+		for (char const letter : {'s', 'p', 'a', 'n', ' '})
+			event.label[length++] = letter;
+		event.label[length++] = static_cast<char>('0' + (n % 10));
+		event.label[length] = '\0';
+		event.label[event.label.size() - 1] = 'x';
 		emitted("span", event, [](span const& event) {
 			qemu::write(" words=");
 			write_list(event.words);
+			qemu::write(" label=\"");
+			std::array<char, 8> shown{};
+			for (std::size_t k = 0; k < shown.size() - 1 && event.label[k] != '\0'; ++k)
+				shown[k] = event.label[k];
+			qemu::write(shown.data());
+			qemu::write("\"");
 		});
 		break;
 	}

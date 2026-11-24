@@ -134,7 +134,7 @@ def main() -> int:
     for command in ("download", "reset"):
         flashed = subprocess.run([args.probe_rs, command, "--probe", probe, "--chip", CHIP]
                                  + ([args.image] if command == "download" else []),
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, encoding="utf-8")
         if flashed.returncode != 0:
             print(flashed.stderr)
             print(f"probe-rs {command} failed")
@@ -144,12 +144,12 @@ def main() -> int:
         record = subprocess.run(
             [args.host, "record", "--probe", "probe-rs", "--probe-id", probe, "--chip", CHIP,
              "--elf", args.image, "--duration", str(args.seconds), "--out", capture],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True)
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8")
         print(record.stderr.strip())
         if record.returncode != 0:
             print("kymo record failed")
             return 1
-        decode = subprocess.run([args.host, "decode", args.image, capture], capture_output=True, text=True)
+        decode = subprocess.run([args.host, "decode", args.image, capture], capture_output=True, text=True, encoding="utf-8")
         if decode.returncode != 0:
             print(decode.stderr)
             print("kymo decode failed")
