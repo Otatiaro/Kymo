@@ -81,6 +81,7 @@ impl Timeline {
             row.levels.extend(&cycles);
             row.elements.extend(events.iter().map(|event| event.1));
         }
+        self.list.add(&self.trace.elements, from);
         if let Some(meaning) = &mut self.meaning {
             meaning.add(&self.trace.elements, from);
         }

@@ -64,25 +64,31 @@ impl Timeline {
             if !text.is_empty() {
                 text.push('\n');
             }
-            match self.trace.elements[mark.element] {
-                Element::Lost { from, to } => {
-                    let slots = counted(u64::from(to.wrapping_sub(from)), "slot", "slots");
-                    let _ = write!(text, "gap between indexes {from} and {to}: {slots} lost");
-                }
-                Element::Suspect { from, to, writers } => {
-                    let writes = counted(u64::from(writers), "write", "writes");
-                    let _ = write!(
-                        text,
-                        "write overrun between indexes {from} and {to}: {writes} interrupted for a full ring lap; \
-                         events recorded near it may be wrong"
-                    );
-                }
-                Element::Event { .. } => {}
-            }
+            text.push_str(&marked(&self.trace.elements[mark.element]).unwrap_or_default());
         }
         (!text.is_empty()).then_some((text, arrow))
     }
+}
 
+/// A loss or a suspect line, described; none for an event.
+pub fn marked(element: &Element) -> Option<String> {
+    match *element {
+        Element::Lost { from, to } => {
+            let slots = counted(u64::from(to.wrapping_sub(from)), "slot", "slots");
+            Some(format!("gap between indexes {from} and {to}: {slots} lost"))
+        }
+        Element::Suspect { from, to, writers } => {
+            let writes = counted(u64::from(writers), "write", "writes");
+            Some(format!(
+                "write overrun between indexes {from} and {to}: {writes} interrupted for a full ring lap; \
+                 events recorded near it may be wrong"
+            ))
+        }
+        Element::Event { .. } => None,
+    }
+}
+
+impl Timeline {
     /// The span of an OpSy `line` from `low` to `high` cycles, described,
     /// empty when there is none; and for a task's, the wake to draw.
     fn span_text(

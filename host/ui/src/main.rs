@@ -2,6 +2,7 @@
 //! ELF of the image that made it.
 
 mod levels;
+mod listing;
 mod meaning;
 mod names;
 mod palette;
@@ -50,9 +51,15 @@ a span per 4 pixels; Bars; or Load. A line marks a bin's busiest sub-bin.
 Hovering a bin shows its share, how much of it is known, and the longest
 span in it.
 
-Below, the statistics of OpSy's instances, as kymo stats computes them, over
-the range selected (shift and drag; Esc clears it) or else the view once it
-stands still: a row per subject and metric, sorted by the column clicked,
+Below, the events of the range selected (shift and drag; Esc clears it) or
+else of the view once it stands still, by time, a line each as kymo decode
+prints it; a gap or an overrun write stands after the event recorded before
+it, marked in its colour. Clicking a line centres the timeline on it at the
+same zoom.
+
+With the OpSy adapter, a second tab shows the statistics of OpSy's
+instances, as kymo stats computes them, over the same range: a row per
+subject and metric, sorted by the column clicked,
 the p99 and the max marked \"≥\" when instances were excluded. Clicking a
 min or a max, or one of the worst instances a subject lists when clicked,
 centres the timeline on that instance and frames it.
