@@ -24,6 +24,8 @@ pub(super) struct Mark {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Line {
     Section(&'static str),
+    /// The CPU's load: handlers, then tasks other than idle.
+    Cpu,
     /// The line that folds and unfolds the rows of event types.
     Fold,
     /// A task, or the idle task.
@@ -84,7 +86,7 @@ impl Timeline {
         }
     }
 
-    /// The lines: OpSy's sections, the tasks by priority, highest first,
+    /// The lines: the CPU's load, OpSy's sections, the tasks by priority, highest first,
     /// then the rows of event types unless folded; those rows alone without
     /// OpSy.
     pub(super) fn lines(&self) -> Vec<Line> {
@@ -98,7 +100,7 @@ impl Timeline {
             let task = &opsy.tasks.list[task];
             (task.priority.is_none(), task.priority, &task.name)
         });
-        let mut lines = vec![Line::Section("TASKS")];
+        let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
         lines.extend(tasks.into_iter().map(|task| Line::Task(Some(task))));
         lines.push(Line::Task(None));
         if !opsy.handlers.list.is_empty() {
@@ -123,6 +125,7 @@ impl Timeline {
         };
         match line {
             Line::Section(name) => name.to_owned(),
+            Line::Cpu => "CPU".to_owned(),
             // After the triangle `timeline` draws: the font has no glyph for it.
             Line::Fold => format!("    EVENTS ({} types)", self.rows.len()),
             Line::Task(None) => "  idle".to_owned(),

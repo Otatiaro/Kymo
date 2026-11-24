@@ -5,8 +5,9 @@
 use crate::names;
 use crate::spans::Spans;
 use kymo::events::Catalogue;
+use kymo::load::{Covered, Cpu};
 use kymo::model::Element;
-use kymo::opsy::Opsy;
+use kymo::opsy::{Opsy, Span};
 use kymo::target::Result;
 
 pub struct Meaning {
@@ -25,6 +26,7 @@ pub struct Meaning {
     pub waits: Vec<Vec<(usize, Spans)>>,
     /// The names the rows show: tasks, handlers, mutexes.
     pub names: Vec<Vec<String>>,
+    pub load: Load,
 }
 
 impl Meaning {
@@ -40,6 +42,7 @@ impl Meaning {
             holds: Vec::new(),
             waits: Vec::new(),
             names: Vec::new(),
+            load: Load::default(),
         }))
     }
 
@@ -77,6 +80,70 @@ impl Meaning {
         self.placed = [closed.runs.len(), closed.interrupts.len(), closed.holds.len()];
         let opsy = &self.opsy;
         self.names = names::shown(&[&opsy.tasks.list, &opsy.handlers.list, &opsy.mutexes.list]);
+        self.load = Load::of(opsy);
+    }
+}
+
+/// The cycles each row covers, cut to the time known, and the CPU row: what
+/// the load view draws (ADR-061).
+#[derive(Default)]
+pub struct Load {
+    pub cpu: Cpu,
+    /// By task.
+    pub tasks: Vec<Covered>,
+    pub idle: Covered,
+    /// By handler, at any depth.
+    pub handlers: Vec<Covered>,
+    /// By mutex, held.
+    pub holds: Vec<Covered>,
+}
+
+/// A row's spans, closed then the earliest still open.
+type Row = (Vec<(i64, i64)>, Option<i64>);
+
+impl Load {
+    fn of(opsy: &Opsy) -> Self {
+        let cpu = opsy.cpu();
+        let open = opsy.open();
+        let span = |span: &Span| (span.from.cycles, span.to.cycles);
+        let start = |row: &mut Row, from: i64| row.1 = Some(row.1.map_or(from, |open| open.min(from)));
+        let mut tasks: Vec<Row> = vec![Row::default(); opsy.tasks.list.len()];
+        let mut idle = Row::default();
+        for run in &opsy.closed.runs {
+            match run.task {
+                Some(task) => grown(&mut tasks, task).0.push(span(&run.span)),
+                None => idle.0.push(span(&run.span)),
+            }
+        }
+        for run in &open.runs {
+            match run.task {
+                Some(task) => start(grown(&mut tasks, task), run.span.from.cycles),
+                None => start(&mut idle, run.span.from.cycles),
+            }
+        }
+        let mut handlers: Vec<Row> = vec![Row::default(); opsy.handlers.list.len()];
+        for interrupt in &opsy.closed.interrupts {
+            grown(&mut handlers, interrupt.handler).0.push(span(&interrupt.span));
+        }
+        for interrupt in &open.interrupts {
+            start(grown(&mut handlers, interrupt.handler), interrupt.span.from.cycles);
+        }
+        let mut holds: Vec<Row> = vec![Row::default(); opsy.mutexes.list.len()];
+        for hold in opsy.closed.holds.iter().filter(|hold| !hold.waiting) {
+            grown(&mut holds, hold.mutex).0.push(span(&hold.span));
+        }
+        for hold in open.holds.iter().filter(|hold| !hold.waiting) {
+            start(grown(&mut holds, hold.mutex), hold.span.from.cycles);
+        }
+        let known = &cpu.known;
+        let cut = |row: Row| Covered::union(row.0, row.1).within(known);
+        Self {
+            tasks: tasks.into_iter().map(cut).collect(),
+            idle: cut(idle),
+            handlers: handlers.into_iter().map(cut).collect(),
+            holds: holds.into_iter().map(cut).collect(),
+            cpu,
+        }
     }
 }
 

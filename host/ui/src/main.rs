@@ -36,6 +36,14 @@ per mutex, held, with its owner named where it fits, or waited for
 priority at the pointer, left out until an event gives it and from a loss
 to the next, and the last events up to the switch that ends it.
 
+Their first row is the CPU's load: in each bin of a few pixels, the share of
+the time known that handlers run, then tasks other than idle, stacked; the
+time unknown, around losses, hatched above. Zoomed out, the other rows show
+their load too, chosen in the status bar: Auto, once a row shows more than
+a span per 4 pixels; Bars; or Load. A line marks a bin's busiest sub-bin.
+Hovering a bin shows its share, how much of it is known, and the longest
+span in it.
+
 Below, the statistics of OpSy's instances, as kymo stats computes them, over
 the range selected (shift and drag; Esc clears it) or else the view once it
 stands still: a row per subject and metric, sorted by the column clicked,

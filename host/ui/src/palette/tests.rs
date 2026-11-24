@@ -43,7 +43,7 @@ fn themes() -> [(&'static str, Visuals); 2] {
 }
 
 /// The colours the data is drawn with, by name.
-fn data(palette: &Palette) -> [(&'static str, Color32); 8] {
+fn data(palette: &Palette) -> [(&'static str, Color32); 9] {
     [
         ("event", palette.event),
         ("run", palette.run),
@@ -51,6 +51,7 @@ fn data(palette: &Palette) -> [(&'static str, Color32); 8] {
         ("interrupt", palette.interrupt),
         ("hold", palette.hold),
         ("wait", palette.wait),
+        ("unknown", palette.unknown),
         ("loss", palette.loss),
         ("suspect", palette.suspect),
     ]

@@ -73,6 +73,22 @@ impl Spans {
         (view.column(self.from[n]), view.column(self.to[n]) + 1.0, self.which[n])
     }
 
+    /// How many spans `view` shows, as `bands` finds them.
+    pub fn count(&self, view: &View) -> usize {
+        let right = view.left + view.width as f32;
+        let n = self.to.partition_point(|&to| view.column(to) < view.left);
+        self.from
+            .partition_point(|&from| view.column(from) < right)
+            .saturating_sub(n)
+    }
+
+    /// The places of the spans with cycles from `low` to before `high`.
+    pub fn overlapping(&self, low: i64, high: i64) -> impl Iterator<Item = usize> + '_ {
+        let n = self.to.partition_point(|&to| to <= low);
+        let stop = self.from.partition_point(|&from| from < high);
+        self.which[n..stop.max(n)].iter().copied()
+    }
+
     /// The place of the first span from `low` to `high`, cycles included.
     pub fn at(&self, low: i64, high: i64) -> Option<usize> {
         let n = self.to.partition_point(|&to| to < low);
