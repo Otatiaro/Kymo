@@ -248,9 +248,9 @@ fn a_handler_shared_by_two_interrupts_is_told_apart_by_them() {
             ]
         ),
         [
-            "interrupt from=0 to=1 depth=0 handler=TIM2 → 0x08000401",
-            "interrupt from=3 to=4 depth=1 handler=TIM2 → 0x08000401",
-            "interrupt from=2 to=5 depth=0 handler=IRQ46 → 0x08000401",
+            "interrupt from=0 to=1 depth=0 handler=0x08000401 (TIM2)",
+            "interrupt from=3 to=4 depth=1 handler=0x08000401 (TIM2)",
+            "interrupt from=2 to=5 depth=0 handler=0x08000401 (IRQ46)",
             "interrupt from=6 to=7 depth=0 handler=0x08000401",
         ]
     );

@@ -23,7 +23,7 @@ What makes an instance, from OpSy's events (ADR-062):
   running, `task:<name>` or `task:idle`; `unknown` from a loss to the next
   task_started or enter_idle;
 - a task's period runs from a task_ready to its next;
-- a handler's subject is `<interrupt> → <handler>`, the interrupt named by
+- a handler's subject is `<handler> (<interrupt>)`, the interrupt named by
   its exception number; an exit closes the innermost handler entered, of
   its address, or after a loss names the handler alone;
 - a handler's gross runs from its entry to its exit; its net is less the
@@ -64,7 +64,7 @@ def interrupt_names(events: str) -> dict[int, str]:
 
 
 def handler_subject(handler: str, exception: str, names: dict[int, str]) -> str:
-    """The subject of a handler entered for an exception: `<interrupt> → <handler>`,
+    """The subject of a handler entered for an exception: `<handler> (<interrupt>)`,
     or the handler alone when called from thread mode (0) or named after it."""
     number = int(exception, 0)
     if number == 0:
@@ -75,7 +75,7 @@ def handler_subject(handler: str, exception: str, names: dict[int, str]) -> str:
         interrupt = f"exception{number}"
     else:
         interrupt = names.get(number, f"IRQ{number - FIRST_IRQ}")
-    return handler if interrupt == handler else f"{interrupt} → {handler}"
+    return handler if interrupt == handler else f"{handler} ({interrupt})"
 
 
 def elements(decoded: str) -> tuple[int, list[dict]]:

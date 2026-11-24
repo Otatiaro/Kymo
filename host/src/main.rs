@@ -41,7 +41,7 @@ ready and not on the core (`ready`): from its task_ready to its first run,
 then each time it is preempted, to the end of its activation. Then a line
 `contradiction <index>` for each event against the order OpSy's hooks keep.
 
-A handler is named `<interrupt> → <handler>`, once for each interrupt it
+A handler is named `<handler> (<interrupt>)`, once for each interrupt it
 runs for. The interrupt is named by the image's IRQn_Type enumeration, from
 its DWARF (SvdGenerator's or a vendor's CMSIS header), else by the SVD file
 --svd gives, else IRQ<n>; the core's exceptions by the architecture.
