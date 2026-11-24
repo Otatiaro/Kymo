@@ -20,6 +20,7 @@ namespace DEVICE
 {
 
 /** Device interrupts; the enumerators convert to their number. */
+// NOLINTNEXTLINE(cppcoreguidelines-use-enum-class,performance-enum-size): SvdGenerator's declaration, as it emits it
 enum IRQn_Type : std::uint16_t
 {
 	WWDG_IRQn = 0,
