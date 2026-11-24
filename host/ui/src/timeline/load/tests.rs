@@ -303,48 +303,42 @@ fn bin<const N: usize>(known: i64, stack: [i64; N]) -> Drawn {
     }
 }
 
-/// A bar is the part of the cycles counted covered, a pixel at least when
-/// any is; the time unknown is what lies above the time known.
+/// The CPU's bar stands for the cycles counted: each layer of its stack, a
+/// pixel at least when it covers any, then the time unknown above them.
 #[test]
-fn heights_show_the_part_covered_and_the_part_unknown() {
+fn the_cpus_bar_stacks_its_layers_then_the_time_unknown() {
     let all = 1_000_000;
-    let heights = |bin: Drawn| super::heights(&bin, 12.0);
-    let expect = |stack: &[f32], known: f32| Heights {
+    let heights = |bin: Drawn| super::heights(&bin, 12.0, whole(&bin, true));
+    let expect = |stack: &[f32], unknown: f32| Heights {
         stack: stack.to_vec(),
-        known,
+        unknown,
     };
-    assert_eq!(heights(bin(all, [0, 0])), expect(&[0.0, 0.0], 12.0));
-    assert_eq!(heights(bin(all, [1, 0])), expect(&[1.0, 1.0], 12.0));
-    assert_eq!(heights(bin(all, [all / 2, 0])), expect(&[6.0, 6.0], 12.0));
+    assert_eq!(heights(bin(all, [0, 0])), expect(&[0.0, 0.0], 0.0));
+    assert_eq!(heights(bin(all, [1, 0])), expect(&[1.0, 1.0], 1.0));
+    assert_eq!(heights(bin(all, [all / 2, 0])), expect(&[6.0, 6.0], 6.0));
     assert_eq!(heights(bin(all, [all, 0])), expect(&[12.0, 12.0], 12.0));
     // Handlers, then a task for a cycle.
-    assert_eq!(heights(bin(all, [all / 4, 1])), expect(&[3.0, 4.0], 12.0));
-    // ... all known: the time unknown stays above the stack's floors.
-    assert_eq!(heights(bin(all / 4 + 1, [all / 4, 1])), expect(&[3.0, 4.0], 4.0));
-    assert_eq!(heights(bin(all / 2, [all / 4, 0])), expect(&[3.0, 3.0], 6.0));
-    assert_eq!(heights(bin(0, [0, 0])), expect(&[0.0, 0.0], 0.0));
+    assert_eq!(heights(bin(all, [all / 4, 1])), expect(&[3.0, 4.0], 4.0));
+    // ... the rest unknown: on top of the stack, up to the bar's top.
+    assert_eq!(heights(bin(all / 4 + 1, [all / 4, 1])), expect(&[3.0, 4.0], 12.0));
+    // Half unknown, a quarter idle.
+    assert_eq!(heights(bin(all / 2, [all / 4, 0])), expect(&[3.0, 3.0], 9.0));
+    assert_eq!(heights(bin(0, [0, 0])), expect(&[0.0, 0.0], 12.0));
     // Handlers, then tasks: each layer with a cycle a pixel high, an empty
     // one none.
     assert_eq!(
         heights(bin(all, [all / 4, 0, 1, 1])),
-        expect(&[3.0, 3.0, 4.0, 5.0], 12.0)
-    );
-    // ... past the time known, cut to it.
-    assert_eq!(
-        heights(bin(all / 4 + 2, [all / 4, 1, 1, 0])),
-        expect(&[3.0, 4.0, 5.0, 5.0], 5.0)
+        expect(&[3.0, 3.0, 4.0, 5.0], 5.0)
     );
     // ... past the bar, cut to it.
     let floors: Vec<f32> = (1..=14).map(|n| (n as f32).min(12.0)).collect();
     assert_eq!(heights(bin(all, [1; 14])), expect(&floors, 12.0));
-    // A cycle known, covered: a pixel known.
-    assert_eq!(heights(bin(1, [1, 0])), expect(&[1.0, 1.0], 1.0));
     // A sub-bin a tenth of the bin, half covered: half the bar.
     let sub = Drawn {
         counted: (0, all / 10),
         ..bin(all / 10, [all / 20, 0])
     };
-    assert_eq!(heights(sub), expect(&[6.0, 6.0], 12.0));
+    assert_eq!(heights(sub), expect(&[6.0, 6.0], 6.0));
 }
 
 #[test]
@@ -368,27 +362,72 @@ fn a_percentage_is_never_0_or_100_when_it_is_not() {
     }
 }
 
-/// The hatching stays within its rectangle and covers the part of it its
-/// lines' width over their spacing gives.
+/// A row's bar is the part of the time known covered, at the full height of
+/// the line; a bin with no time known stays empty.
 #[test]
-fn hatching_fills_its_share_of_the_rectangle() {
-    for rect in [
-        Rect::from_min_max(pos2(260.5, 30.0), pos2(660.5, 150.0)),
-        Rect::from_min_max(pos2(1003.0, 77.0), pos2(1507.0, 89.0)),
-    ] {
-        let mut mesh = egui::Mesh::default();
-        hatch(&mut mesh, rect, Color32::WHITE);
-        let inside = rect.expand(1e-3);
-        assert!(mesh.vertices.iter().all(|vertex| inside.contains(vertex.pos)));
-        let area: f32 = mesh
-            .indices
-            .chunks(3)
-            .map(|triangle| {
-                let [a, b, c] = [0, 1, 2].map(|k| mesh.vertices[triangle[k] as usize].pos);
-                ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs() / 2.0
-            })
-            .sum();
-        let share = area / rect.area();
-        assert!((share - STROKE / HATCH).abs() < 0.01, "{share}");
-    }
+fn a_rows_bar_is_its_share_of_the_time_known() {
+    let heights = |bin: Drawn| super::heights(&bin, 12.0, whole(&bin, false));
+    let all = 1_000_000;
+    let expect = |stack: f32| Heights {
+        stack: vec![stack],
+        unknown: stack,
+    };
+    assert_eq!(heights(bin(all / 2, [all / 4])), expect(6.0));
+    assert_eq!(heights(bin(all / 2, [all / 2])), expect(12.0));
+    assert_eq!(heights(bin(all, [all / 4])), expect(3.0));
+    assert_eq!(heights(bin(0, [0])), expect(0.0));
+}
+
+/// The rectangles `bins` paint with `gap`, as the CPU's line with the time
+/// unknown in `unknown`, or as a row's.
+fn painted(bins: &[Drawn], gap: f32, unknown: Option<Color32>) -> Vec<(Color32, Rect)> {
+    let mut mesh = egui::Mesh::default();
+    let area = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 16.0));
+    paint(&mut mesh, bins, area, (2.0, 14.0), gap, &[Color32::RED], unknown);
+    mesh.vertices
+        .chunks(4)
+        .map(|quad| {
+            let points: Vec<egui::Pos2> = quad.iter().map(|vertex| vertex.pos).collect();
+            (quad[0].color, Rect::from_points(&points))
+        })
+        .collect()
+}
+
+/// The time unknown is a layer on top of the CPU's stack, idle the empty
+/// part above it; a row draws none.
+#[test]
+fn the_time_unknown_sits_on_the_cpus_stack_alone() {
+    let all = 1_000_000;
+    let grey = Color32::GRAY;
+    let rect = |top: f32, bottom: f32| Rect::from_min_max(pos2(0.0, top), pos2(4.0, bottom));
+    let half = [bin(all / 2, [all / 4])];
+    assert_eq!(
+        painted(&half, 0.0, Some(grey)),
+        [(Color32::RED, rect(11.0, 14.0)), (grey, rect(5.0, 11.0))]
+    );
+    assert_eq!(painted(&half, 0.0, None), [(Color32::RED, rect(8.0, 14.0))]);
+    assert_eq!(painted(&[bin(0, [0])], 0.0, Some(grey)), [(grey, rect(2.0, 14.0))]);
+    assert!(painted(&[bin(0, [0])], 0.0, None).is_empty());
+    assert_eq!(painted(&[bin(all, [all / 2])], 0.0, Some(grey)).len(), 1);
+}
+
+/// Bins are drawn on whole pixels, those more than twice the gap wide with
+/// the gap left empty at their right.
+#[test]
+fn bins_leave_a_gap_on_whole_pixels() {
+    let all = 1_000_000;
+    let at = |left: f32, right: f32| Drawn {
+        left,
+        right,
+        ..bin(all, [all])
+    };
+    let columns = |bins: &[Drawn]| -> Vec<(f32, f32)> {
+        painted(bins, 1.0, None)
+            .iter()
+            .map(|(_, rect)| (rect.left(), rect.right()))
+            .collect()
+    };
+    assert_eq!(columns(&[at(0.4, 4.4), at(4.4, 8.4)]), [(0.0, 3.0), (4.0, 7.0)]);
+    assert_eq!(columns(&[at(0.0, 2.0), at(2.0, 3.0)]), [(0.0, 2.0), (2.0, 3.0)]);
+    assert_eq!(columns(&[at(0.0, 3.0)]), [(0.0, 2.0)]);
 }

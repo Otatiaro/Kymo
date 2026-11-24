@@ -16,8 +16,6 @@ pub struct Palette {
     pub ready: Color32,
     /// The arrow from what woke a task to the task.
     pub wake: Color32,
-    /// The hatching of the time unknown, in the load view.
-    pub unknown: Color32,
     /// A loss and a suspect line: their marks in the ruler, and, at `BAND`'s
     /// opacity, their bands over the rows.
     pub loss: Color32,
@@ -81,7 +79,6 @@ const LIGHT: Palette = Palette {
     wait: Color32::from_rgb(0x4e, 0x94, 0x70),
     ready: Color32::from_rgb(0x6e, 0x77, 0x81),
     wake: Color32::from_rgb(0xa2, 0x1c, 0xaf),
-    unknown: Color32::from_rgb(0x6e, 0x77, 0x81),
     loss: Color32::from_rgb(0xc6, 0x28, 0x28),
     suspect: Color32::from_rgb(0xb4, 0x5f, 0x06),
     owner: Color32::WHITE,
@@ -116,7 +113,6 @@ const DARK: Palette = Palette {
     wait: Color32::from_rgb(0x35, 0x8a, 0x62),
     ready: Color32::from_rgb(0x8b, 0x95, 0xa1),
     wake: Color32::from_rgb(0xe8, 0x79, 0xf9),
-    unknown: Color32::from_rgb(0x9a, 0xa3, 0xae),
     loss: Color32::from_rgb(0xf0, 0x64, 0x64),
     suspect: Color32::from_rgb(0xe0, 0xa0, 0x30),
     owner: Color32::BLACK,
