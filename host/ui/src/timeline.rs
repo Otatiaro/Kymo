@@ -40,7 +40,7 @@ use view::{clamped, whole, widest};
 /// The width of the column of row names.
 const LABELS: f32 = 260.0;
 const RULER: f32 = 22.0;
-const ROW: f32 = 18.0;
+const ROW: f32 = 22.0;
 /// The narrowest view, in cycles.
 const NARROWEST: f64 = 100.0;
 /// How near the pointer, in pixels, an event or a mark is hovered.

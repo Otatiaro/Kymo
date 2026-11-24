@@ -39,7 +39,34 @@ fn backgrounds(visuals: &Visuals) -> [[f64; 3]; 2] {
 }
 
 fn themes() -> [(&'static str, Visuals); 2] {
-    [("light", Visuals::light()), ("dark", Visuals::dark())]
+    [("light", visuals(Theme::Light)), ("dark", visuals(Theme::Dark))]
+}
+
+/// The text, strong and weak, reads on the rows and on the surface by 4.5:1
+/// at least, the WCAG minimum for small text.
+#[test]
+fn the_text_reads_on_every_background() {
+    let pairs = themes().into_iter().flat_map(|(theme, visuals)| {
+        let palette = Palette::of(&visuals);
+        let [panel, stripe] = backgrounds(&visuals);
+        let surface = over(palette.surface, [0.0; 3]);
+        let texts = [
+            ("text", visuals.text_color()),
+            ("strong", visuals.strong_text_color()),
+            ("weak", visuals.weak_text_color()),
+        ];
+        [("panel", panel), ("stripe", stripe), ("surface", surface)]
+            .into_iter()
+            .flat_map(move |(place, background)| {
+                texts.into_iter().map(move |(name, color)| {
+                    (
+                        format!("{theme} {name} on {place}"),
+                        contrast(over(color, background), background),
+                    )
+                })
+            })
+    });
+    assert_eq!(below(4.5, pairs), Vec::<String>::new());
 }
 
 /// The colours the data is drawn with, by name.
@@ -111,6 +138,6 @@ fn the_owner_reads_on_its_hold() {
 /// The palette follows the theme.
 #[test]
 fn each_theme_has_its_palette() {
-    assert_eq!(Palette::of(&Visuals::light()).idle, LIGHT.idle);
-    assert_eq!(Palette::of(&Visuals::dark()).idle, DARK.idle);
+    assert_eq!(Palette::of(&visuals(Theme::Light)).idle, LIGHT.idle);
+    assert_eq!(Palette::of(&visuals(Theme::Dark)).idle, DARK.idle);
 }
