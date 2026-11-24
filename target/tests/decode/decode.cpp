@@ -24,6 +24,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -38,6 +39,7 @@ struct tiny
 {
 	bool on;
 	level grade;
+	std::chrono::time_point<std::chrono::steady_clock, std::chrono::duration<std::int16_t, std::milli>> at;
 };
 
 struct pair
@@ -53,6 +55,7 @@ struct reading
 	std::int16_t values[3];
 	void const* from;
 	std::uint8_t id;
+	std::chrono::duration<std::int16_t, std::micro> lasted;
 };
 
 struct point
@@ -150,11 +153,21 @@ void emit_number(std::uint32_t n)
 	switch (n % 5)
 	{
 	case 0:
-		emitted("tiny", tiny{n % 2 == 0, static_cast<level>(static_cast<int>(n / 5 % 3) - 1)}, [](tiny const& event) {
+	{
+		using milliseconds = std::chrono::duration<std::int16_t, std::milli>;
+		// Negative every other one: the count is signed.
+		auto const magnitude = static_cast<int>(n * 7);
+		auto const at = static_cast<std::int16_t>(n % 2 == 0 ? magnitude : -magnitude);
+		tiny const event{n % 2 == 0, static_cast<level>(static_cast<int>(n / 5 % 3) - 1), decltype(tiny::at){milliseconds{at}}};
+		emitted("tiny", event, [](tiny const& event) {
 			qemu::write(event.on ? " on=true grade=" : " on=false grade=");
 			write_grade(event.grade);
+			qemu::write(" at=");
+			write_signed(event.at.time_since_epoch().count());
+			qemu::write("ms");
 		});
 		break;
+	}
 	case 1:
 		emitted("pair", pair{-static_cast<std::int32_t>(n) * 1000, 0xfffffff0U + n}, [](pair const& event) {
 			qemu::write(" x=");
@@ -169,7 +182,11 @@ void emit_number(std::uint32_t n)
 		auto const grade = static_cast<level>(n % 3 == 0 ? 5 : static_cast<int>(n % 2) - 1);
 		auto const value = static_cast<std::int16_t>(n * 1000);
 		emitted("reading",
-		        reading{grade, {value, static_cast<std::int16_t>(-value), -32768}, &origin, static_cast<std::uint8_t>(n)},
+		        reading{grade,
+		                {value, static_cast<std::int16_t>(-value), -32768},
+		                &origin,
+		                static_cast<std::uint8_t>(n),
+		                std::chrono::duration<std::int16_t, std::micro>{static_cast<std::int16_t>(n * 3)}},
 		        [](reading const& event) {
 			        qemu::write(" grade=");
 			        write_grade(event.grade);
@@ -183,6 +200,9 @@ void emit_number(std::uint32_t n)
 			        qemu::write("] from=(anonymous namespace)::origin");
 			        qemu::write(" id=");
 			        qemu::write_unsigned(event.id);
+			        qemu::write(" lasted=");
+			        write_signed(event.lasted.count());
+			        qemu::write("us");
 		        });
 		break;
 	}

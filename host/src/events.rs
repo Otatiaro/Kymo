@@ -39,6 +39,10 @@ pub enum Kind {
     Pointer(Pointee),
     /// An array, by the length of each dimension.
     Array(Box<Type>, Vec<u64>),
+    /// A `std::chrono::duration`, or a `time_point` by its duration since its
+    /// clock's epoch: the count's type, and the seconds one count lasts as a
+    /// ratio, numerator then denominator.
+    Duration(Box<Type>, u64, u64),
     /// A structure, a class or a union: its data members.
     Record(Vec<Field>),
     /// No value to read: void, a function, or the structure behind a pointer.
@@ -778,7 +782,7 @@ fn describe(
             } else {
                 let (size, fields) = record(dwarf, unit, names, offset)?;
                 let qualified = names.get(&global(unit, offset)?);
-                match standard_array(qualified, size, &fields) {
+                match standard_array(qualified, size, &fields).or_else(|| standard_chrono(qualified, size, &fields)) {
                     Some(kind) => Type {
                         name: qualified.cloned().unwrap_or_else(unnamed),
                         size: Some(size),
@@ -805,25 +809,70 @@ fn describe(
 /// array that fills it. An empty `std::array` holds no C array and stays a
 /// structure.
 fn standard_array(qualified: Option<&String>, size: u64, fields: &[Field]) -> Option<Kind> {
-    let name = qualified?.strip_prefix("std::")?;
-    // libc++ puts it in an inline namespace: std::__1::array.
-    let unversioned = match name.split_once("::") {
-        Some((inline, rest)) if inline.starts_with("__") => rest,
-        _ => name,
-    };
-    if !unversioned.starts_with("array<") {
+    if !standard(qualified?)?.starts_with("array<") {
         return None;
     }
+    match only_member(size, fields, &["_M_elems", "__elems_"])? {
+        kind @ Kind::Array(..) => Some(kind.clone()),
+        _ => None,
+    }
+}
+
+/// The duration a `std::chrono::duration` or `time_point` of `size` bytes
+/// reads as, when `fields` are those of one: a single member that fills it,
+/// the count, `__r` (libstdc++) or `__rep_` (libc++), an integer; the
+/// duration of a time point, `__d` or `__d_`. The period is read from the
+/// duration's name, `ratio<1, 1000>` and the like.
+fn standard_chrono(qualified: Option<&String>, size: u64, fields: &[Field]) -> Option<Kind> {
+    let name = standard(qualified?)?.strip_prefix("chrono::")?;
+    if name.starts_with("duration<") {
+        let rep = match only_member(size, fields, &["__r", "__rep_"])? {
+            Kind::Base(encoding) if *encoding != gimli::DW_ATE_float => &fields[0].ty,
+            _ => return None,
+        };
+        let (num, den) = ratio(name)?;
+        Some(Kind::Duration(Box::new(rep.clone()), num, den))
+    } else if name.starts_with("time_point<") {
+        match only_member(size, fields, &["__d", "__d_"])? {
+            kind @ Kind::Duration(..) => Some(kind.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// The period of a duration named `name`: the first `ratio<num, den>` in it,
+/// the literal suffixes a compiler may print (`1000L`) left out.
+fn ratio(name: &str) -> Option<(u64, u64)> {
+    let (_, args) = name.split_once("ratio<")?;
+    let args = &args[..args.find('>')?];
+    let number = |text: &str| text.trim().trim_end_matches(['u', 'U', 'l', 'L']).parse::<u64>().ok();
+    let (num, den) = match args.split_once(',') {
+        Some((num, den)) => (number(num)?, number(den)?),
+        None => (number(args)?, 1),
+    };
+    (num > 0 && den > 0).then_some((num, den))
+}
+
+/// A name in namespace `std`, that namespace and libc++'s inline one
+/// (`std::__1::array`) left out.
+fn standard(qualified: &str) -> Option<&str> {
+    let name = qualified.strip_prefix("std::")?;
+    Some(match name.split_once("::") {
+        Some((inline, rest)) if inline.starts_with("__") => rest,
+        _ => name,
+    })
+}
+
+/// The kind of the single member of a structure of `size` bytes, when it
+/// fills it and has one of the `names`.
+fn only_member<'a>(size: u64, fields: &'a [Field], names: &[&str]) -> Option<&'a Kind> {
     let [field] = fields else {
         return None;
     };
     let filled = field.offset == 0 && field.ty.size == Some(size);
-    match &field.ty.kind {
-        Kind::Array(..) if filled && matches!(field.name.as_str(), "_M_elems" | "__elems_") => {
-            Some(field.ty.kind.clone())
-        }
-        _ => None,
-    }
+    (filled && names.contains(&field.name.as_str())).then_some(&field.ty.kind)
 }
 
 /// What the type at `offset`, the target of a pointer, is.
@@ -854,6 +903,97 @@ pub fn print(catalogue: &Catalogue) {
         for field in &event.fields {
             let size = field.ty.size.unwrap_or_default();
             println!("  field {} {} {} {}", field.name, field.offset, size, field.ty.name);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(name: &str, ty: Type) -> Field {
+        Field {
+            name: name.to_owned(),
+            offset: 0,
+            ty,
+        }
+    }
+
+    fn base(encoding: gimli::DwAte, size: u64) -> Type {
+        Type {
+            name: "long long int".to_owned(),
+            size: Some(size),
+            kind: Kind::Base(encoding),
+        }
+    }
+
+    #[test]
+    fn a_period_reads_from_the_ratio_in_the_name() {
+        let periods = [
+            "duration<long long int, std::ratio<1, 1000> >",
+            "duration<long long, std::__1::ratio<1L, 1000000000L> >",
+            "duration<int, std::ratio<60> >",
+            "duration<int, std::ratio<0, 1> >",
+            "duration<int, long>",
+        ]
+        .map(ratio);
+        assert_eq!(
+            periods,
+            [Some((1, 1_000)), Some((1, 1_000_000_000)), Some((60, 1)), None, None]
+        );
+    }
+
+    #[test]
+    fn a_duration_and_a_time_point_read_as_a_count() {
+        let count = base(gimli::DW_ATE_signed, 8);
+        let name = |name: &str| Some(name.to_owned());
+        let duration = standard_chrono(
+            name("std::chrono::duration<long long int, std::ratio<1, 1000> >").as_ref(),
+            8,
+            &[field("__r", count.clone())],
+        );
+        assert_eq!(duration, Some(Kind::Duration(Box::new(count.clone()), 1, 1_000)));
+        let ty = Type {
+            name: "duration".to_owned(),
+            size: Some(8),
+            kind: duration.unwrap(),
+        };
+        let point = standard_chrono(
+            name("std::__1::chrono::time_point<clock, duration>").as_ref(),
+            8,
+            &[field("__d_", ty.clone())],
+        );
+        assert_eq!(point, Some(ty.kind));
+        // Not a duration's layout: read as a structure.
+        let float = base(gimli::DW_ATE_float, 8);
+        let other = [
+            (
+                "std::chrono::duration<double, std::ratio<1, 1> >",
+                8,
+                field("__r", float),
+            ),
+            (
+                "std::chrono::duration<long long int, std::ratio<1, 1> >",
+                16,
+                field("__r", count.clone()),
+            ),
+            (
+                "std::chrono::duration<long long int, std::ratio<1, 1> >",
+                8,
+                field("ticks", count.clone()),
+            ),
+            (
+                "app::duration<long long int, std::ratio<1, 1> >",
+                8,
+                field("__r", count),
+            ),
+        ];
+        for (qualified, size, member) in other {
+            assert_eq!(
+                standard_chrono(name(qualified).as_ref(), size, &[member]),
+                None,
+                "{qualified}"
+            );
         }
     }
 }
