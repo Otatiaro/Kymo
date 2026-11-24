@@ -3,7 +3,8 @@
 //! above it. A bin shows one statistic for every row: the mean is the whole
 //! bin's share; the median, the min and the max are the share of the sub-bin
 //! that has it, a pixel wide at most, drawn whole. The CPU row stacks
-//! handlers, then each task other than idle. The pointer reads the bin the
+//! handlers, then each task other than idle, each with the time it takes in
+//! the whole bin, whatever the statistic. The pointer reads the bin the
 //! frame drew.
 
 use super::view::View;
@@ -202,8 +203,8 @@ impl Subs {
 
 /// The bins of `view` from its sub-bins `subs` and the cycles each layer of
 /// the stack covers in them, from the bottom: each bin with its columns and
-/// the counts of the cycles it shows.
-fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>]) -> Vec<Drawn> {
+/// the counts of the cycles it shows for `statistic`.
+fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>], statistic: Statistic) -> Vec<Drawn> {
     let stack = |n: usize| layers.iter().map(move |layer| layer[n]);
     let bin = |cycles: i64| (cycles - subs.origin).div_euclid(subs.width);
     let mut first = 0;
@@ -216,7 +217,7 @@ fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>]) -> Vec<Drawn> {
             first = held.end;
             let (from, to) = (edges[0][0], edges[edges.len() - 1][1]);
             let shares = held.clone().map(|n| (subs.known[n], stack(n).sum()));
-            let (counted, known, stack) = match pick(shares, subs.statistic) {
+            let (counted, known, stack) = match pick(shares, statistic) {
                 Some(n) => {
                     let n = held.start + n;
                     ((subs.edges[n], subs.edges[n + 1]), subs.known[n], stack(n).collect())
@@ -243,17 +244,23 @@ fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>]) -> Vec<Drawn> {
 /// The bins of a row covering `covered`, within the time known, in `view`
 /// cut in `subs`.
 pub(super) fn row(view: &View, subs: &Subs, covered: &Covered) -> Vec<Drawn> {
-    drawn(view, subs, &[covered.counts(&subs.edges)])
+    drawn(view, subs, &[covered.counts(&subs.edges)], subs.statistic)
 }
 
-/// The bins of the CPU row, as `row` gives a row's: handlers, then the tasks
-/// in `order`, every task other than idle once.
+/// The statistic `line` shows when the bins show `statistic`: the CPU's,
+/// stacked, is always the mean.
+pub(super) fn statistic(cpu: bool, statistic: Statistic) -> Statistic {
+    if cpu { Statistic::Mean } else { statistic }
+}
+
+/// The bins of the CPU row: handlers, then the tasks in `order`, every task
+/// other than idle once, each with the cycles it covers in the whole bin.
 pub(super) fn cpu(view: &View, subs: &Subs, cpu: &Cpu, order: &[usize]) -> Vec<Drawn> {
     let layers: Vec<Vec<i64>> = std::iter::once(&cpu.handlers)
         .chain(order.iter().map(|&task| &cpu.tasks[task]))
         .map(|covered| covered.counts(&subs.edges))
         .collect();
-    drawn(view, subs, &layers)
+    drawn(view, subs, &layers, statistic(true, subs.statistic))
 }
 
 /// The bin drawn at pixel `x`: from its left column to before its right.
@@ -299,7 +306,12 @@ pub(super) fn heights(bin: &Drawn, height: f32) -> Heights {
     Heights { stack, known }
 }
 
-/// Paints `bins` in `mesh` within `area`, bars from `high` to `low`: the
+/// The pixels left empty between two bins of the CPU's line, so that each
+/// reads as one column.
+pub(super) const GAP: f32 = 1.0;
+
+/// Paints `bins` in `mesh` within `area`, bars from `high` to `low` with
+/// `gap` pixels left empty at the right of each bin twice as wide: the
 /// layers of their stack in `colors`, one each, the time unknown hatched in
 /// `unknown`.
 pub(super) fn paint(
@@ -307,12 +319,18 @@ pub(super) fn paint(
     bins: &[Drawn],
     area: Rect,
     (high, low): (f32, f32),
+    gap: f32,
     colors: &[Color32],
     unknown: Color32,
 ) {
     let height = low - high;
     for bin in bins {
-        let (left, right) = (bin.left.max(area.left()), bin.right.min(area.right()));
+        let end = if bin.right - bin.left >= 2.0 * gap {
+            bin.right - gap
+        } else {
+            bin.right
+        };
+        let (left, right) = (bin.left.max(area.left()), end.min(area.right()));
         if left >= right {
             continue;
         }

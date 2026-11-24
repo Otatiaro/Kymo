@@ -178,7 +178,11 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
             assert!(bin.covered() <= high - low, "{capture:?} {bin:?}");
             several += usize::from(each.iter().filter(|&&each| each > 0).count() > 1);
         }
-        for (bins, layers) in [(&drawn, [&set, &set]), (&drawn_cpu, [&handlers, &busy])] {
+        // The CPU's stack is the whole bin's, whatever the statistic.
+        for (bins, layers, statistic) in [
+            (&drawn, [&set, &set], statistic),
+            (&drawn_cpu, [&handlers, &busy], Statistic::Mean),
+        ] {
             let context = format!("{capture:?} {} {} {} {binning:?}", view.start, view.span, view.width);
             if in_view.0 < in_view.1 {
                 let (first_bin, last_bin) = (bins.first().expect(&context), bins.last().expect(&context));

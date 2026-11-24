@@ -420,7 +420,7 @@ impl Timeline {
             ("to", self.time((bin.to - origin) as f64)),
             ("bin", self.duration(bin.to - bin.from)),
         ]);
-        let statistic = self.binning.statistic;
+        let statistic = load::statistic(line == Line::Cpu, self.binning.statistic);
         let (low, high) = bin.counted;
         let length = high - low;
         if (low, high) != (bin.from, bin.to) {
