@@ -8,8 +8,8 @@ use super::{HOVER, ROW, SWITCH, Timeline};
 use crate::meaning::{self, Meaning};
 use eframe::egui::{Pos2, Rect};
 use kymo::decode;
+use kymo::meaning::{Cause, Edge, Span};
 use kymo::model::Element;
-use kymo::opsy::{self, Cause, Edge, Span};
 use std::fmt::Write;
 
 impl Timeline {
@@ -21,7 +21,7 @@ impl Timeline {
         area: Rect,
         pointer: Pos2,
         lines: &[Line],
-        open: &opsy::Spans,
+        open: &kymo::meaning::Spans,
         drawn: &[(usize, Vec<Drawn>)],
     ) -> Option<(String, Option<Arrow>)> {
         if pointer.x < area.left() || pointer.y < area.top() {
@@ -97,12 +97,12 @@ impl Timeline {
         line: Line,
         low: i64,
         high: i64,
-        open: &opsy::Spans,
+        open: &kymo::meaning::Spans,
     ) -> (String, Option<Arrow>) {
-        let opsy = &meaning.opsy;
-        let closed = &opsy.closed;
+        let kernel = &meaning.kernel;
+        let closed = &kernel.closed;
         let near = |span: &Span| span.from.cycles <= high && span.to.cycles >= low;
-        let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+        let named = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
         let mut text = String::new();
         let mut arrow = None;
         match line {
@@ -142,7 +142,7 @@ impl Timeline {
                     }
                     // Left out where no event has given it yet, or since a loss.
                     let at = low + (high - low) / 2;
-                    if let Some(priority) = run.task.and_then(|task| opsy.tasks.list[task].priority_at(at)) {
+                    if let Some(priority) = run.task.and_then(|task| kernel.tasks.list[task].priority_at(at)) {
                         let _ = write!(text, "\npriority {priority} there, lower is higher");
                     }
                     if !still && !run.span.to.lost {
@@ -176,7 +176,7 @@ impl Timeline {
                     let _ = write!(
                         text,
                         "{}, {below}\n{}",
-                        opsy.handlers.list[handler].name,
+                        kernel.handlers.list[handler].name,
                         self.extent(interrupt.span, still)
                     );
                 }
@@ -201,7 +201,7 @@ impl Timeline {
                     let _ = write!(
                         text,
                         "{} {} by {}\n{}",
-                        opsy.mutexes.list[mutex].name,
+                        kernel.mutexes.list[mutex].name,
                         if hold.waiting { "waited for" } else { "held" },
                         named(Some(hold.task)),
                         self.extent(hold.span, still)
@@ -217,14 +217,14 @@ impl Timeline {
     /// how long the task waited for its first run; and the wake to draw, from
     /// the line of a handler or task that woke it.
     pub(super) fn woken(&self, meaning: &Meaning, which: usize) -> (String, Option<Arrow>) {
-        let opsy = &meaning.opsy;
+        let kernel = &meaning.kernel;
         let ready = &meaning.readies[which];
-        let Some(wake) = ready.wake.map(|wake| &opsy.wakes[wake]) else {
+        let Some(wake) = ready.wake.map(|wake| &kernel.wakes[wake]) else {
             return ("ready since a loss: what woke it is unknown".to_owned(), None);
         };
-        let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+        let named = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
         let (cause, from) = match wake.cause {
-            Cause::Handler(handler) => (opsy.handlers.list[handler].name.clone(), Some(Line::Handler(handler))),
+            Cause::Handler(handler) => (kernel.handlers.list[handler].name.clone(), Some(Line::Handler(handler))),
             Cause::Task(task) => (named(task).to_owned(), Some(Line::Task(task))),
             Cause::Elapsed => ("its delay elapsing".to_owned(), None),
             Cause::Unknown => ("what a loss hides".to_owned(), None),
@@ -248,14 +248,14 @@ impl Timeline {
 
     /// The load of an OpSy `line` in `bin`, the bin drawn: its share of the
     /// time known, how much is known, and the longest span reaching into it.
-    fn load_text(&self, meaning: &Meaning, line: Line, bin: &Drawn, open: &opsy::Spans) -> String {
-        let opsy = &meaning.opsy;
-        let named = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+    fn load_text(&self, meaning: &Meaning, line: Line, bin: &Drawn, open: &kymo::meaning::Spans) -> String {
+        let kernel = &meaning.kernel;
+        let named = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
         let name = match line {
             Line::Cpu => "CPU".to_owned(),
             Line::Task(task) => named(task).to_owned(),
-            Line::Handler(handler) => opsy.handlers.list[handler].name.clone(),
-            Line::Mutex(mutex) => format!("{} held", opsy.mutexes.list[mutex].name),
+            Line::Handler(handler) => kernel.handlers.list[handler].name.clone(),
+            Line::Mutex(mutex) => format!("{} held", kernel.mutexes.list[mutex].name),
             Line::Section(_) | Line::Fold | Line::Event(_) => return String::new(),
         };
         let origin = self.origin();
@@ -297,10 +297,10 @@ impl Timeline {
         line: Line,
         low: i64,
         high: i64,
-        open: &opsy::Spans,
+        open: &kymo::meaning::Spans,
     ) -> Option<(String, Span, bool)> {
-        let opsy = &meaning.opsy;
-        let closed = &opsy.closed;
+        let kernel = &meaning.kernel;
+        let closed = &kernel.closed;
         let near = move |span: &Span| span.from.cycles < high && span.to.cycles > low;
         let runs = |which: Option<usize>| {
             let spans = which.map_or(Some(&meaning.idle), |which| meaning.runs.get(which));
@@ -323,10 +323,10 @@ impl Timeline {
         };
         let candidates: Box<dyn Iterator<Item = (Span, bool, Who)>> = match line {
             Line::Cpu => Box::new(
-                (0..opsy.tasks.list.len())
+                (0..kernel.tasks.list.len())
                     .map(Some)
                     .flat_map(runs)
-                    .chain((0..opsy.handlers.list.len()).flat_map(handlers)),
+                    .chain((0..kernel.handlers.list.len()).flat_map(handlers)),
             ),
             Line::Task(which) => Box::new(runs(which)),
             Line::Handler(which) => Box::new(handlers(which)),
@@ -346,10 +346,10 @@ impl Timeline {
             Line::Section(_) | Line::Fold | Line::Event(_) => return None,
         };
         let (span, still, who) = candidates.max_by_key(|(span, ..)| span.to.cycles - span.from.cycles)?;
-        let task = |task: Option<usize>| task.map_or("idle", |task| opsy.tasks.list[task].name.as_str());
+        let task = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
         let who = match who {
             Who::Task(which) => task(which).to_owned(),
-            Who::Handler(which) => opsy.handlers.list[which].name.clone(),
+            Who::Handler(which) => kernel.handlers.list[which].name.clone(),
             Who::Holder(which) => format!("held by {}", task(Some(which))),
         };
         Some((who, span, still))

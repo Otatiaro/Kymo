@@ -1,7 +1,7 @@
 //! The names the rows show: a subject's name from the image, without what
 //! every name repeats. The hover gives the name in full.
 
-use kymo::opsy::Subject;
+use kymo::meaning::Subject;
 
 use std::collections::HashMap;
 

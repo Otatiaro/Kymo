@@ -27,7 +27,6 @@ use crate::panel::Panel;
 use eframe::egui;
 use kymo::events::Catalogue;
 use kymo::model::Trace;
-use kymo::opsy;
 use kymo::stats;
 use kymo::target::Result;
 use list::Tab;
@@ -158,7 +157,7 @@ impl Timeline {
         timeline.panel = timeline
             .meaning
             .as_ref()
-            .map(|meaning| Panel::new(opsy::instances(&meaning.opsy)));
+            .map(|meaning| Panel::new(kymo::meaning::instances(&meaning.kernel)));
         timeline.whole();
         Ok(timeline)
     }
@@ -262,7 +261,7 @@ impl Timeline {
         if !self.moving || panel.range().is_none() {
             panel.report(
                 &self.trace,
-                &meaning.opsy.contradictions,
+                &meaning.kernel.contradictions,
                 &meaning.load.cpu.known,
                 range,
             );

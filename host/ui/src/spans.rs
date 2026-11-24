@@ -5,14 +5,14 @@
 //! however many spans fall in it by another.
 
 use crate::timeline::View;
-use kymo::opsy::Span;
+use kymo::meaning::Span;
 use std::ops::Range;
 
 #[derive(Default)]
 pub struct Spans {
     from: Vec<i64>,
     to: Vec<i64>,
-    /// Each span's place in the list of `kymo::opsy::Spans` it comes from.
+    /// Each span's place in the list of `kymo::meaning::Spans` it comes from.
     which: Vec<usize>,
 }
 
@@ -110,7 +110,7 @@ fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kymo::opsy::Edge;
+    use kymo::meaning::Edge;
 
     fn random(state: &mut u64) -> u64 {
         *state ^= *state << 13;

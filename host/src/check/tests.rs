@@ -1,5 +1,7 @@
 use super::*;
-use crate::opsy::{GROSS, HOLD, NET, PERIOD, PREEMPTED_BY_HANDLERS, PREEMPTED_BY_TASKS, RESPONSE, WAIT, WAKE_LATENCY};
+use crate::meaning::{
+    GROSS, HOLD, NET, PERIOD, PREEMPTED_BY_HANDLERS, PREEMPTED_BY_TASKS, RESPONSE, WAIT, WAKE_LATENCY,
+};
 use crate::stats::tests::{Json, fits_schema, violations};
 use crate::stats::{Metric, distribution};
 
