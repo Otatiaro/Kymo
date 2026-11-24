@@ -1547,6 +1547,8 @@ dependencies = [
  "eframe",
  "egui_extras",
  "kymo",
+ "raw-window-handle",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,6 +1,8 @@
 //! Kymo timeline: shows a capture made by `kymo record --out`, read with the
 //! ELF of the image that made it.
 
+#[cfg(windows)]
+mod background;
 mod levels;
 mod listing;
 mod meaning;
@@ -170,6 +172,8 @@ fn run() -> Result<()> {
             if let Some(theme) = theme {
                 context.egui_ctx.set_theme(theme);
             }
+            #[cfg(windows)]
+            background::set(context, ctx.global_style().visuals.panel_fill);
             Ok(Box::new(timeline))
         }),
     )?;
