@@ -100,6 +100,18 @@ foreach(cpu cortex-m4 cortex-m33)
 		${target_dir}/freertos/kymo_freertos.cpp bench/bench.cpp)
 	target_include_directories(freertos-bench-${cpu}-traced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+	# The fault event and its call levels: fault/fault.cpp checks what the
+	# adapter wrote to the ring, so only QEMU runs it.
+	kymo_freertos_image(freertos-fault-${cpu} ${cpu} ${script_${cpu}} ${kernel}
+		${target_dir}/freertos/kymo_freertos.cpp fault/fault.cpp)
+	target_include_directories(freertos-fault-${cpu} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${target_dir}/tests/include)
+	if(KYMO_QEMU)
+		add_test(NAME freertos-fault-${cpu}
+			COMMAND ${KYMO_QEMU} -machine ${machine_${cpu}} -kernel $<TARGET_FILE:freertos-fault-${cpu}>
+				-nographic -semihosting-config enable=on,target=native -monitor none -serial none)
+		set_tests_properties(freertos-fault-${cpu} PROPERTIES PASS_REGULAR_EXPRESSION "RESULT: PASS" TIMEOUT 60)
+	endif()
+
 	if(missing)
 		add_test(NAME ${image} COMMAND ${CMAKE_COMMAND} -E echo "missing: ${missing}")
 		set_tests_properties(${image} PROPERTIES WILL_FAIL ON)

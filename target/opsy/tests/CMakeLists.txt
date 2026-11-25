@@ -20,6 +20,7 @@ add_subdirectory(${KYMO_OPSY_DIR}/tests/qemu opsy)
 set(kymo_include
 	${CMAKE_CURRENT_SOURCE_DIR}/../../include
 	${CMAKE_CURRENT_SOURCE_DIR}/../include
+	${CMAKE_CURRENT_SOURCE_DIR}/../../tests/include
 	${CMAKE_CURRENT_SOURCE_DIR})
 
 foreach(image opsy_qemu_tests opsy_qemu_start_check opsy_qemu_before_start)

@@ -122,6 +122,12 @@ not read. It does not freeze the trace: an interrupt of higher priority than the
 still writes, and overwrites what came before. A handler that keeps the board
 for the host to read calls `kymo::freeze()` first.
 
+FreeRTOS has no fault hook: the application's fault handler calls
+`kymo_freertos_fault()` with the frame and `EXC_RETURN` (`trace.h` shows the
+entry stub). The bounds of a task's stack are the kernel's, unknown there: on
+the process stack the 64 words are read whatever they are, so every task stack
+must start at least 256 bytes before the end of its readable memory.
+
 On the host, build with `cargo build --release --manifest-path host/Cargo.toml`
 (add `-p kymo-ui` for the timeline), then:
 
