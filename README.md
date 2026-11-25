@@ -141,6 +141,11 @@ kymo check run.kymo rules.json          # rules on those statistics, an exit cod
 kymo-ui [run.kymo]                      # the timeline; open, drop or paste the URL of a capture
 ```
 
+> [!WARNING]
+> A capture holds the ELF given to `record`: the program's code, its symbols,
+> its debug information and the paths of its sources. Sending a capture sends
+> all of it. To share one without the ELF, record it with `--elf-ref`.
+
 The capture holds the ELF given to `record`, so it reads back on its own.
 `record --elf-ref <file or URL>` names the ELF instead of holding it, and
 `--elf` on the other commands reads a capture with another ELF. An ELF named by an
