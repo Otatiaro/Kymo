@@ -4,6 +4,7 @@
 mod app;
 #[cfg(windows)]
 mod background;
+mod durations;
 mod filter;
 mod levels;
 mod listing;
@@ -51,6 +52,14 @@ per mutex, held, with its owner named where it fits, or waited for
 Hovering a span shows its start, end and duration; a task's, its priority
 at the pointer, left out until an event gives it and from a loss to the
 next, and the last events up to the switch that ends it.
+
+An image whose events include begins (kymo::begin_of, keyed_begin_of)
+shows, last, a line per type of duration, by namespace: each duration a
+bar, from its begin to its end, a loss or, still open, the last event.
+Durations of a type open at once each take a lane, the lowest free at
+their begin; a line shows up to 4 lanes, the last holding those past it.
+Hovering a duration shows its start, end and duration, and the fields of
+its begin.
 
 Under a task's runs, a thin grey bar marks its time ready: woken, waiting
 for the core. Hovering a run or the bar shows what woke the task, why, when,

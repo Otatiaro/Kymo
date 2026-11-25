@@ -191,6 +191,86 @@ fn a_loss_closes_what_is_open_and_excuses_the_ends_after_it() {
     assert!(paired.contradictions.is_empty());
 }
 
+/// Each duration as (begin element, lane), in the order it closes, then
+/// those still open.
+fn lanes(trace: &Trace) -> Vec<(usize, usize)> {
+    let mut pairing = Pairing::new(trace.first);
+    pairing.add(&trace.elements, 0);
+    let open = pairing.open();
+    pairing
+        .closed
+        .iter()
+        .chain(&open)
+        .map(|placed| (placed.instance.from.element, placed.lane))
+        .collect()
+}
+
+#[test]
+fn a_duration_takes_the_lowest_lane_free_at_its_begin() {
+    let catalogue = catalogue();
+    // Nested, then one begun once both ended: lanes 1 and 0, then 0 again.
+    let nested = trace(&catalogue, 0, &[BEGIN_A, BEGIN_A, END_A, END_A, BEGIN_A, END_A]);
+    assert_eq!(lanes(&nested), [(1, 1), (0, 0), (4, 0)]);
+    // A double buffer: the third batch takes the lane the first freed, and
+    // a type's lanes are its own.
+    let buffers = trace(
+        &catalogue,
+        0,
+        &[
+            begin_b(0),
+            begin_b(1),
+            BEGIN_C,
+            end_b(0),
+            begin_b(0),
+            end_b(1),
+            end_b(0),
+            END_C,
+        ],
+    );
+    assert_eq!(lanes(&buffers), [(0, 0), (1, 1), (4, 0), (2, 0)]);
+    // A key opened again frees the lane of the begin it drops, once the new
+    // begin has taken another; a loss frees them all.
+    let again = trace(
+        &catalogue,
+        0,
+        &[begin_b(3), begin_b(3), begin_b(4), BEGIN_A, LOST, BEGIN_A, TICK],
+    );
+    assert_eq!(lanes(&again), [(3, 0), (1, 1), (2, 0), (5, 0)]);
+}
+
+#[test]
+fn pairing_in_pieces_pairs_as_at_once() {
+    let catalogue = catalogue();
+    let whole = trace(
+        &catalogue,
+        0,
+        &[
+            BEGIN_A,
+            begin_b(0),
+            BEGIN_A,
+            END_A,
+            begin_b(1),
+            end_b(0),
+            LOST,
+            END_A,
+            BEGIN_C,
+            TICK,
+        ],
+    );
+    let mut at_once = Pairing::new(0);
+    at_once.add(&whole.elements, 0);
+    for split in 0..=whole.elements.len() {
+        let mut pieces = Pairing::new(0);
+        pieces.add(&whole.elements[..split], 0);
+        pieces.add(&whole.elements, split);
+        assert_eq!(
+            (&pieces.closed, &pieces.contradictions, pieces.open()),
+            (&at_once.closed, &at_once.contradictions, at_once.open()),
+            "split at {split}"
+        );
+    }
+}
+
 #[test]
 fn a_trace_joined_late_excuses_an_end_with_no_begin() {
     let catalogue = catalogue();

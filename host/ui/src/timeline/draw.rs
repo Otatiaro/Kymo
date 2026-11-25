@@ -5,6 +5,7 @@ use super::rows;
 use super::rows::Line;
 use super::view::{View, edged, ticks};
 use super::{LABELS, RULER, Timeline};
+use crate::durations::Durations;
 use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
@@ -161,6 +162,7 @@ impl Timeline {
             .meaning
             .as_ref()
             .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu.known));
+        let open_durations = self.durations.as_ref().map(Durations::open).unwrap_or_default();
         for (n, &line) in lines.iter().enumerate() {
             let (top, height) = (area.top() + tops[n], tops[n + 1] - tops[n]);
             if top > area.bottom() {
@@ -239,6 +241,24 @@ impl Timeline {
             }
             match line {
                 Line::Section(_) | Line::Cpu | Line::Group(_) => {}
+                Line::Duration(row, shown) => {
+                    let durations = self.durations();
+                    let of = &durations.types[row];
+                    let open: Vec<_> = open_durations
+                        .iter()
+                        .filter(|placed| &placed.instance.subject == of)
+                        .collect();
+                    let used = open.iter().map(|placed| placed.lane + 1).max().unwrap_or(0);
+                    for which in 0..durations.lanes[row].len().max(used) {
+                        // The last lane shown holds the lanes past it.
+                        let (high, low) = rows::lane((high, low), which.min(shown - 1), shown);
+                        let open = open
+                            .iter()
+                            .filter(|placed| placed.lane == which)
+                            .map(|placed| crate::durations::span(placed));
+                        bars.paint(durations.lanes[row].get(which), open, high, low, palette.event);
+                    }
+                }
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
                         bars.mesh.add_colored_rect(

@@ -25,6 +25,7 @@ pub use status::counted;
 pub use toolbar::theme_menu;
 pub use view::View;
 
+use crate::durations::Durations;
 use crate::filter::Filter;
 use crate::levels::Levels;
 use crate::listing::{Entry, Events};
@@ -51,6 +52,11 @@ const RULER: f32 = 22.0;
 const ROW: f32 = 22.0;
 const TASK: f32 = 30.0;
 const CPU: f32 = 60.0;
+/// The height a line of durations takes for each lane past its first: a
+/// lane's bar and the gap above it.
+const LANE: f32 = 16.0;
+/// The gap between two lanes' bars, in pixels.
+const GAP: f32 = 2.0;
 /// The bottom panel's height at first, a share of the window's.
 const BOTTOM: f32 = 1.0 / 3.0;
 /// The narrowest view, in cycles.
@@ -73,6 +79,8 @@ pub struct Timeline {
     rows: Vec<Row>,
     /// The kernel's meaning, when the image has an adapter.
     meaning: Option<Meaning>,
+    /// The application's durations, when the image has a begin.
+    durations: Option<Durations>,
     /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
     /// The losses and suspect lines after the last event, which the next
@@ -140,6 +148,8 @@ struct Spaces {
     /// and size.
     types: Vec<String>,
     pointers: Vec<Vec<(usize, usize)>>,
+    /// Each type of duration's, by its line.
+    durations: Vec<String>,
 }
 
 /// The event list's lines the filters keep, of a range, at a generation of
@@ -157,6 +167,7 @@ impl Timeline {
         let mut timeline = Self {
             capture,
             meaning,
+            durations: Durations::new(catalogue, trace.first),
             catalogue,
             trace,
             ids: catalogue.events.keys().copied().collect(),
@@ -211,13 +222,14 @@ impl Timeline {
             let (instances, full) = meaning.shorten(kymo::meaning::instances(&meaning.kernel));
             Panel::named(instances, full)
         });
-        timeline.spaces = Spaces::of(catalogue, timeline.meaning.as_ref());
+        timeline.spaces = Spaces::of(catalogue, timeline.meaning.as_ref(), timeline.durations.as_ref());
         let spaces = &timeline.spaces;
         timeline.filter = Filter::new(
             spaces
                 .types
                 .iter()
                 .chain(spaces.subjects.iter().flatten())
+                .chain(&spaces.durations)
                 .map(String::as_str),
         );
         timeline.whole();
@@ -269,8 +281,11 @@ impl Timeline {
 }
 
 impl Spaces {
-    fn of(catalogue: &Catalogue, meaning: Option<&Meaning>) -> Self {
+    fn of(catalogue: &Catalogue, meaning: Option<&Meaning>, durations: Option<&Durations>) -> Self {
         let mut spaces = Self::default();
+        if let Some(durations) = durations {
+            spaces.durations = durations.types.iter().map(|of| names::namespace(of)).collect();
+        }
         for event in catalogue.events.values() {
             spaces.types.push(names::namespace(&event.name));
             let pointer = |field: &&kymo::events::Field| {

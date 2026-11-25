@@ -184,6 +184,12 @@ impl Timeline {
                 cards.push(card);
             }
         }
+        if let (Some(n), Some(Line::Duration(row, shown))) = (n, line) {
+            let tops = super::rows::tops(lines, area.height());
+            let bars = (area.top() + tops[n] + 4.0, area.top() + tops[n + 1] - 4.0);
+            let lane = super::rows::lane_at(bars, pointer.y, shown);
+            cards.extend(self.duration_cards(row, lane, shown, low, high));
+        }
         cards.extend(
             self.marks()
                 .filter(|mark| mark.from <= high && mark.to >= low)
@@ -238,6 +244,49 @@ fn mark_card(element: &Element) -> Option<Card> {
 }
 
 impl Timeline {
+    /// The durations of line `row` from `low` to `high` cycles in lane `lane`
+    /// of the `shown`, the last holding those past it: a card each, with the
+    /// fields of the begin.
+    fn duration_cards(&self, row: usize, lane: usize, shown: usize, low: i64, high: i64) -> Vec<Card> {
+        let durations = self.durations();
+        let of = &durations.types[row];
+        let lanes = if lane + 1 == shown {
+            lane..usize::MAX
+        } else {
+            lane..lane + 1
+        };
+        let closed = durations.lanes[row]
+            .iter()
+            .enumerate()
+            .filter(|(which, _)| lanes.contains(which))
+            .filter_map(|(_, spans)| spans.at(low, high))
+            .map(|which| (&durations.closed()[which], false));
+        let open = durations.open();
+        let open = open.iter().filter(|placed| {
+            let span = crate::durations::span(placed);
+            &placed.instance.subject == of
+                && lanes.contains(&placed.lane)
+                && span.from.cycles <= high
+                && span.to.cycles >= low
+        });
+        closed
+            .chain(open.map(|placed| (placed, true)))
+            .take(8)
+            .map(|(placed, still)| {
+                let mut card = self.card(Line::Duration(row, shown), "duration", Swatch::Event);
+                card.facts
+                    .extend(self.extent(crate::durations::span(placed), still).facts());
+                if let Element::Event { event, .. } = &self.trace.elements[placed.instance.from.element] {
+                    let fields = self.fields(event);
+                    if !fields.is_empty() {
+                        card.facts.push(("fields", fields));
+                    }
+                }
+                card
+            })
+            .collect()
+    }
+
     /// A card titled with `line`'s label, its name in full among its facts
     /// when the label shortens it.
     fn card(&self, line: Line, kind: &'static str, swatch: Swatch) -> Card {
@@ -356,7 +405,7 @@ impl Timeline {
                     cards.push(card);
                 }
             }
-            Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Group(_) => {}
+            Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Duration(..) | Line::Group(_) => {}
         }
         (cards, arrow)
     }
@@ -403,7 +452,7 @@ impl Timeline {
             Line::Task(task) => ("load", Some(Swatch::task(meaning, task))),
             Line::Handler(_) => ("load", Some(Swatch::Interrupt)),
             Line::Mutex(_) => ("held, load", Some(Swatch::Hold)),
-            Line::Section(_) | Line::Event(_) | Line::Group(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Group(_) => return None,
         };
         // The CPU's line has a colour per layer, and so no swatch.
         let mut card = match swatch {
@@ -510,7 +559,7 @@ impl Timeline {
                         .chain(still.map(|hold| (hold.span, true, Who::Holder(hold.task)))),
                 )
             }
-            Line::Section(_) | Line::Event(_) | Line::Group(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Group(_) => return None,
         };
         let (span, still, who) = candidates.max_by_key(|(span, ..)| span.to.cycles - span.from.cycles)?;
         let who = match who {
