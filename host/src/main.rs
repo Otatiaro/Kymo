@@ -1,6 +1,5 @@
 //! Kymo command line.
 
-use kymo::interrupts::Interrupts;
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
 use kymo::{capture, check, decode, events, meaning, record, stats};
@@ -112,16 +111,7 @@ and one is unknown; 1 on an input it cannot read or a rule it cannot judge.
 ";
 
 fn main() -> ExitCode {
-    let mut arguments = std::env::args().skip(1);
-    let outcome = if arguments.next().as_deref() == Some("check") {
-        match (arguments.next(), arguments.next(), arguments.next()) {
-            (Some(elf), Some(copy), Some(rules)) => check(&elf, &copy, &rules, arguments),
-            _ => Err(usage(USAGE)),
-        }
-    } else {
-        run().map(|()| ExitCode::SUCCESS)
-    };
-    match outcome {
+    match run() {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
@@ -242,11 +232,7 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         return Err(format!("{copy} is not a capture of kymo record").into());
     }
     let trace = Trace::read(&catalogue, &bytes, clock)?;
-    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
-    if !kernel.traced() {
-        return Err("the image has no kernel adapter events".into());
-    }
-    kernel.add(&trace.elements, 0);
+    let kernel = meaning::Meaning::of_trace(&catalogue, &trace)?;
     let origin = trace.elements.iter().find_map(|element| match element {
         Element::Event { cycles, .. } => Some(*cycles),
         _ => None,
@@ -275,21 +261,24 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
 /// The catalogue of the image at `path`, its warnings printed, the
 /// interrupts its DWARF does not name named by the SVD file `svd`.
 fn catalogue(path: &Path, svd: Option<&Path>) -> Result<events::Catalogue> {
-    let mut catalogue = events::read(path)?;
-    if let Some(svd) = svd {
-        catalogue.interrupts = catalogue.interrupts.or(&Interrupts::from_svd(svd)?);
-    }
+    let catalogue = events::read_with_svd(path, svd)?;
     for warning in &catalogue.warnings {
         eprintln!("warning: {warning}");
     }
     Ok(catalogue)
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<ExitCode> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next();
     match command.as_deref() {
         Some("record") => {}
+        Some("check") => {
+            let (Some(elf), Some(copy), Some(rules)) = (arguments.next(), arguments.next(), arguments.next()) else {
+                return Err(usage(USAGE));
+            };
+            return check(&elf, &copy, &rules, arguments);
+        }
         Some("events") => {
             let elf = PathBuf::from(arguments.next().ok_or_else(|| usage(USAGE))?);
             let svd = match (arguments.next().as_deref(), arguments.next()) {
@@ -301,7 +290,7 @@ fn run() -> Result<()> {
                 return Err(usage(USAGE));
             }
             events::print(&catalogue(&elf, svd.as_deref())?);
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Some("decode") => {
             let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
@@ -332,17 +321,14 @@ fn run() -> Result<()> {
                 }
                 if spans {
                     let trace = Trace::read(&catalogue, &bytes, clock)?;
-                    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
-                    if !kernel.traced() {
-                        return Err("the image has no kernel adapter events".into());
-                    }
-                    kernel.add(&trace.elements, 0);
+                    let kernel = meaning::Meaning::of_trace(&catalogue, &trace)?;
                     for line in meaning::lines(&trace, &kernel) {
                         println!("{line}");
                     }
-                    return Ok(());
+                } else {
+                    record::print_capture(&catalogue, &bytes, clock)?;
                 }
-                return record::print_capture(&catalogue, &bytes, clock);
+                return Ok(ExitCode::SUCCESS);
             }
             if spans {
                 return Err("--meaning reads a capture, not a copy of a ring".into());
@@ -350,13 +336,14 @@ fn run() -> Result<()> {
             let ring = catalogue.ring(channel.as_deref())?;
             let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;
             decode::print(&catalogue, write_index, &decoded, clock);
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Some("stats") => {
             let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
                 return Err(usage(USAGE));
             };
-            return stats(&elf, &copy, arguments);
+            stats(&elf, &copy, arguments)?;
+            return Ok(ExitCode::SUCCESS);
         }
         _ => return Err(usage(USAGE)),
     }
@@ -398,5 +385,6 @@ fn run() -> Result<()> {
     let catalogue = catalogue(&elf_path, None)?;
     let ring = catalogue.ring(channel.as_deref())?;
     let mut target = target::open(&connection)?;
-    record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock)
+    record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock)?;
+    Ok(ExitCode::SUCCESS)
 }

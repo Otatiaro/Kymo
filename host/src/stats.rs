@@ -25,6 +25,7 @@
 
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// What an instance measures.
@@ -471,98 +472,70 @@ pub fn text(report: &Report) -> Vec<String> {
     lines
 }
 
-fn string(text: &str) -> String {
-    let mut out = String::from("\"");
-    for character in text.chars() {
-        match character {
-            '"' => out += "\\\"",
-            '\\' => out += "\\\\",
-            '\n' => out += "\\n",
-            character if (character as u32) < 0x20 => out += &format!("\\u{:04x}", character as u32),
-            character => out.push(character),
-        }
-    }
-    out + "\""
+fn point(point: &Point) -> Value {
+    json!({
+        "value": point.value,
+        "index": point.index,
+        "cycles": point.cycles,
+        "seconds": point.seconds,
+    })
 }
 
-fn number(value: Option<f64>) -> String {
-    value
-        .filter(|value| value.is_finite())
-        .map_or_else(|| "null".to_owned(), |value| format!("{value:?}"))
-}
-
-fn point(point: &Point) -> String {
-    format!(
-        "{{\"value\":{},\"index\":{},\"cycles\":{},\"seconds\":{}}}",
-        point.value,
-        point.index,
-        point.cycles,
-        number(point.seconds)
-    )
-}
-
-/// The report as JSON, the shape host/schema/stats.schema.json gives.
+/// The report as JSON, the shape host/schema/stats.schema.json gives. A
+/// number that is not finite is null.
 pub fn json(report: &Report) -> String {
-    let groups: Vec<String> = report
+    let groups: Vec<Value> = report
         .groups
         .iter()
         .map(|group| {
-            let distribution = group.distribution.as_ref().map_or_else(
-                || "null".to_owned(),
-                |distribution| {
-                    let counts: Vec<String> = distribution.histogram.counts.iter().map(u64::to_string).collect();
-                    let worst: Vec<String> = distribution.worst.iter().map(point).collect();
-                    format!(
-                        "{{\"min\":{},\"p50\":{},\"p90\":{},\"p99\":{},\"max\":{},\"mean\":{},\"total\":{},\
-                         \"histogram\":{{\"width\":{},\"first\":{},\"counts\":[{}]}},\"worst\":[{}]}}",
-                        point(&distribution.min),
-                        distribution.p50,
-                        distribution.p90,
-                        distribution.p99,
-                        point(&distribution.max),
-                        number(Some(distribution.mean)),
-                        distribution.total,
-                        distribution.histogram.width,
-                        distribution.histogram.first,
-                        counts.join(","),
-                        worst.join(",")
-                    )
-                },
-            );
-            format!(
-                "{{\"kind\":{},\"subject\":{},\"metric\":{},\"detail\":{},\"count\":{},\"excluded_loss\":{},\
-                 \"excluded_suspect\":{},\"cut\":{},\"lower_bound\":{},\"jitter\":{},\"share\":{},\"distribution\":{}}}",
-                string(group.kind),
-                string(&group.subject),
-                string(group.metric.name),
-                group.detail.as_deref().map_or_else(|| "null".to_owned(), string),
-                group.count,
-                group.excluded_loss,
-                group.excluded_suspect,
-                group.cut,
-                group.lower_bound(),
-                group.jitter().map_or_else(|| "null".to_owned(), |jitter| jitter.to_string()),
-                number(group.share(report.known)),
-                distribution
-            )
+            let distribution = group.distribution.as_ref().map(|distribution| {
+                json!({
+                    "min": point(&distribution.min),
+                    "p50": distribution.p50,
+                    "p90": distribution.p90,
+                    "p99": distribution.p99,
+                    "max": point(&distribution.max),
+                    "mean": distribution.mean,
+                    "total": distribution.total,
+                    "histogram": {
+                        "width": distribution.histogram.width,
+                        "first": distribution.histogram.first,
+                        "counts": distribution.histogram.counts,
+                    },
+                    "worst": distribution.worst.iter().map(point).collect::<Vec<_>>(),
+                })
+            });
+            json!({
+                "kind": group.kind,
+                "subject": group.subject,
+                "metric": group.metric.name,
+                "detail": group.detail,
+                "count": group.count,
+                "excluded_loss": group.excluded_loss,
+                "excluded_suspect": group.excluded_suspect,
+                "cut": group.cut,
+                "lower_bound": group.lower_bound(),
+                "jitter": group.jitter(),
+                "share": group.share(report.known),
+                "distribution": distribution,
+            })
         })
         .collect();
-    format!(
-        "{{\"schema\":\"kymo-stats\",\"version\":1,\"frequency\":{},\"from\":{},\"to\":{},\"origin\":{},\
-         \"known\":{},\"joined\":{},\"losses\":{},\"suspects\":{},\"contradictions\":{},\"groups\":[{}]}}",
-        number(report.frequency),
-        report.from,
-        report.to,
-        report.origin,
-        report.known,
-        report
-            .joined
-            .map_or_else(|| "null".to_owned(), |index| index.to_string()),
-        report.losses,
-        report.suspects,
-        report.contradictions,
-        groups.join(",")
-    )
+    json!({
+        "schema": "kymo-stats",
+        "version": 1,
+        "frequency": report.frequency,
+        "from": report.from,
+        "to": report.to,
+        "origin": report.origin,
+        "known": report.known,
+        "joined": report.joined,
+        "losses": report.losses,
+        "suspects": report.suspects,
+        "contradictions": report.contradictions,
+        "groups": groups,
+    })
+    .to_string()
 }
 
 #[cfg(test)]

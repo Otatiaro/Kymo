@@ -617,6 +617,17 @@ impl<'a> Meaning<'a> {
         })
     }
 
+    /// The whole of `trace`, a trace of `catalogue`'s image taken in. An
+    /// image without a kernel adapter's events is an error.
+    pub fn of_trace(catalogue: &'a Catalogue, trace: &Trace) -> Result<Self> {
+        let mut meaning = Self::new(catalogue, trace.first)?;
+        if !meaning.traced() {
+            return Err("the image has no kernel adapter events".into());
+        }
+        meaning.add(&trace.elements, 0);
+        Ok(meaning)
+    }
+
     /// Whether the image has a kernel adapter's events.
     pub fn traced(&self) -> bool {
         !self.hooks.is_empty()
