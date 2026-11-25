@@ -145,17 +145,27 @@ endforeach()
 # - record: what the host records of a running image through QEMU's monitor
 #   (kymo record), against the values each event carries;
 # - symbols: pointer fields named from the ELF by kymo record, against the
-#   functions and objects the image points at.
+#   functions and objects the image points at;
+# - text: events whose types declare a text, written by kymo decode with their
+#   fields' values (std::format's specifications), against what the image
+#   says; text-bad, a text naming a field its event lacks, refused.
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
-foreach(test layout decode record symbols)
+foreach(test layout decode record symbols text text-bad)
+	string(REGEX REPLACE "-bad$" "" source ${test})
+	set(definitions "")
+	set(option "")
+	if(test STREQUAL text-bad)
+		set(definitions KYMO_TEST_BAD_TEXT)
+		set(option --bad)
+	endif()
 	foreach(cpu cortex-m33 cortex-m4)
 		foreach(level Og Os Os-lto)
 			set(name ${test}-${cpu}-${level})
-			kymo_qemu_image(${name} ${cpu} ${level} SOURCES ${test}/${test}.cpp)
+			kymo_qemu_image(${name} ${cpu} ${level} SOURCES ${source}/${source}.cpp DEFINITIONS ${definitions})
 			if(KYMO_HOST)
 				kymo_qemu_command(${name}
-					${CMAKE_CURRENT_SOURCE_DIR}/${test}/${test}.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
-					--image $<TARGET_FILE:${name}> --host ${KYMO_HOST})
+					${CMAKE_CURRENT_SOURCE_DIR}/${source}/${source}.py --qemu ${KYMO_QEMU} --machine ${machine_${cpu}}
+					--image $<TARGET_FILE:${name}> --host ${KYMO_HOST} ${option})
 			else()
 				add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST")
 				set_tests_properties(${name} PROPERTIES WILL_FAIL ON)

@@ -315,6 +315,7 @@ fn catalogue() -> Catalogue {
                         name: format!("type{id}"),
                         size: u64::from(size),
                         fields: Vec::new(),
+                        text: None,
                     },
                 )
             })

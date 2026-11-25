@@ -69,6 +69,7 @@ fn catalogue() -> Catalogue {
                 name: format!("{PREFIX}{hook}"),
                 size: 4 * fields.len() as u64,
                 fields,
+                text: None,
             },
         );
     }
@@ -80,6 +81,7 @@ fn catalogue() -> Catalogue {
             name: "app::tick".to_owned(),
             size: 0,
             fields: Vec::new(),
+            text: None,
         },
     );
     Catalogue {

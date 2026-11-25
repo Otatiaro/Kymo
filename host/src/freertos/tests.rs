@@ -81,6 +81,7 @@ fn catalogue() -> Catalogue {
                 name: format!("{PREFIX}{hook}"),
                 size,
                 fields,
+                text: None,
             },
         );
     }

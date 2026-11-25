@@ -12,6 +12,7 @@
 use crate::events::{Catalogue, Event, Kind, Pointee, Ring, Type};
 use crate::symbols::Symbols;
 use crate::target::Result;
+use crate::text::is_char;
 use crate::time::Timeline;
 use gimli::DwAte;
 use std::fmt::Write;
@@ -183,7 +184,8 @@ pub fn print(catalogue: &Catalogue, write_index: u32, events: &[Decoded], clock:
 
 /// One event's line: its index, or the range of its slots when it takes more
 /// than one, its cycles (its timestamp extended to 64 bits), the seconds since
-/// the first event or `-` without a frequency, its type and each field's value.
+/// the first event or `-` without a frequency, its type, and its text when the
+/// type declares one, else each field's value.
 pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f64>) -> String {
     let mut line = format!("event {}", decoded.index);
     let slots = slots_for(decoded.event.size) as u32;
@@ -198,7 +200,10 @@ pub fn line(symbols: &Symbols, decoded: &Decoded, cycles: i64, seconds: Option<f
         None => line.push('-'),
     }
     let _ = write!(line, " {}", decoded.event.name);
-    if !decoded.event.fields.is_empty() {
+    if let Some(text) = &decoded.event.text {
+        line.push(' ');
+        text.write(&mut line, &decoded.event.fields, &decoded.payload);
+    } else if !decoded.event.fields.is_empty() {
         line.push(' ');
         fields(&mut line, symbols, decoded);
     }
@@ -307,16 +312,6 @@ fn array(out: &mut String, names: Names, element: &Type, lengths: &[u64], bytes:
         array(out, names, element, inner, &bytes[n * stride..]);
     }
     out.push(']');
-}
-
-/// Whether `ty` is `char`, whose arrays hold text; not `signed char` nor
-/// `unsigned char`, which `std::int8_t` and `std::uint8_t` stand for.
-fn is_char(ty: &Type) -> bool {
-    matches!(
-        ty.kind,
-        Kind::Base(gimli::DW_ATE_signed_char | gimli::DW_ATE_unsigned_char)
-    ) && ty.size == Some(1)
-        && ty.name == "char"
 }
 
 /// A `char` array as a string, in quotes, up to its first NUL: printable
