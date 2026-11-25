@@ -126,4 +126,15 @@ if(KYMO_OPSY_BOARD)
 			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
 	# The adapter keeps the idle awake: the host never reads the target as zeros.
 	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 300 FAIL_REGULAR_EXPRESSION "read as zeros")
+
+	# A program of the same board in several namespaces (board/modules.cpp),
+	# to record and view by namespace: built, not checked.
+	add_executable(opsy_board_modules
+		${KYMO_OPSY_DIR}/scheduler.cpp
+		${KYMO_OPSY_DIR}/tests/qemu/startup.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/board/modules.cpp)
+	opsy_qemu_image(opsy_board_modules)
+	target_compile_options(opsy_board_modules PRIVATE -g ${OPSY_OPTIMISATION})
+	target_compile_definitions(opsy_board_modules PRIVATE KYMO_TEST_RING_SLOTS=1024)
+	target_include_directories(opsy_board_modules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
 endif()
