@@ -59,7 +59,7 @@ struct disabled
 struct texted
 {
 	std::array<std::uint32_t, 2> words;
-	static constexpr char kymo_text[] = "{words}";   // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the host reads it from the DWARF
+	[[maybe_unused]] static constexpr char kymo_text[] = "{words}";   // NOLINT(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays): the host reads it from the DWARF
 };
 
 /** @brief The payload of a duration's end. */

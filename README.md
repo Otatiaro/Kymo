@@ -73,6 +73,8 @@ A field is an integer, a `bool`, a `char`, a floating-point number, an
 enumeration (written by name) or a `char` array (written up to its first NUL);
 `{{` and `}}` write a brace. `kymo events` refuses an image whose text names a
 field the event lacks, or gives a field a specification its type does not take.
+Nothing in the program reads the text: in an unnamed namespace, Clang warns
+that it is unused, which `[[maybe_unused]]` silences.
 
 An event type is also a duration. `trace::begin` opens one with the event's
 fields and `trace::end<Event>()` closes the last one of that type still open;
