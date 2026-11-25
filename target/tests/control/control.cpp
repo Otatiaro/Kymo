@@ -41,7 +41,7 @@ static_assert(kymo::family_of<switch_event> == kymo::family::scheduling);
 static_assert(kymo::family_of<tick_event> == kymo::family::kernel);
 static_assert(sizeof(switch_event) == 4, "kymo_family takes no room");
 
-constexpr std::uint32_t all_but_kernel = 0x7FU;
+constexpr std::uint32_t all_but_kernel = 0x3FU;
 static_assert(kymo::control_at_reset() == all_but_kernel, "every family but kernel from reset");
 
 constexpr std::uint32_t application = kymo::bit(kymo::family::application);

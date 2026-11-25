@@ -48,7 +48,6 @@ enum class family : std::uint8_t
 	exclusion,    ///< mutexes, priority inheritance, masked sections
 	faults,       ///< traps, asserts, hardware faults
 	application,  ///< marks, intervals, values, text
-	meta,         ///< losses, active configuration, freeze, build id
 	kernel,       ///< the RTOS's own machinery: its tick, service calls, context switch interrupt
 };
 
