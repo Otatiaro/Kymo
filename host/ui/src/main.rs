@@ -49,8 +49,9 @@ task it interrupts.
 Their first row is the CPU's load: in each bin (16 pixels wide by default,
 set in the toolbar), the time handlers run, then tasks other than idle,
 stacked, then the time unknown, around losses, in the losses' colour;
-idle is the empty part above. Zoomed out, the other rows show their load too, chosen in the toolbar: Auto, once
-a row shows more than a span per 4 pixels; Bars; or Load. A row's bar is
+idle is the empty part above. Zoomed out, the other rows show their load
+too, chosen in the toolbar: Auto, once a row shows more than a span per 4
+pixels; Bars; or Load. A row's bar is
 its share of the time known, the mean of the bin or, as chosen in the
 toolbar, the median, min or max of its sub-bins; a bin with no time known
 stays empty. Hovering a bin shows its share, how much of it is known, and
