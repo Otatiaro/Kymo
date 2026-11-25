@@ -2,7 +2,7 @@
 
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{capture, check, decode, durations, events, meaning, record, stats};
+use kymo::{capture, check, decode, events, meaning, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -13,6 +13,7 @@ usage: kymo events <elf> [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
        kymo stats <capture> [--elf <file or URL>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
        kymo check <capture> <rules.json> [--elf <file or URL>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
+       kymo mcp
 
 A capture holds the ELF of the image it was recorded from, or names it
 (record --elf-ref); --elf reads it with another. A copy of a ring needs
@@ -128,6 +129,11 @@ when all of it keeps to the rule, fails when none does, and is unknown
 otherwise. A group absent from the range fails. A line each, then a total.
 Exits with 0 when every rule passes; 3 when one fails; 4 when none fails
 and one is unknown; 1 on an input it cannot read or a rule it cannot judge.
+
+mcp: serves an agent the captures it names, as a Model Context Protocol
+server on stdin and stdout: the tools summary, find, events, stats and
+check give what decode, stats --json and check print, over a range or
+around an event, a filter leaving out events.
 ";
 
 fn main() -> ExitCode {
@@ -225,15 +231,7 @@ fn check(copy: &str, rules: &str, mut arguments: impl Iterator<Item = String>) -
         }
     }
     let text = std::fs::read_to_string(rules).map_err(|error| format!("{rules}: {error}"))?;
-    let (rules_read, baseline) = check::rules(&text).map_err(|error| format!("{rules}: {error}"))?;
-    let baseline = match baseline {
-        None => None,
-        Some(path) => {
-            let path = Path::new(rules).parent().unwrap_or(Path::new("")).join(path);
-            let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-            Some(check::baseline(&text).map_err(|error| format!("{}: {error}", path.display()))?)
-        }
-    };
+    let (rules_read, baseline) = check::load(&text, rules, Path::new(rules).parent().unwrap_or(Path::new("")))?;
     let report = report(copy, &window, 1)?;
     let verdicts =
         check::judge(&report, &rules_read, baseline.as_ref()).map_err(|error| format!("{rules}: {error}"))?;
@@ -260,16 +258,6 @@ fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
     }
     let catalogue = catalogue_of(copy, &bytes, elf.as_deref(), svd.as_deref())?;
     let trace = Trace::read(&catalogue, &bytes, clock)?;
-    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
-    let durations = durations::pair(&trace);
-    let has_durations = catalogue
-        .events
-        .values()
-        .any(|event| events::Duration::of(&event.name).is_some());
-    if !kernel.traced() && !has_durations {
-        return Err("the image has neither kernel adapter events nor durations".into());
-    }
-    kernel.add(&trace.elements, 0);
     let origin = trace.elements.iter().find_map(|element| match element {
         Element::Event { cycles, .. } => Some(*cycles),
         _ => None,
@@ -287,18 +275,7 @@ fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
         from: cycles(from)?,
         to: cycles(to)?,
     };
-    let mut instances = meaning::instances(&kernel);
-    instances.extend(durations.instances);
-    let mut contradictions = kernel.contradictions.clone();
-    contradictions.extend(durations.contradictions);
-    let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
-    let found = stats::Found {
-        instances: &instances,
-        contradictions: &contradictions,
-        faults: &faults,
-        known: &kernel.known(),
-    };
-    Ok(stats::compute(&trace, found, range, worst))
+    stats::of_trace(&catalogue, &trace, range, worst)
 }
 
 /// The catalogue of the image at `path`, its warnings printed, the
@@ -393,6 +370,13 @@ fn run() -> Result<ExitCode> {
             let ring = catalogue.ring(channel.as_deref())?;
             let (write_index, decoded) = decode::decode(&catalogue, ring, &bytes)?;
             decode::print(&catalogue, write_index, &decoded, clock);
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some("mcp") => {
+            if arguments.next().is_some() {
+                return Err(usage(USAGE));
+            }
+            kymo::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock())?;
             return Ok(ExitCode::SUCCESS);
         }
         Some("stats") => {

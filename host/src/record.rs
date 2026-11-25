@@ -33,6 +33,7 @@ use crate::capture::{self, Record, Writer};
 use crate::decode::{self, Decoded, Header};
 use crate::events::{Catalogue, Ring};
 use crate::model::{Element, Trace};
+use crate::symbols::Symbols;
 use crate::target::{self, Result, Target};
 use crate::time::Timeline;
 use std::io::BufRead;
@@ -889,6 +890,15 @@ fn measured(measured: Option<(f64, f64)>) -> String {
     }
 }
 
+/// The line `kymo decode` prints for an element of a capture.
+pub fn line(symbols: &Symbols, element: &Element) -> String {
+    match element {
+        Element::Event { event, cycles, seconds } => decode::line(symbols, event, *cycles, *seconds),
+        Element::Lost { from, to } => format!("lost {from} {to}"),
+        Element::Suspect { from, to, writers } => format!("suspect {from} {to} {writers}"),
+    }
+}
+
 /// `kymo decode` of a capture: the lines `kymo record` printed while making
 /// it, but for the seconds: they are at `clock` hertz, or the capture's, or
 /// else at the frequency measured over the whole capture.
@@ -896,13 +906,7 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
     let trace = Trace::read(catalogue, bytes, clock)?;
     println!("record {}", trace.first);
     for element in &trace.elements {
-        match element {
-            Element::Event { event, cycles, seconds } => {
-                println!("{}", decode::line(&catalogue.symbols, event, *cycles, *seconds));
-            }
-            Element::Lost { from, to } => println!("lost {from} {to}"),
-            Element::Suspect { from, to, writers } => println!("suspect {from} {to} {writers}"),
-        }
+        println!("{}", line(&catalogue.symbols, element));
     }
     if let Some(next) = trace.end {
         println!("end {next}");

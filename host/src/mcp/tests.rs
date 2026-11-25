@@ -1,0 +1,548 @@
+use super::*;
+use crate::capture::{Elf, Header, Record, Writer};
+use crate::events::{Event, Field, Kind, Ring, Type};
+use crate::{check, decode, record, stats};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const SLOTS: u32 = 64;
+/// Cycles between two indexes; the clock is 1 MHz, so 100 µs.
+const STEP: u32 = 100;
+const CLOCK: u64 = 1_000_000;
+
+fn event(id: u16, name: &str, size: u64, fields: Vec<Field>) -> (u16, Event) {
+    let event = Event {
+        id,
+        name: name.to_owned(),
+        size,
+        fields,
+        text: None,
+    };
+    (id, event)
+}
+
+fn field(name: &str, offset: u64, ty: &str, size: u64, encoding: gimli::DwAte) -> Field {
+    Field {
+        name: name.to_owned(),
+        offset,
+        ty: Type {
+            name: ty.to_owned(),
+            size: Some(size),
+            kind: Kind::Base(encoding),
+        },
+    }
+}
+
+/// `app::al_status` (1) with `code` and `delta`, and the edges of the
+/// duration `app::work` (2 and 3).
+fn catalogue() -> Catalogue {
+    Catalogue {
+        events: [
+            event(
+                1,
+                "app::al_status",
+                3,
+                vec![
+                    field("code", 0, "uint16_t", 2, gimli::DW_ATE_unsigned),
+                    field("delta", 2, "int8_t", 1, gimli::DW_ATE_signed),
+                ],
+            ),
+            event(2, "kymo::begin_of<app::work>", 0, Vec::new()),
+            event(3, "kymo::end_of<app::work>", 0, Vec::new()),
+        ]
+        .into_iter()
+        .collect(),
+        rings: vec![Ring {
+            name: "trace_ring".into(),
+            address: 0x2000_0000,
+            slots: SLOTS,
+            size: 16 + u64::from(SLOTS) * 16,
+            write_index_offset: 0,
+            lapped_offset: 4,
+            slots_offset: 16,
+        }],
+        symbols: Default::default(),
+        interrupts: Default::default(),
+        lines: Default::default(),
+        code: Default::default(),
+        warnings: vec!["a warning of the image".to_owned()],
+    }
+}
+
+fn parse(_: &[u8], _: &str, _: Option<&Path>) -> target::Result<Catalogue> {
+    Ok(catalogue())
+}
+
+/// What a test capture holds.
+enum Item {
+    /// An event at its index: begin_of, al_status or end_of by the index
+    /// modulo 3, al_status's code the index and its delta -1.
+    Event(u32),
+    Lost(u32, u32),
+    Suspect(u32, u32, u32),
+}
+
+/// A capture from index 0: events 0 to 29, a loss from 30 to 35, events 35 to
+/// 59 with a suspect line of 40 to 41 after event 41, ended at 60.
+fn items() -> Vec<Item> {
+    let mut items: Vec<Item> = (0..30).map(Item::Event).collect();
+    items.push(Item::Lost(30, 35));
+    for index in 35..60 {
+        items.push(Item::Event(index));
+        if index == 41 {
+            items.push(Item::Suspect(40, 41, 1));
+        }
+    }
+    items
+}
+
+/// A capture file of its own for each test.
+fn path() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("kymo-mcp-{}-{n}.kcap", std::process::id()))
+}
+
+fn write(path: &Path, items: &[Item], end: u32) {
+    let catalogue = catalogue();
+    let ring = &catalogue.rings[0];
+    let header = Header {
+        first: 0,
+        clock: Some(CLOCK),
+        channel: ring.name.clone(),
+        elf: Elf::Embedded(b"not read: the catalogue is the test's".to_vec()),
+    };
+    let mut writer = Writer::create(path, &header).unwrap();
+    writer
+        .write(&Record::Pass {
+            host_ns: 0,
+            write_index: 0,
+        })
+        .unwrap();
+    for item in items {
+        let record = match *item {
+            Item::Event(index) => {
+                let type_id = [2u32, 1, 3][(index % 3) as usize];
+                let head = type_id | 1 << 16 | decode::lap(index, ring) << 17;
+                let mut slot = head.to_le_bytes().to_vec();
+                slot.extend((index * STEP).to_le_bytes());
+                slot.extend((index as u16).to_le_bytes());
+                slot.push(-1i8 as u8);
+                slot.resize(16, 0);
+                writer.write(&Record::Event { index, slots: &slot }).unwrap();
+                continue;
+            }
+            Item::Lost(from, to) => Record::Lost { from, to },
+            Item::Suspect(from, to, writers) => Record::Suspect { from, to, writers },
+        };
+        writer.write(&record).unwrap();
+    }
+    writer
+        .write(&Record::Pass {
+            host_ns: 1_000_000,
+            write_index: end,
+        })
+        .unwrap();
+    writer.write(&Record::End { next: end }).unwrap();
+    writer.finish().unwrap();
+}
+
+/// A test capture written, removed when dropped.
+struct File(PathBuf);
+
+impl File {
+    fn new() -> Self {
+        let path = path();
+        write(&path, &items(), 60);
+        File(path)
+    }
+
+    fn name(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn server() -> Server {
+    Server::new(parse)
+}
+
+/// The response to `message`, parsed.
+fn ask(server: &mut Server, message: Value) -> Value {
+    serde_json::from_str(&server.message(&message.to_string()).expect("a response")).unwrap()
+}
+
+/// The text of a tool's result, and whether it is an error.
+fn call(server: &mut Server, tool: &str, arguments: Value) -> (String, bool) {
+    let response = ask(
+        server,
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments } }),
+    );
+    let result = &response["result"];
+    assert_eq!(result["content"][0]["type"], "text", "{response}");
+    (
+        result["content"][0]["text"].as_str().unwrap().to_owned(),
+        result["isError"].as_bool().unwrap(),
+    )
+}
+
+fn text(server: &mut Server, tool: &str, arguments: Value) -> String {
+    let (text, error) = call(server, tool, arguments);
+    assert!(!error, "{tool}: {text}");
+    text
+}
+
+/// The lines `kymo decode` prints for the elements of the capture.
+fn decoded(file: &File) -> Vec<String> {
+    let catalogue = catalogue();
+    let bytes = std::fs::read(&file.0).unwrap();
+    let trace = Trace::read(&catalogue, &bytes, None).unwrap();
+    trace
+        .elements
+        .iter()
+        .map(|element| record::line(&catalogue.symbols, element))
+        .collect()
+}
+
+fn error_code(response: &Value) -> i64 {
+    response["error"]["code"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("an error: {response}"))
+}
+
+#[test]
+fn the_protocol_answers_requests_and_drops_notifications() {
+    let mut server = server();
+    let initialize = |version: &str| {
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": version, "capabilities": {},
+                            "clientInfo": { "name": "test", "version": "0" } } })
+    };
+    let response = ask(&mut server, initialize("2025-03-26"));
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(response["result"]["serverInfo"]["name"], "kymo");
+    assert!(response["result"]["capabilities"]["tools"].is_object());
+    let response = ask(&mut server, initialize("1999-01-01"));
+    assert_eq!(response["result"]["protocolVersion"], PROTOCOL);
+
+    let notification = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    assert_eq!(server.message(&notification.to_string()), None);
+    let response = json!({ "jsonrpc": "2.0", "id": 3, "result": {} });
+    assert_eq!(server.message(&response.to_string()), None);
+
+    let response = ask(&mut server, json!({ "jsonrpc": "2.0", "id": "a", "method": "ping" }));
+    assert_eq!((&response["id"], &response["result"]), (&json!("a"), &json!({})));
+
+    let response = ask(
+        &mut server,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    );
+    let names: Vec<_> = response["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["summary", "find", "events", "stats", "check"]);
+    for tool in response["result"]["tools"].as_array().unwrap() {
+        assert_eq!(tool["inputSchema"]["required"][0], "capture", "{tool}");
+    }
+
+    let unknown = ask(
+        &mut server,
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" }),
+    );
+    assert_eq!((error_code(&unknown), &unknown["id"]), (-32601, &json!(4)));
+    let response: Value = serde_json::from_str(&server.message("{ not json").unwrap()).unwrap();
+    assert_eq!((error_code(&response), &response["id"]), (-32700, &Value::Null));
+    let response: Value = serde_json::from_str(&server.message("[1, 2]").unwrap()).unwrap();
+    assert_eq!(error_code(&response), -32600);
+    let response = ask(&mut server, json!({ "jsonrpc": "2.0", "id": 5 }));
+    assert_eq!((error_code(&response), &response["id"]), (-32600, &json!(5)));
+    let response = ask(
+        &mut server,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "decode" } }),
+    );
+    assert_eq!(error_code(&response), -32602);
+    let response = ask(
+        &mut server,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": { "name": "summary", "arguments": [1] } }),
+    );
+    assert_eq!(error_code(&response), -32602);
+}
+
+#[test]
+fn a_tool_that_fails_answers_an_error_and_the_server_goes_on() {
+    let file = File::new();
+    let mut server = server();
+    let failures = [
+        ("summary", json!({})),
+        ("summary", json!({ "capture": "D:/no/such/capture.kcap" })),
+        ("summary", json!({ "capture": file.name(), "verbose": true })),
+        ("summary", json!({ "capture": 5 })),
+        ("events", json!({ "capture": file.name(), "from": "12 parsecs" })),
+        (
+            "events",
+            json!({ "capture": file.name(), "around": "#3", "from": "#1" }),
+        ),
+        ("events", json!({ "capture": file.name(), "before": 3 })),
+        ("events", json!({ "capture": file.name(), "limit": 0 })),
+        ("events", json!({ "capture": file.name(), "filter": "code=x" })),
+        ("find", json!({ "capture": file.name() })),
+        ("find", json!({ "capture": file.name(), "filter": "-" })),
+        ("stats", json!({ "capture": file.name(), "subjects": ["app::play"] })),
+        ("check", json!({ "capture": file.name(), "rules": 3 })),
+        (
+            "check",
+            json!({ "capture": file.name(), "rules": { "rules": [{ "subject": "x" }] } }),
+        ),
+    ];
+    for (tool, arguments) in failures {
+        let (answer, error) = call(&mut server, tool, arguments.clone());
+        assert!(error, "{tool} {arguments}: {answer}");
+        assert!(!answer.is_empty());
+    }
+    let not_a_capture = path();
+    std::fs::write(&not_a_capture, b"kymo").unwrap();
+    let (answer, error) = call(&mut server, "summary", json!({ "capture": not_a_capture }));
+    let _ = std::fs::remove_file(&not_a_capture);
+    assert!(error && answer.contains("not a capture"), "{answer}");
+    assert!(text(&mut server, "summary", json!({ "capture": file.name() })).contains("events 55,"));
+}
+
+#[test]
+fn events_gives_the_lines_of_decode() {
+    let file = File::new();
+    let mut server = server();
+    let lines = text(&mut server, "events", json!({ "capture": file.name() }));
+    assert_eq!(lines.lines().collect::<Vec<_>>(), decoded(&file));
+    assert!(
+        lines.contains("lost 30 35") && lines.contains("suspect 40 41 1"),
+        "{lines}"
+    );
+}
+
+/// Going on from where each response stops gives each line once, also where
+/// the cut falls between a suspect line and the event at its index.
+#[test]
+fn a_response_cut_goes_on_without_a_gap_or_a_line_twice() {
+    let file = File::new();
+    let mut server = server();
+    let all = decoded(&file);
+    for limit in 1..=12 {
+        let mut read = Vec::new();
+        let mut from = "#0".to_owned();
+        for _ in 0..100 {
+            let response = text(
+                &mut server,
+                "events",
+                json!({ "capture": file.name(), "from": from, "limit": limit }),
+            );
+            let mut lines: Vec<&str> = response.lines().collect();
+            let last = lines.last().copied().unwrap();
+            let Some((_, rest)) = last.split_once("the rest with from=") else {
+                read.extend(lines.iter().map(|line| line.to_string()));
+                break;
+            };
+            lines.pop();
+            // Past the limit only to keep a suspect line with its event.
+            assert!(lines.len() <= limit.max(2) && !lines.is_empty(), "{response}");
+            assert!(last.starts_with(&format!("{} of ", lines.len())), "{last}");
+            read.extend(lines.iter().map(|line| line.to_string()));
+            from = rest.to_owned();
+        }
+        assert_eq!(read, all, "limit {limit}");
+    }
+}
+
+#[test]
+fn a_range_includes_from_and_excludes_to_by_index_or_time() {
+    let file = File::new();
+    let mut server = server();
+    let all = decoded(&file);
+    let range = |server: &mut Server, from: &str, to: &str| {
+        text(
+            server,
+            "events",
+            json!({ "capture": file.name(), "from": from, "to": to }),
+        )
+    };
+    let by_index = range(&mut server, "#3", "#6");
+    assert_eq!(by_index.lines().collect::<Vec<_>>(), all[3..6]);
+    assert_eq!(range(&mut server, "300us", "0.6ms"), by_index);
+    // The loss stands at its first index, before event 35.
+    let around_loss = range(&mut server, "#30", "#36");
+    assert_eq!(around_loss.lines().collect::<Vec<_>>(), all[30..32]);
+    let to = range(&mut server, "#58", "#40");
+    assert_eq!(to, "nothing in this range");
+}
+
+#[test]
+fn around_gives_the_lines_on_each_side() {
+    let file = File::new();
+    let mut server = server();
+    let all = decoded(&file);
+    let around = text(
+        &mut server,
+        "events",
+        json!({ "capture": file.name(), "around": "#10", "before": 2, "after": 1 }),
+    );
+    assert_eq!(around.lines().collect::<Vec<_>>(), all[8..12]);
+    let filtered = text(
+        &mut server,
+        "events",
+        json!({ "capture": file.name(), "around": "#10", "before": 1, "after": 1, "filter": "al_status" }),
+    );
+    let expected: Vec<_> = all.iter().filter(|line| line.contains("al_status")).collect();
+    let at = expected.iter().position(|line| line.contains("code=10")).unwrap();
+    assert_eq!(filtered.lines().collect::<Vec<_>>(), expected[at - 1..=at + 1]);
+}
+
+#[test]
+fn find_counts_and_lists_the_events_its_filter_keeps() {
+    let file = File::new();
+    let mut server = server();
+    let all = decoded(&file);
+    let found = text(
+        &mut server,
+        "find",
+        json!({ "capture": file.name(), "filter": "code=0x2b" }),
+    );
+    let lines: Vec<_> = found.lines().collect();
+    assert_eq!(lines[0], "1 event matches");
+    assert_eq!(lines[1..], [all.iter().find(|line| line.contains("code=43")).unwrap()]);
+
+    let found = text(
+        &mut server,
+        "find",
+        json!({ "capture": file.name(), "filter": "+al_status -code=4", "limit": 3 }),
+    );
+    let lines: Vec<_> = found.lines().collect();
+    assert_eq!(lines[0], "17 events match");
+    assert_eq!(lines[1..4], [&all[1], &all[7], &all[10]]);
+    assert_eq!(lines[4], "3 of 17 lines; the rest with from=#13");
+
+    let found = text(
+        &mut server,
+        "find",
+        json!({ "capture": file.name(), "filter": "end_of", "from": "#3", "to": "#9" }),
+    );
+    assert_eq!(found.lines().collect::<Vec<_>>(), ["2 events match", &all[5], &all[8]]);
+}
+
+#[test]
+fn a_capture_rewritten_is_read_again() {
+    let file = File::new();
+    let mut server = server();
+    assert!(text(&mut server, "summary", json!({ "capture": file.name() })).contains("indexes #0 to #60"));
+    let fewer: Vec<Item> = (0..12).map(Item::Event).collect();
+    write(&file.0, &fewer, 12);
+    let summary = text(&mut server, "summary", json!({ "capture": file.name() }));
+    assert!(summary.contains("events 12, slots 12,"), "{summary}");
+    assert!(summary.contains("indexes #0 to #12"), "{summary}");
+}
+
+#[test]
+fn summary_tells_what_the_capture_holds() {
+    let file = File::new();
+    let mut server = server();
+    let summary = text(&mut server, "summary", json!({ "capture": file.name() }));
+    for line in [
+        "events 55, slots 55, slots lost 5, losses 1, suspect lines 1, suspect writers 1",
+        "indexes #0 to #60, where recording stopped",
+        "5.90 ms from the first event to the last",
+        "frequency 1000000 Hz",
+        "kernel: no adapter events",
+        "durations: app::work",
+        "  19 kymo::end_of<app::work>",
+        "  18 app::al_status",
+        "  18 kymo::begin_of<app::work>",
+        "warning: a warning of the image",
+    ] {
+        assert!(summary.lines().any(|candidate| candidate == line), "{line}\n{summary}");
+    }
+}
+
+/// `stats` is `kymo stats --json`, `check` `kymo check`, over the same range.
+#[test]
+fn stats_and_check_give_what_the_command_line_prints() {
+    let file = File::new();
+    let mut server = server();
+    let catalogue = catalogue();
+    let bytes = std::fs::read(&file.0).unwrap();
+    let trace = Trace::read(&catalogue, &bytes, None).unwrap();
+    let report = |from, to| stats::of_trace(&catalogue, &trace, stats::Range { from, to }, 10).unwrap();
+
+    let whole = text(&mut server, "stats", json!({ "capture": file.name() }));
+    assert_eq!(whole, stats::json(&report(None, None)));
+    let range = text(
+        &mut server,
+        "stats",
+        json!({ "capture": file.name(), "from": "#6", "to": "2ms" }),
+    );
+    assert_eq!(range, stats::json(&report(Some(600), Some(2000))));
+    assert_ne!(range, whole);
+    let subjects = text(
+        &mut server,
+        "stats",
+        json!({ "capture": file.name(), "subjects": ["app::work"] }),
+    );
+    assert_eq!(subjects, whole);
+
+    let rules = json!({ "rules": [
+        { "subject": "app::work", "metric": "duration", "stat": "max", "max": "150us" },
+        { "subject": "app::work", "metric": "duration", "stat": "max", "max": "250us" },
+    ] });
+    let judged = text(&mut server, "check", json!({ "capture": file.name(), "rules": rules }));
+    let (read, _) = check::rules(&rules.to_string()).unwrap();
+    let verdicts = check::judge(&report(None, None), &read, None).unwrap();
+    let mut expected: Vec<String> = verdicts.iter().map(|verdict| verdict.line.clone()).collect();
+    expected.push(check::summary(&verdicts));
+    assert_eq!(judged, expected.join("\n"));
+    assert_eq!(check::code(&verdicts), 3, "{judged}");
+
+    let written = path().with_extension("json");
+    std::fs::write(&written, rules.to_string()).unwrap();
+    let from_file = text(
+        &mut server,
+        "check",
+        json!({ "capture": file.name(), "rules": written }),
+    );
+    let _ = std::fs::remove_file(&written);
+    assert_eq!(from_file, judged);
+}
+
+#[test]
+fn instants_read_an_index_or_a_time_with_its_unit() {
+    assert_eq!(Instant::parse("#12"), Ok(Instant::Index(12)));
+    assert_eq!(Instant::parse(" 2s "), Ok(Instant::Seconds(2.0)));
+    assert_eq!(Instant::parse("12.5ms"), Ok(Instant::Seconds(0.0125)));
+    assert_eq!(Instant::parse("3 us"), Ok(Instant::Seconds(3e-6)));
+    assert_eq!(Instant::parse("3µs"), Ok(Instant::Seconds(3e-6)));
+    assert_eq!(Instant::parse("40ns"), Ok(Instant::Seconds(40e-9)));
+    for wrong in ["12", "#-1", "#", "ms", "inf s", "1e999s", "3 parsecs"] {
+        assert!(Instant::parse(wrong).is_err(), "{wrong}");
+    }
+}
+
+/// Each line read on stdin answered on stdout, blank lines skipped.
+#[test]
+fn serve_answers_line_by_line() {
+    let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n\n\
+{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\
+{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n";
+    let mut output = Vec::new();
+    serve(input.as_bytes(), &mut output).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(
+        output,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n"
+    );
+}

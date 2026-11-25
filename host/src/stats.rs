@@ -23,8 +23,11 @@
 //! A share is over the time known in the range: the adapter says when the
 //! state of what it measures is known (`Meaning::known`).
 
+use crate::events::{self, Catalogue};
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
+use crate::target::Result;
+use crate::{durations, meaning};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -281,6 +284,34 @@ pub struct Found<'a> {
     /// The elements that are faults.
     pub faults: &'a [usize],
     pub known: &'a Covered,
+}
+
+/// The statistics of `trace`, read with `catalogue`, over `range`: those of
+/// its kernel adapter and its durations, the `worst` highest instances kept
+/// for each group. An image with neither is an error.
+pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize) -> Result<Report> {
+    let mut kernel = meaning::Meaning::new(catalogue, trace.first)?;
+    let durations = durations::pair(trace);
+    let has_durations = catalogue
+        .events
+        .values()
+        .any(|event| events::Duration::of(&event.name).is_some());
+    if !kernel.traced() && !has_durations {
+        return Err("the image has neither kernel adapter events nor durations".into());
+    }
+    kernel.add(&trace.elements, 0);
+    let mut instances = meaning::instances(&kernel);
+    instances.extend(durations.instances);
+    let mut contradictions = kernel.contradictions.clone();
+    contradictions.extend(durations.contradictions);
+    let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
+    let found = Found {
+        instances: &instances,
+        contradictions: &contradictions,
+        faults: &faults,
+        known: &kernel.known(),
+    };
+    Ok(compute(trace, found, range, worst))
 }
 
 /// The statistics of what the adapter `found` over `range` of `trace`, the

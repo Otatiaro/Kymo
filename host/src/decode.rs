@@ -299,6 +299,32 @@ fn value(out: &mut String, names: Names, ty: &Type, bytes: &[u8]) {
     }
 }
 
+/// The value of `ty` at the start of `bytes` as an integer, when it is one
+/// of 8 bytes at most: an integer, a character or a boolean, signed as its
+/// encoding says; an enumeration's value, unsigned; a pointer's address.
+pub fn integer(ty: &Type, bytes: &[u8]) -> Option<i128> {
+    let size = ty.size? as usize;
+    let signed = match &ty.kind {
+        Kind::Base(encoding) if *encoding == gimli::DW_ATE_float => return None,
+        Kind::Base(encoding) => matches!(*encoding, gimli::DW_ATE_signed | gimli::DW_ATE_signed_char),
+        Kind::Enum(_) | Kind::Pointer(_) => false,
+        _ => return None,
+    };
+    if size == 0 || size > 8 || bytes.len() < size {
+        return None;
+    }
+    let unsigned = bytes[..size]
+        .iter()
+        .rev()
+        .fold(0u64, |value, byte| value << 8 | u64::from(*byte));
+    let shift = 64 - 8 * size as u32;
+    Some(if signed {
+        i128::from(((unsigned << shift) as i64) >> shift)
+    } else {
+        i128::from(unsigned)
+    })
+}
+
 fn array(out: &mut String, names: Names, element: &Type, lengths: &[u64], bytes: &[u8]) {
     let Some((length, inner)) = lengths.split_first() else {
         return value(out, names, element, bytes);
