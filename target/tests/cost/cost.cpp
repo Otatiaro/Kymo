@@ -46,7 +46,7 @@ struct slots_4
 struct disabled
 {
 #ifndef KYMO_COST_BASELINE
-	static constexpr kymo::family kymo_family = kymo::family::meta;
+	static constexpr kymo::family kymo_family = kymo::family::kernel;
 #endif
 	std::array<std::uint32_t, 2> words;
 };
@@ -90,7 +90,7 @@ extern "C" [[gnu::noinline]] void cost_disabled(std::uint32_t seed) { emit<disab
 void test_main()
 {
 #ifndef KYMO_COST_BASELINE
-	kymo::disable(kymo::family::meta);
+	kymo::disable(kymo::family::kernel);
 #endif
 	cost_slots_1(1);
 	cost_slots_2(2);
