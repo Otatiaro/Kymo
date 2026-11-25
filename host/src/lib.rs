@@ -16,6 +16,8 @@ pub mod meaning;
 pub mod model;
 mod opsy;
 pub mod record;
+#[cfg(any(test, feature = "served"))]
+pub mod served;
 pub mod stats;
 pub mod symbols;
 pub mod target;

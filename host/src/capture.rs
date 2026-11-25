@@ -30,6 +30,7 @@ use crate::target::Result;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::time::Duration;
 
 const MAGIC: &[u8; 8] = b"KYMOCAP\0";
 const VERSION: u32 = 1;
@@ -161,25 +162,43 @@ pub fn is_capture(bytes: &[u8]) -> bool {
 }
 
 /// The image's ELF to read `bytes`, a capture or a copy of the ring called
-/// `name`, with, and what errors call it: `given`, a file, when there is
-/// one, else the ELF the capture holds or names.
+/// `name`, with, and what errors call it: `given`, a file or an URL, when
+/// there is one, else the ELF the capture holds or names.
 pub fn elf(name: &str, bytes: &[u8], given: Option<&str>) -> Result<(Vec<u8>, String)> {
     if let Some(given) = given {
-        return Ok((read_file(given)?, given.to_owned()));
+        return Ok((fetch(given)?, given.to_owned()));
     }
     if !is_capture(bytes) {
         return Err(format!("{name} is a copy of a ring: give the image's ELF with --elf").into());
     }
     match header(bytes)?.elf {
         Elf::Embedded(elf) => Ok((elf, format!("the ELF in {name}"))),
-        Elf::Reference(place) if is_url(&place) => {
-            Err(format!("{name}: its ELF is at {place}, which this kymo does not fetch: give it with --elf").into())
-        }
-        Elf::Reference(place) => match read_file(&place) {
+        Elf::Reference(place) => match fetch(&place) {
             Ok(elf) => Ok((elf, place)),
             Err(error) => Err(format!("{name}: its ELF: {error}; give it with --elf").into()),
         },
     }
+}
+
+/// The bytes at `place`: an http(s) URL, fetched whole, or a file.
+pub fn fetch(place: &str) -> Result<Vec<u8>> {
+    if !is_url(place) {
+        return read_file(place);
+    }
+    let failed = |error: ureq::Error| format!("{place}: {error}");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+    let mut response = agent.get(place).call().map_err(failed)?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(u64::MAX)
+        .read_to_vec()
+        .map_err(failed)?;
+    Ok(bytes)
 }
 
 /// How a capture names the ELF given as `place`: an http(s) URL as it is, a

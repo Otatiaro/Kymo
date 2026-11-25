@@ -112,12 +112,13 @@ kymo decode run.kymo                    # the events, one line each
 kymo decode run.kymo --meaning          # the kernel's spans and wakes
 kymo stats run.kymo [--json]            # latencies, durations, periods, shares
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
-kymo-ui [run.kymo]                      # the timeline; open or drop a capture
+kymo-ui [run.kymo]                      # the timeline; open, drop or paste the URL of a capture
 ```
 
 The capture holds the ELF given to `record`, so it reads back on its own.
 `record --elf-ref <file or URL>` names the ELF instead of holding it, and
-`--elf` on the other commands reads a capture with another ELF.
+`--elf` on the other commands reads a capture with another ELF. An ELF named by an
+http(s) URL is fetched, and `kymo-ui` opens a capture from its URL too.
 
 `kymo` with no argument prints every command and option. The JSON of
 `stats --json` and the rules of `check` are described by

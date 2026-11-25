@@ -50,27 +50,40 @@ fn drop_on(app: &mut App, paths: &[&Path]) {
     app.dropped(paths.iter().map(|path| path.to_path_buf()).collect(), None);
 }
 
+/// `path` as the window names a file.
+fn at(path: &Path) -> String {
+    path.display().to_string()
+}
+
 fn shown(app: &App) -> String {
     match &app.shown {
         Shown::Nothing => "nothing".to_owned(),
         Shown::Timeline(timeline) => format!("timeline of {}", timeline.capture()),
-        Shown::Waiting(waiting) => format!("{} waits for {}", waiting.capture.display(), waiting.place),
+        Shown::Waiting(waiting) => format!("{} waits: {}", waiting.capture, waiting.why),
     }
 }
 
 #[test]
-fn a_capture_dropped_shows_as_one_opened_from_the_command_line() {
+fn a_capture_dropped_or_at_an_url_shows_as_one_opened_from_the_command_line() {
     let directory = directory("drop");
     let path = directory.join("run.kcap");
     capture(&path, Elf::Embedded(b"elf".to_vec()));
     let mut opened = app();
-    opened.open(&path, None, None).unwrap();
+    opened.open(&at(&path), None, None).unwrap();
+    assert_eq!(shown(&opened), "timeline of run.kcap");
+
     let mut dropped = app();
     drop_on(&mut dropped, &[&path]);
-    assert_eq!(shown(&opened), "timeline of run.kcap");
-    assert_eq!(shown(&dropped), shown(&opened));
-    assert_eq!(dropped.title(), opened.title());
-    assert_eq!(dropped.error, None);
+    let server = kymo::served::serve(vec![("/captures/run.kcap".into(), std::fs::read(&path).unwrap())]);
+    let mut fetched = app();
+    fetched
+        .open(&format!("{server}/captures/run.kcap"), None, None)
+        .unwrap();
+    for other in [&dropped, &fetched] {
+        assert_eq!(shown(other), shown(&opened));
+        assert_eq!(other.title(), opened.title());
+        assert_eq!(other.error, None);
+    }
 }
 
 #[test]
@@ -78,10 +91,14 @@ fn a_capture_whose_elf_is_missing_waits_for_it_dropped() {
     let directory = directory("missing");
     let path = directory.join("run.kcap");
     let elf = directory.join("gone.elf");
-    capture(&path, Elf::Reference(elf.display().to_string()));
+    capture(&path, Elf::Reference(at(&elf)));
     let mut app = app();
     drop_on(&mut app, &[&path]);
-    assert_eq!(shown(&app), format!("{} waits for {}", path.display(), elf.display()));
+    let waits = shown(&app);
+    assert!(
+        waits.starts_with(&format!("{} waits: {}", at(&path), at(&elf))),
+        "{waits}"
+    );
     // The ELF dropped is read: the capture shows.
     std::fs::write(&elf, b"elf").unwrap();
     drop_on(&mut app, &[&elf]);
@@ -89,20 +106,29 @@ fn a_capture_whose_elf_is_missing_waits_for_it_dropped() {
 }
 
 #[test]
-fn a_capture_naming_an_url_waits_for_its_elf() {
+fn an_elf_at_an_url_is_fetched_else_waited_for() {
     let directory = directory("url");
-    let path = directory.join("run.kcap");
-    capture(&path, Elf::Reference("https://example.com/app.elf".to_owned()));
+    let server = kymo::served::serve(vec![("/app.elf".into(), b"elf".to_vec())]);
+    let found = directory.join("found.kcap");
+    capture(&found, Elf::Reference(format!("{server}/app.elf")));
     let mut app = app();
-    app.open(&path, None, None).unwrap();
-    assert_eq!(
-        shown(&app),
-        format!("{} waits for https://example.com/app.elf", path.display())
+    app.open(&at(&found), None, None).unwrap();
+    assert_eq!(shown(&app), "timeline of found.kcap");
+
+    let gone = format!("{server}/gone.elf");
+    let path = directory.join("run.kcap");
+    capture(&path, Elf::Reference(gone.clone()));
+    app.open(&at(&path), None, None).unwrap();
+    let waits = shown(&app);
+    assert!(
+        waits.starts_with(&format!("{} waits: {gone}", at(&path))) && waits.contains("404"),
+        "{waits}"
     );
-    // --elf replaces the reference.
-    let elf = directory.join("app.elf");
-    std::fs::write(&elf, b"elf").unwrap();
-    app.open(&path, Some(&elf), None).unwrap();
+    // Its URL given, the ELF is fetched.
+    app.give(&format!("{server}/app.elf"), None).unwrap();
+    assert_eq!(shown(&app), "timeline of run.kcap");
+    // So is the one --elf gives.
+    app.open(&at(&path), Some(&format!("{server}/app.elf")), None).unwrap();
     assert_eq!(shown(&app), "timeline of run.kcap");
 }
 
@@ -114,10 +140,10 @@ fn an_error_leaves_the_timeline_shown() {
     let other = directory.join("notes.txt");
     std::fs::write(&other, b"not a capture").unwrap();
     let mut app = app();
-    app.open(&path, None, None).unwrap();
+    app.open(&at(&path), None, None).unwrap();
     drop_on(&mut app, &[&other]);
     assert_eq!(shown(&app), "timeline of run.kcap");
-    assert_eq!(app.error, Some(format!("{} is not a Kymo capture", other.display())));
+    assert_eq!(app.error, Some(format!("{} is not a Kymo capture", at(&other))));
 }
 
 #[derive(Default)]
@@ -142,16 +168,18 @@ impl eframe::Storage for Saved {
 #[test]
 fn the_recent_captures_are_kept_for_the_next_runs_the_latest_first() {
     let directory = directory("recent");
-    let paths: Vec<_> = (0..RECENT + 1)
+    let paths: Vec<_> = (0..RECENT)
         .map(|n| {
             let path = directory.join(format!("{n}.kcap"));
             capture(&path, Elf::Embedded(b"elf".to_vec()));
-            path
+            at(&path)
         })
         .collect();
+    let server = kymo::served::serve(vec![("/8.kcap".into(), std::fs::read(&paths[0]).unwrap())]);
+    let url = format!("{server}/8.kcap");
     let mut app = app();
-    for path in &paths {
-        app.open(path, None, None).unwrap();
+    for place in paths.iter().chain([&url]) {
+        app.open(place, None, None).unwrap();
     }
     // Opened again, a capture comes first, once.
     app.open(&paths[3], None, None).unwrap();
@@ -159,15 +187,22 @@ fn the_recent_captures_are_kept_for_the_next_runs_the_latest_first() {
     eframe::App::save(&mut app, &mut saved);
     let mut next = self::app();
     next.restore(|key| eframe::Storage::get_string(&saved, key));
-    let names: Vec<_> = next
-        .recent
-        .iter()
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let names: Vec<_> = next.recent.iter().map(|place| last(place)).collect();
     assert_eq!(
         names,
         [
             "3.kcap", "8.kcap", "7.kcap", "6.kcap", "5.kcap", "4.kcap", "2.kcap", "1.kcap"
         ]
     );
+    // An URL is kept as it is, a file by its absolute path.
+    assert_eq!(next.recent[1], url);
+    assert!(Path::new(&next.recent[0]).is_absolute());
+}
+
+#[test]
+fn the_last_part_of_a_place_names_it() {
+    assert_eq!(last("http://host:8080/builds/42/run.kcap"), "run.kcap");
+    assert_eq!(last("https://host/builds/run.kcap/"), "run.kcap");
+    assert_eq!(last(r"D:\captures\run.kcap"), "run.kcap");
+    assert_eq!(last("/captures/run.kcap"), "run.kcap");
 }

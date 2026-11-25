@@ -22,15 +22,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: kymo-ui [<capture>] [--elf <file>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
+usage: kymo-ui [<capture>] [--elf <file or URL>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
 
 Shows a capture made by kymo record --out, read with the ELF it holds or
-names, or the one --elf gives. Without a capture, the window offers to open
-one: its Open button (Ctrl+O), a capture dropped on it, or the list of
-those opened recently, kept for the next runs; another one replaces the
-timeline. A capture whose ELF is not found names where it looked, and waits
-for the ELF, chosen or dropped. An error shows above the window, which
-stays.
+names, or the one --elf gives; an http(s) URL is fetched. Without a
+capture, the window offers to open one: its Open button (Ctrl+O), a
+capture dropped on it, its URL pasted in the URL menu, or the list of those
+opened recently, kept for the next runs; another one replaces the timeline.
+A capture whose ELF is not found says why, and waits for the ELF, chosen,
+dropped or its URL pasted. An error shows above the window, which stays.
 
 The timeline: one row per event type of the
 image, the gaps (slots lost) marked across the rows in grey edged in red, a
@@ -117,7 +117,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    let mut paths = Vec::new();
+    let mut places = Vec::new();
     let mut elf = None;
     let mut clock = None;
     let mut measure = false;
@@ -127,7 +127,7 @@ fn run() -> Result<()> {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--clock" => clock = Some(arguments.next().ok_or("--clock needs a value")?.parse()?),
-            "--elf" => elf = Some(arguments.next().ok_or("--elf needs a file")?),
+            "--elf" => elf = Some(arguments.next().ok_or("--elf needs a file or an URL")?),
             "--svd" => svd = Some(PathBuf::from(arguments.next().ok_or("--svd needs a file")?)),
             "--measure" => measure = true,
             "--theme" => {
@@ -138,16 +138,15 @@ fn run() -> Result<()> {
                     _ => return Err("--theme takes system, light or dark".into()),
                 })
             }
-            _ if !argument.starts_with("--") => paths.push(PathBuf::from(argument)),
+            _ if !argument.starts_with("--") => places.push(argument),
             _ => return Err(format!("unknown option {argument}\n\n{USAGE}").into()),
         }
     }
-    let capture = match paths.as_slice() {
+    let capture = match places.as_slice() {
         [] if !measure && elf.is_none() => None,
         [capture] => Some(capture.clone()),
         _ => return Err(USAGE.into()),
     };
-    let elf = elf.map(PathBuf::from);
     let mut app = App::new(Options { clock, svd, measure }, events::parse_with_svd);
     // Measured, the capture opens before the window, which an error does not open.
     if measure && let Some(capture) = &capture {

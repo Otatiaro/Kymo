@@ -9,14 +9,14 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 usage: kymo events <elf> [--svd <file>]
-       kymo decode <ring or capture> [--elf <file>] [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
+       kymo decode <ring or capture> [--elf <file or URL>] [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
-       kymo stats <capture> [--elf <file>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
-       kymo check <capture> <rules.json> [--elf <file>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
+       kymo stats <capture> [--elf <file or URL>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
+       kymo check <capture> <rules.json> [--elf <file or URL>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
 
 A capture holds the ELF of the image it was recorded from, or names it
 (record --elf-ref); --elf reads it with another. A copy of a ring needs
---elf.
+--elf. An ELF named by an http(s) URL is fetched.
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.

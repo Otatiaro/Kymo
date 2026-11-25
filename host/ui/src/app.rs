@@ -1,8 +1,8 @@
 //! The window: the timeline of the capture opened, or else what opens one.
 //! A capture opens from the command line, the Open button (Ctrl+O), a file
-//! dropped on the window or the list of recent ones; another one replaces the
-//! timeline. A capture whose ELF is not found waits for it, given the same
-//! ways. An error is shown above what the window shows, which stays.
+//! dropped on the window, its URL pasted or the list of recent ones; another
+//! one replaces the timeline. A capture whose ELF is not found waits for it,
+//! given the same ways. An error is shown above what the window shows, which stays.
 
 use crate::timeline::{self, Timeline};
 use eframe::egui;
@@ -15,7 +15,7 @@ use std::time::Instant;
 
 /// How many recent captures are kept.
 const RECENT: usize = 8;
-/// The key the recent captures are saved under, a path a line.
+/// The key the recent captures are saved under, a path or an URL a line.
 const RECENTS: &str = "recent captures";
 
 /// Reads an image's ELF: its bytes, what errors call it, and the SVD file
@@ -39,8 +39,12 @@ pub struct App {
     shown: Shown,
     /// The last error, until dismissed or another capture opens.
     error: Option<String>,
-    /// The captures opened, the latest first.
-    recent: Vec<PathBuf>,
+    /// The captures opened, paths or URLs, the latest first.
+    recent: Vec<String>,
+    /// The URL of a capture to open, as typed.
+    url: String,
+    /// The URL of the ELF of the capture waiting for one, as typed.
+    elf_url: String,
     /// The file dialog to open at the next frame.
     pick: Option<Pick>,
     /// The window's title, as last set.
@@ -55,10 +59,9 @@ enum Shown {
 }
 
 struct Waiting {
-    capture: PathBuf,
+    capture: String,
     bytes: Vec<u8>,
-    /// Where the capture names its ELF, and why it is not read there.
-    place: String,
+    /// Why its ELF is not read where the capture names it.
     why: String,
 }
 
@@ -68,16 +71,19 @@ enum Pick {
     Elf,
 }
 
-/// What the toolbar's file controls ask for.
+/// What the file controls ask for: a file dialog, a capture to open, or the
+/// ELF of the capture waiting for one.
 enum Request {
     Pick(Pick),
-    Open(PathBuf),
+    Open(String),
+    Give(String),
 }
 
-/// The ELF of a capture, found, or named where it is not found.
+/// The ELF of a capture, found, or why it is not found where the capture
+/// names it.
 enum Image {
     Found(Vec<u8>, String),
-    Missing { place: String, why: String },
+    Missing(String),
 }
 
 impl App {
@@ -88,6 +94,8 @@ impl App {
             shown: Shown::Nothing,
             error: None,
             recent: Vec::new(),
+            url: String::new(),
+            elf_url: String::new(),
             pick: None,
             titled: String::new(),
         }
@@ -97,9 +105,9 @@ impl App {
     /// timeline's state, from what `saved` gives by key.
     pub fn restore(&mut self, saved: impl Fn(&str) -> Option<String>) {
         if let Some(recent) = saved(RECENTS) {
-            for path in recent.lines().filter(|line| !line.is_empty()).map(PathBuf::from) {
-                if !self.recent.contains(&path) {
-                    self.recent.push(path);
+            for place in recent.lines().filter(|line| !line.is_empty()) {
+                if !self.recent.iter().any(|recent| recent == place) {
+                    self.recent.push(place.to_owned());
                 }
             }
             self.recent.truncate(RECENT);
@@ -109,30 +117,27 @@ impl App {
         }
     }
 
-    /// Opens the capture at `path`, read with the ELF at `elf`, else the one
-    /// it holds or names; one whose ELF is not found waits for it. The
-    /// timeline shown is saved to and the new one restored from `storage`.
-    pub fn open(&mut self, path: &Path, elf: Option<&Path>, storage: Store<'_>) -> Result<()> {
-        let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    /// Opens the capture at `place`, a file or an URL, read with the ELF at
+    /// `elf`, else the one it holds or names; one whose ELF is not found
+    /// waits for it. The timeline shown is saved to and the new one restored
+    /// from `storage`.
+    pub fn open(&mut self, place: &str, elf: Option<&str>, storage: Store<'_>) -> Result<()> {
+        let bytes = capture::fetch(place)?;
         let image = match elf {
-            Some(elf) => {
-                let bytes = std::fs::read(elf).map_err(|error| format!("{}: {error}", elf.display()))?;
-                Image::Found(bytes, elf.display().to_string())
-            }
-            None => image(&path.display().to_string(), &bytes)?,
+            Some(elf) => Image::Found(capture::fetch(elf)?, elf.to_owned()),
+            None => image(place, &bytes)?,
         };
-        self.remember(path);
+        self.remember(place);
         match image {
             Image::Found(elf, name) => {
-                let timeline = self.load(path, &bytes, &elf, &name)?;
+                let timeline = self.load(place, &bytes, &elf, &name)?;
                 self.show(timeline, storage);
             }
-            Image::Missing { place, why } => {
+            Image::Missing(why) => {
                 self.leave(storage);
                 self.shown = Shown::Waiting(Waiting {
-                    capture: path.to_owned(),
+                    capture: place.to_owned(),
                     bytes,
-                    place,
                     why,
                 });
             }
@@ -141,19 +146,20 @@ impl App {
         Ok(())
     }
 
-    /// Reads the capture waiting for its ELF with the one at `path`.
-    fn give(&mut self, path: &Path, storage: Store<'_>) -> Result<()> {
+    /// Reads the capture waiting for its ELF with the one at `place`, a file
+    /// or an URL.
+    fn give(&mut self, place: &str, storage: Store<'_>) -> Result<()> {
         let Shown::Waiting(waiting) = &self.shown else {
             return Err("no capture waits for an ELF".into());
         };
-        let elf = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let timeline = self.load(&waiting.capture, &waiting.bytes, &elf, &path.display().to_string())?;
+        let elf = capture::fetch(place)?;
+        let timeline = self.load(&waiting.capture, &waiting.bytes, &elf, place)?;
         self.show(timeline, storage);
         self.error = None;
         Ok(())
     }
 
-    fn load(&self, path: &Path, bytes: &[u8], elf: &[u8], elf_name: &str) -> Result<Timeline> {
+    fn load(&self, place: &str, bytes: &[u8], elf: &[u8], elf_name: &str) -> Result<Timeline> {
         // The trace borrows the catalogue: each capture opened keeps its
         // catalogue until the window closes.
         let catalogue: &'static Catalogue =
@@ -161,11 +167,7 @@ impl App {
         let began = Instant::now();
         let trace = Trace::read(catalogue, bytes, self.options.clock)?;
         let read = began.elapsed();
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let timeline = Timeline::new(name, catalogue, trace, self.options.measure)?;
+        let timeline = Timeline::new(last(place).to_owned(), catalogue, trace, self.options.measure)?;
         if self.options.measure {
             println!(
                 "capture read in {:.0} ms, timeline built in {:.0} ms",
@@ -197,11 +199,15 @@ impl App {
         }
     }
 
-    /// Puts `path` first among the recent captures.
-    fn remember(&mut self, path: &Path) {
-        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
-        self.recent.retain(|recent| *recent != path);
-        self.recent.insert(0, path);
+    /// Puts `place` first among the recent captures, a file by its absolute
+    /// path.
+    fn remember(&mut self, place: &str) {
+        let place = match capture::is_url(place) {
+            true => place.to_owned(),
+            false => std::path::absolute(place).map_or_else(|_| place.to_owned(), |path| path.display().to_string()),
+        };
+        self.recent.retain(|recent| *recent != place);
+        self.recent.insert(0, place);
         self.recent.truncate(RECENT);
     }
 
@@ -210,10 +216,11 @@ impl App {
     fn dropped(&mut self, paths: Vec<PathBuf>, mut storage: Store<'_>) {
         for path in paths {
             let waiting = matches!(self.shown, Shown::Waiting(_));
+            let place = path.display().to_string();
             let result = if waiting && !starts_as_capture(&path) {
-                self.give(&path, storage.as_deref_mut())
+                self.give(&place, storage.as_deref_mut())
             } else {
-                self.open(&path, None, storage.as_deref_mut())
+                self.open(&place, None, storage.as_deref_mut())
             };
             self.attempt(result);
         }
@@ -231,7 +238,7 @@ impl App {
         match &self.shown {
             Shown::Nothing => "Kymo".to_owned(),
             Shown::Timeline(timeline) => format!("Kymo: {}", timeline.capture()),
-            Shown::Waiting(waiting) => format!("Kymo: {}", waiting.capture.display()),
+            Shown::Waiting(waiting) => format!("Kymo: {}", waiting.capture),
         }
     }
 
@@ -247,9 +254,10 @@ impl App {
         let Some(path) = dialog.add_filter("All files", &["*"]).pick_file() else {
             return;
         };
+        let place = path.display().to_string();
         let result = match pick {
-            Pick::Capture => self.open(&path, None, storage),
-            Pick::Elf => self.give(&path, storage),
+            Pick::Capture => self.open(&place, None, storage),
+            Pick::Elf => self.give(&place, storage),
         };
         self.attempt(result);
     }
@@ -265,31 +273,28 @@ fn starts_as_capture(path: &Path) -> bool {
 }
 
 /// The ELF of the capture `bytes`, called `name`: the one it holds, or the
-/// file it names.
+/// file or URL it names.
 fn image(name: &str, bytes: &[u8]) -> Result<Image> {
     if !capture::is_capture(bytes) {
         return Err(format!("{name} is not a Kymo capture").into());
     }
     Ok(match capture::header(bytes)?.elf {
         Elf::Embedded(elf) => Image::Found(elf, format!("the ELF in {name}")),
-        Elf::Reference(place) if capture::is_url(&place) => Image::Missing {
-            place,
-            why: "this kymo-ui does not fetch URLs".to_owned(),
-        },
-        Elf::Reference(place) => match std::fs::read(&place) {
+        Elf::Reference(place) => match capture::fetch(&place) {
             Ok(elf) => Image::Found(elf, place),
-            Err(error) => Image::Missing {
-                place,
-                why: error.to_string(),
-            },
+            Err(error) => Image::Missing(error.to_string()),
         },
     })
 }
 
+/// The last part of the path or URL `place`: a file's name.
+fn last(place: &str) -> &str {
+    place.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(place)
+}
+
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let recent: Vec<_> = self.recent.iter().map(|path| path.display().to_string()).collect();
-        storage.set_string(RECENTS, recent.join("\n"));
+        storage.set_string(RECENTS, self.recent.join("\n"));
         if let Shown::Timeline(timeline) = &self.shown {
             timeline.save(storage);
         }
@@ -332,27 +337,32 @@ impl eframe::App for App {
             }
         }
         let mut request = None;
-        let Self { shown, recent, .. } = self;
-        let mut files = |ui: &mut egui::Ui| files(ui, recent, &mut request);
-        let choose = match shown {
+        let Self {
+            shown,
+            recent,
+            url,
+            elf_url,
+            ..
+        } = self;
+        let mut files = |ui: &mut egui::Ui| files(ui, recent, url, &mut request);
+        let asked = match shown {
             Shown::Timeline(timeline) => {
                 timeline.ui(ui, frame, &mut files);
-                false
+                None
             }
             Shown::Nothing => empty(ui, &mut files, None),
-            Shown::Waiting(waiting) => empty(ui, &mut files, Some(waiting)),
+            Shown::Waiting(waiting) => empty(ui, &mut files, Some((waiting, elf_url))),
         };
-        if choose {
-            self.pick = Some(Pick::Elf);
-        }
-        match request {
-            Some(Request::Pick(pick)) => self.pick = Some(pick),
-            Some(Request::Open(path)) => {
-                let result = self.open(&path, None, frame.storage_mut());
-                self.attempt(result);
+        let result = match asked.or(request) {
+            Some(Request::Pick(pick)) => {
+                self.pick = Some(pick);
+                Ok(())
             }
-            None => {}
-        }
+            Some(Request::Open(place)) => self.open(&place, None, frame.storage_mut()),
+            Some(Request::Give(place)) => self.give(&place, frame.storage_mut()),
+            None => Ok(()),
+        };
+        self.attempt(result);
         let hovering = ctx.input(|input| !input.raw.hovered_files.is_empty());
         if hovering {
             drop_hint(&ctx, matches!(self.shown, Shown::Waiting(_)));
@@ -360,8 +370,9 @@ impl eframe::App for App {
     }
 }
 
-/// The toolbar's file controls: Open and the recent captures.
-fn files(ui: &mut egui::Ui, recent: &[PathBuf], request: &mut Option<Request>) {
+/// The toolbar's file controls: Open, the URL of a capture, and the recent
+/// captures.
+fn files(ui: &mut egui::Ui, recent: &[String], url: &mut String, request: &mut Option<Request>) {
     if ui
         .button("Open…")
         .on_hover_text("Open a capture (Ctrl+O), or drop one on the window")
@@ -369,35 +380,59 @@ fn files(ui: &mut egui::Ui, recent: &[PathBuf], request: &mut Option<Request>) {
     {
         *request = Some(Request::Pick(Pick::Capture));
     }
+    ui.menu_button("URL", |ui| {
+        ui.label("The URL of a capture");
+        if let Some(url) = url_field(ui, url, "Open") {
+            *request = Some(Request::Open(url));
+            ui.close();
+        }
+    });
     ui.add_enabled_ui(!recent.is_empty(), |ui| {
         ui.menu_button("Recent", |ui| {
-            if let Some(path) = recent_list(ui, recent) {
-                *request = Some(Request::Open(path));
+            if let Some(place) = recent_list(ui, recent) {
+                *request = Some(Request::Open(place));
                 ui.close();
             }
         });
     });
 }
 
-/// The recent captures, a button each; the one clicked.
-fn recent_list(ui: &mut egui::Ui, recent: &[PathBuf]) -> Option<PathBuf> {
-    let mut chosen = None;
-    for path in recent {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
+/// A field to paste an URL in and its button, labelled `go`; the URL, once
+/// the button is clicked or Enter pressed.
+fn url_field(ui: &mut egui::Ui, url: &mut String, go: &str) -> Option<String> {
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(url)
+                .hint_text("https://…")
+                .desired_width(360.0),
         );
-        if ui.button(name).on_hover_text(path.display().to_string()).clicked() {
-            chosen = Some(path.clone());
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let clicked = ui.add_enabled(!url.trim().is_empty(), egui::Button::new(go)).clicked();
+        ((entered || clicked) && !url.trim().is_empty()).then(|| url.trim().to_owned())
+    })
+    .inner
+}
+
+/// The recent captures, a button each; the one clicked.
+fn recent_list(ui: &mut egui::Ui, recent: &[String]) -> Option<String> {
+    let mut chosen = None;
+    for place in recent {
+        if ui.button(last(place)).on_hover_text(place).clicked() {
+            chosen = Some(place.clone());
         }
     }
     chosen
 }
 
-/// The window without a timeline: how to open a capture, or what the
-/// capture waiting for its ELF names; whether its ELF is to be chosen.
-fn empty(ui: &mut egui::Ui, files: &mut dyn FnMut(&mut egui::Ui), waiting: Option<&Waiting>) -> bool {
-    let mut choose = false;
+/// The window without a timeline: how to open a capture, or why the capture
+/// waiting for its ELF does not find it, with the URL of its ELF as typed;
+/// what is asked for the capture waiting.
+fn empty(
+    ui: &mut egui::Ui,
+    files: &mut dyn FnMut(&mut egui::Ui),
+    waiting: Option<(&Waiting, &mut String)>,
+) -> Option<Request> {
+    let mut asked = None;
     let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
     egui::Panel::top("toolbar").frame(frame).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -410,18 +445,27 @@ fn empty(ui: &mut egui::Ui, files: &mut dyn FnMut(&mut egui::Ui), waiting: Optio
         ui.vertical_centered(|ui| match waiting {
             None => {
                 ui.heading("Open a capture");
-                ui.label("Open… (Ctrl+O), drop a .kcap on the window, or pick a recent one.");
+                ui.label("Open… (Ctrl+O), drop a .kcap on the window, paste its URL, or pick a recent one.");
             }
-            Some(waiting) => {
-                ui.heading(format!("{}: its ELF is not found", waiting.capture.display()));
-                ui.label(format!("The capture names {}: {}.", waiting.place, waiting.why));
+            Some((waiting, elf_url)) => {
+                ui.heading(format!("{}: its ELF is not found", waiting.capture));
+                ui.label(format!("{}.", waiting.why));
                 ui.add_space(8.0);
-                choose = ui.button("Choose the ELF…").clicked();
-                ui.label("the one it was recorded with, or drop it on the window");
+                if ui.button("Choose the ELF…").clicked() {
+                    asked = Some(Request::Pick(Pick::Elf));
+                }
+                ui.label("the one it was recorded with, drop it on the window, or paste its URL:");
+                ui.scope(|ui| {
+                    // The field and its button, centred together.
+                    ui.set_max_width(440.0);
+                    if let Some(url) = url_field(ui, elf_url, "Fetch") {
+                        asked = Some(Request::Give(url));
+                    }
+                });
             }
         });
     });
-    choose
+    asked
 }
 
 /// Over the window while files are dragged over it: what dropping does.

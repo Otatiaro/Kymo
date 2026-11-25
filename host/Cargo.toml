@@ -9,6 +9,10 @@ publish = false
 [workspace]
 members = [".", "ui"]
 
+[features]
+# The local HTTP server of the tests that fetch URLs.
+served = []
+
 [dependencies]
 cpp_demangle = "0.6"
 gimli = { version = "0.34", default-features = false, features = ["read", "std"] }
@@ -18,6 +22,7 @@ probe-rs = { version = "0.32", default-features = false, features = ["builtin-ta
 roxmltree = { version = "0.21", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
