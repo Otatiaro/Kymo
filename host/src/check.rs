@@ -13,6 +13,7 @@
 use crate::stats::{self, Group, Point, Report};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -290,6 +291,21 @@ pub fn rules(text: &str) -> Result<(Vec<Rule>, Option<String>), String> {
         .map(|(n, written)| rule(written).map_err(|error| format!("rule {}: {error}", n + 1)))
         .collect::<Result<_, _>>()?;
     Ok((rules, file.baseline))
+}
+
+/// The rules of the rules file `text`, called `name` in errors, and the
+/// reference it names, read from `folder` when its path is relative.
+pub fn load(text: &str, name: &str, folder: &Path) -> Result<(Vec<Rule>, Option<Baseline>), String> {
+    let (read, reference) = rules(text).map_err(|error| format!("{name}: {error}"))?;
+    let reference = match reference {
+        None => None,
+        Some(path) => {
+            let path = folder.join(path);
+            let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            Some(baseline(&text).map_err(|error| format!("{}: {error}", path.display()))?)
+        }
+    };
+    Ok((read, reference))
 }
 
 /// What `kymo check` reads of a reference `kymo stats --json`.
