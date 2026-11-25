@@ -16,6 +16,7 @@
 #include <kymo/kymo.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -109,12 +110,12 @@ constexpr auto setpoints = [] {
 	std::array<axis::setpoint, samples + 1> points{};
 	for (std::int64_t n = 0; n <= samples; ++n)
 	{
-		std::int64_t const s = wave(n);
+		std::int64_t const level = wave(n);
 		points[static_cast<std::size_t>(n)] = axis::setpoint{
-			static_cast<std::int32_t>(s - 10000),
-			0xFFFF0000U + static_cast<std::uint32_t>(s),
-			s * -1000000007LL,
-			static_cast<std::int8_t>((s % 256) - 128),
+			static_cast<std::int32_t>(level - 10000),
+			0xFFFF0000U + static_cast<std::uint32_t>(level),
+			level * -1000000007LL,
+			static_cast<std::int8_t>((level % 256) - 128),
 			(n % 2) == 0,
 		};
 	}
@@ -125,7 +126,7 @@ constexpr auto setpoints = [] {
 constexpr auto gauges = [] {
 	std::array<gauge, samples / 4 + 1> readings{};
 	for (std::size_t n = 0; n < readings.size(); ++n)
-		readings[n] = gauge{static_cast<float>(n) - 3.0F, static_cast<double>(n) * -2.0 + 7.0};
+		readings[n] = gauge{static_cast<float>(n) - 3.0F, (static_cast<double>(n) * -2.0) + 7.0};
 	return readings;
 }();
 
