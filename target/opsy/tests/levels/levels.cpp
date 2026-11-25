@@ -24,6 +24,7 @@
 
 #include <fault_ring.hpp>
 #include <opsy.hpp>
+#include <opsy_trace.hpp>
 
 #include <array>
 #include <cstddef>
@@ -199,7 +200,7 @@ kymo::fault last_fault(std::uint32_t faults_before, const char* name)
 {
 	expect(g_faults == faults_before + 1, name);
 	kymo::fault event{};
-	expect(read_fault(opsy::hooks::fault_index, event), "no kymo::fault where the hook started writing");
+	expect(read_fault(trace_ring, opsy::hooks::fault_index, event), "no kymo::fault where the hook started writing");
 	return event;
 }
 

@@ -45,7 +45,7 @@ public:
 		kymo::opsy::hooks<::trace>::fault(status, frame, exc_return);
 
 		kymo::fault event{};
-		if (!read_fault(index, event))
+		if (!read_fault(trace_ring, index, event))
 			return;
 		bool const same_frame = event.r0 == frame.r0 && event.r1 == frame.r1 && event.r2 == frame.r2
 			&& event.r3 == frame.r3 && event.r12 == frame.r12 && event.lr == frame.lr && event.pc == frame.pc

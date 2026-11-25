@@ -14,6 +14,7 @@
  *     using trace = ::trace;
  *     }
  */
+#include <kymo/fault.hpp>
 #include <kymo/freertos/events.hpp>
 #include <kymo/freertos/trace.h>
 
@@ -203,6 +204,45 @@ void kymo_freertos_isr_enter()
 void kymo_freertos_isr_exit()
 {
 	trace::emit(isr_exit{exception()});
+}
+
+void kymo_freertos_fault(std::uint32_t const* frame, std::uint32_t exc_return)
+{
+	constexpr std::uint32_t process_stack = 1U << 2; // EXC_RETURN.SPSEL
+	constexpr std::uintptr_t cfsr = 0xE000ED28;
+	constexpr std::uintptr_t hfsr = 0xE000ED2C;
+	constexpr std::uintptr_t mmfar = 0xE000ED34;
+	constexpr std::uintptr_t bfar = 0xE000ED38;
+	// NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr,cppcoreguidelines-pro-bounds-pointer-arithmetic,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers): the fault registers at their fixed addresses, the frame the core stacked in its order
+	auto const status = [](std::uintptr_t address) { return *reinterpret_cast<std::uint32_t const volatile*>(address); };
+	auto const frame_address = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(frame));
+
+	// The main stack starts where the vector table says. A task's stack is
+	// FreeRTOS's own: its top is not known, and the 64 words past the frame
+	// are assumed readable.
+	std::uint32_t const top = (exc_return & process_stack) == 0 ? main_stack_top() : 0;
+	std::uint32_t const limit = top != 0 ? top : UINT32_MAX;
+
+	fault event{};
+	event.cfsr = status(cfsr);
+	event.hfsr = status(hfsr);
+	event.mmfar = status(mmfar);
+	event.bfar = status(bfar);
+	event.r0 = frame[0];
+	event.r1 = frame[1];
+	event.r2 = frame[2];
+	event.r3 = frame[3];
+	event.r12 = frame[4];
+	event.lr = frame[5];
+	event.pc = frame[6];
+	event.xpsr = frame[7];
+	// NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr,cppcoreguidelines-pro-bounds-pointer-arithmetic,cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+	event.exc_return = exc_return;
+	event.sp = frame_address;
+	event.stack_top = top;
+	if (frame_address < limit)
+		event.returns = fault_returns(frame_address, exc_return, limit);
+	trace::emit(event);
 }
 
 } // extern "C"
