@@ -305,10 +305,16 @@ endforeach()
 # What an emit costs, in instructions executed under QEMU, held against the
 # record of each CPU and level (cost/cost-<cpu>-<level>.json), the disabled
 # path included. QEMU counts instructions; cycles are measured on hardware.
-# The builds that ship: -Os and -O2, not the debug build.
+# The builds that ship: -Os and -O2, not the debug build. Clang's builds
+# (cmake/arm-none-eabi-clang.cmake) have no record: they hold the
+# application's events at the cost of the plain emit, nothing more.
 set(KYMO_COST_TOLERANCE 2 CACHE STRING "Instructions a case may cost over its record")
 foreach(cpu cortex-m33 cortex-m4)
 	foreach(level Os O2)
+		set(record --expected ${CMAKE_CURRENT_SOURCE_DIR}/cost/cost-${cpu}-${level}.json)
+		if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+			set(record "")
+		endif()
 		kymo_qemu_image(cost-${cpu}-${level} ${cpu} ${level} SOURCES cost/cost.cpp)
 		kymo_qemu_image(cost-baseline-${cpu}-${level} ${cpu} ${level} SOURCES cost/cost.cpp
 			DEFINITIONS KYMO_COST_BASELINE)
@@ -317,7 +323,7 @@ foreach(cpu cortex-m33 cortex-m4)
 			--nm ${KYMO_NM} --size ${KYMO_SIZE}
 			--image $<TARGET_FILE:cost-${cpu}-${level}>
 			--baseline $<TARGET_FILE:cost-baseline-${cpu}-${level}>
-			--expected ${CMAKE_CURRENT_SOURCE_DIR}/cost/cost-${cpu}-${level}.json
+			${record}
 			--tolerance ${KYMO_COST_TOLERANCE})
 	endforeach()
 endforeach()

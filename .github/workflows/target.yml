@@ -11,6 +11,8 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   TOOLCHAIN_VERSION: '16.2.0-1'
+  # Clang for the durations' portability (job clang), from apt.llvm.org.
+  LLVM_VERSION: '23'
   # The OpSy the adapter is tested against. A change on OpSy's side reaches
   # Kymo when this moves.
   OPSY_COMMIT: db01fd80420c9741469f4919b3a4905e249a921f
@@ -69,6 +71,56 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose
+
+  # The same application's events built by Clang, on the GNU toolchain's
+  # headers: they cost what the plain emit of their payload costs, their texts
+  # are read from the DWARF and stay off the target, and the durations decode.
+  clang:
+    name: Durations with Clang
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the arm-none-eabi toolchain
+        uses: Otatiaro/arm-none-eabi-toolchain@bdf7759e264645bbcf02cfb66596869ff8684821
+        with:
+          version: ${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Install Clang, ld.lld, Ninja and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build qemu-system-arm libudev-dev
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh ${{ env.LLVM_VERSION }}
+          sudo apt-get install -y lld-${{ env.LLVM_VERSION }}
+          echo "LLVM_ROOT=/usr/lib/llvm-${{ env.LLVM_VERSION }}" >> "$GITHUB_ENV"
+          /usr/lib/llvm-${{ env.LLVM_VERSION }}/bin/clang --version | head -1
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+
+      - name: Build the host
+        run: cargo build --release --manifest-path host/Cargo.toml
+
+      - name: Configure
+        run: >
+          cmake -S target/tests -B build
+          -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/target/cmake/arm-none-eabi-clang.cmake
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          targets=""
+          for cpu in cortex-m33 cortex-m4; do
+            for level in Os O2; do targets="$targets cost-$cpu-$level cost-baseline-$cpu-$level"; done
+            for level in Og Os Os-lto; do targets="$targets durations-$cpu-$level"; done
+          done
+          cmake --build build --parallel --target $targets
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --verbose -R "^(cost|durations|no-text)-"
 
   # The timeline, kymo-ui: its build, tests, format and lints, and the kymo
   # binary held free of its graphics stack.
