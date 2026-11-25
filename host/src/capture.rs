@@ -192,7 +192,8 @@ pub fn reference(place: &str) -> Result<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-fn is_url(place: &str) -> bool {
+/// Whether `place` is an http(s) URL rather than a file.
+pub fn is_url(place: &str) -> bool {
     place.starts_with("http://") || place.starts_with("https://")
 }
 

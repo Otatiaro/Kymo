@@ -5,8 +5,10 @@ use super::load::{Mode, Statistic};
 use eframe::egui;
 
 impl Timeline {
-    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, files: &mut dyn FnMut(&mut egui::Ui)) {
         ui.horizontal(|ui| {
+            files(ui);
+            ui.separator();
             ui.strong(&self.capture);
             ui.separator();
             let origin = self.origin();
@@ -70,7 +72,7 @@ fn range(selection: Option<(f64, f64)>, view: (f64, f64), time: impl Fn(f64) -> 
 }
 
 /// The theme's choices, in a menu named after the one chosen.
-fn theme_menu(ui: &mut egui::Ui) {
+pub fn theme_menu(ui: &mut egui::Ui) {
     let choices = [
         (egui::ThemePreference::System, "System"),
         (egui::ThemePreference::Light, "Light"),
