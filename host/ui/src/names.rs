@@ -83,9 +83,17 @@ pub fn by_namespace(subjects: &[Subject]) -> Vec<usize> {
     order
 }
 
+/// The namespace of a qualified `name`: its scopes but the last, the
+/// anonymous namespaces left out, joined by `::`; empty for the global
+/// namespace. A handler's interrupt, after its name, is part of the last.
+pub fn namespace(name: &str) -> String {
+    let scopes = scopes(name);
+    scopes[..scopes.len() - 1].join("::")
+}
+
 /// The scopes of a qualified `name`, the anonymous namespaces left out: a
 /// `::` inside template arguments or a parameter list separates none.
-fn scopes(name: &str) -> Vec<&str> {
+pub fn scopes(name: &str) -> Vec<&str> {
     let mut scopes = Vec::new();
     let (mut depth, mut start) = (0i32, 0);
     let bytes = name.as_bytes();
@@ -277,6 +285,21 @@ mod tests {
                 ("drv::spi::g_bus", 1),
             ]
         );
+    }
+
+    /// A namespace is the scopes but the last, without the anonymous ones;
+    /// a name without one, or an address, is in the global namespace.
+    #[test]
+    fn a_namespace_is_the_scopes_but_the_last() {
+        assert_eq!(
+            namespace("app::sensors::(anonymous namespace)::g_sampler"),
+            "app::sensors"
+        );
+        assert_eq!(namespace("app::sensors::timer_isr (IRQ45)"), "app::sensors");
+        assert_eq!(namespace("app::pool<drv::x>::slot"), "app::pool<drv::x>");
+        assert_eq!(namespace("(anonymous namespace)::g_x"), "");
+        assert_eq!(namespace("g_console"), "");
+        assert_eq!(namespace("0x20000010"), "");
     }
 
     /// Names alike once shortened, as statics of two translation units in

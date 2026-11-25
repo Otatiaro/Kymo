@@ -164,7 +164,7 @@ fn a_column_sorts_numbers_highest_first_then_the_other_way() {
     let subjects = |panel: &Panel| {
         let report = &panel.report.as_ref().unwrap().1;
         panel
-            .order(report)
+            .order(report, &|_, _| true)
             .into_iter()
             .map(|n| report.groups[n].subject.clone())
             .collect::<Vec<_>>()
@@ -180,6 +180,27 @@ fn a_column_sorts_numbers_highest_first_then_the_other_way() {
     assert_eq!(subjects(&panel), ["a", "b"]);
     panel.sort_by(Column::Subject);
     assert_eq!(subjects(&panel), ["b", "a"]);
+}
+
+/// A subject the filter hides leaves the table, read by its name in full.
+#[test]
+fn a_subject_hidden_leaves_the_table() {
+    let event = event();
+    let trace = trace(&event);
+    let full = HashMap::from([(("task", "b".to_owned()), "app::b".to_owned())]);
+    let mut panel = Panel::named(panel(&trace).instances, full);
+    panel.report(&trace, &[], &Covered::default(), Range::default());
+    let report = &panel.report.as_ref().unwrap().1;
+    let subjects = |shown: Shown| {
+        panel
+            .order(report, shown)
+            .into_iter()
+            .map(|n| report.groups[n].subject.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(subjects(&|kind, name| kind != "task" || name != "app::b"), ["a"]);
+    assert_eq!(subjects(&|_, name| name != "a"), ["b"]);
+    assert_eq!(subjects(&|_, _| false), Vec::<String>::new());
 }
 
 #[test]

@@ -408,9 +408,9 @@ impl Timeline {
         {
             // The wake, from the line of what woke the task to the task's
             // line, both shown; at the wake's column.
-            let row = |line: Line| lines.iter().position(|&other| other == line);
-            let to = line_at(pointer.y).and_then(|n| row(lines[n]));
-            if let Some((arrow, from, to)) = arrow.and_then(|arrow| Some((arrow, row(arrow.from)?, to?))) {
+            let to = line_at(pointer.y).map(|n| lines[n]);
+            let joined = arrow.and_then(|arrow| Some((arrow, rows::wake_rows(&lines, arrow.from, to?)?)));
+            if let Some((arrow, (from, to))) = joined {
                 let middle = |n: usize| area.top() + (tops[n] + tops[n + 1]) / 2.0;
                 let x = view.column(arrow.cycles) + 0.5;
                 if x >= area.left() && x < area.right() {

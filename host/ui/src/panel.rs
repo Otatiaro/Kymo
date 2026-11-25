@@ -56,6 +56,9 @@ impl Column {
     }
 }
 
+/// Whether a subject is shown, by its kind and its name in full.
+pub type Shown<'a> = &'a dyn Fn(&str, &str) -> bool;
+
 /// What tells a group from the others, whatever the range.
 type Key = (&'static str, String, &'static str, Option<String>);
 
@@ -132,10 +135,16 @@ impl Panel {
         }
     }
 
-    /// The groups of `report` in the table's order; equals keep the
-    /// report's.
-    pub fn order(&self, report: &Report) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..report.groups.len()).collect();
+    /// The groups of `report` in the table's order, those whose subject
+    /// `shown` hides left out; equals keep the report's.
+    pub fn order(&self, report: &Report, shown: Shown) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..report.groups.len())
+            .filter(|&n| {
+                let group = &report.groups[n];
+                let full = self.full.get(&(group.kind, group.subject.clone()));
+                shown(group.kind, full.unwrap_or(&group.subject))
+            })
+            .collect();
         order.sort_by(|&a, &b| {
             let (a, b) = (&report.groups[a], &report.groups[b]);
             let ordering = match self.sort {
@@ -159,9 +168,9 @@ impl Panel {
         })
     }
 
-    /// The table, then the chosen group's worst instances. Returns the
-    /// instance clicked, if any.
-    pub fn show(&mut self, ui: &mut egui::Ui, title: &str) -> Option<Instance> {
+    /// The table of the groups `shown` keeps, then the chosen group's worst
+    /// instances. Returns the instance clicked, if any.
+    pub fn show(&mut self, ui: &mut egui::Ui, title: &str, shown: Shown) -> Option<Instance> {
         let Some((_, report)) = &self.report else {
             return None;
         };
@@ -180,11 +189,12 @@ impl Panel {
             ));
         });
         ui.separator();
-        let order = self.order(report);
+        let order = self.order(report, shown);
         let chosen_group = self
             .chosen
             .as_ref()
-            .and_then(|chosen| report.groups.iter().position(|group| key(group) == *chosen));
+            .and_then(|chosen| report.groups.iter().position(|group| key(group) == *chosen))
+            .filter(|n| order.contains(n));
         if let Some(n) = chosen_group {
             egui::Panel::right("worst")
                 .resizable(true)

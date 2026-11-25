@@ -3,6 +3,7 @@
 
 #[cfg(windows)]
 mod background;
+mod filter;
 mod levels;
 mod listing;
 mod meaning;
@@ -74,6 +75,15 @@ the p99 and the max marked \"≥\" when instances were excluded. Clicking a
 min or a max, or one of the worst instances a subject lists when clicked,
 centres the timeline on that instance and frames it.
 
+The toolbar's Namespaces button opens the tree of the namespaces of the
+image's subjects and event types, a box each, all ticked at first; it is
+marked while one is not. Unticking a namespace unticks those nested in it,
+and hides their subjects' and types' rows, the arrows to those rows, their
+subjects' statistics, and the events whose type and subjects named are all
+unticked; the CPU's and idle's rows stay. Its \"only\" button ticks it alone,
+with its nested ones; All ticks them all. The namespaces unticked are kept
+for the next runs, those of the image.
+
 The toolbar names the capture and the range shown, the selection's or else
 the view's; its × clears the selection, its Whole button shows the whole
 capture. The theme follows the system's unless chosen in its menu; the
@@ -140,7 +150,7 @@ fn run() -> Result<()> {
         || capture.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let timeline = timeline::Timeline::new(name, catalogue, trace, measure)?;
+    let mut timeline = timeline::Timeline::new(name, catalogue, trace, measure)?;
     if measure {
         println!(
             "capture read in {:.0} ms, timeline built in {:.0} ms",
@@ -181,6 +191,12 @@ fn run() -> Result<()> {
             }
             #[cfg(windows)]
             background::set(context, ctx.global_style().visuals.panel_fill);
+            // The frames measured are those of the whole trace.
+            if let Some(saved) = context.storage.and_then(|storage| storage.get_string(timeline::FILTER))
+                && !measure
+            {
+                timeline.restore(&saved);
+            }
             Ok(Box::new(timeline))
         }),
     )?;
