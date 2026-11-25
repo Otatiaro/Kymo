@@ -33,8 +33,16 @@ What makes an instance, from OpSy's events (ADR-062):
   mutex_blocked to the waiter's mutex_taken or task_terminated; each in total
   and by task.
 
+What makes a duration of the application's, of no context of OpSy's
+(ADR-088): an end_of<T> closes the last begin_of<T> still open, a
+keyed_end_of<T> the keyed_begin_of<T> of its kymo_key. An end that closes
+nothing, and a key begun while open, are contradictions; the later begin
+replaces the earlier.
+
 A loss ends what is open at it, and what ends after it with no start seen
-starts at it. What is still open at the last event ends there, open.
+starts at it; a duration's end with no begin seen after it is no
+contradiction, and makes no instance. What is still open at the last event
+ends there, open.
 
 Over the range [low, high) in cycles: an instance inside counts, unless it
 touches a loss or covers an overrun write; one across an edge of the range,
@@ -55,6 +63,7 @@ KERNEL = {"enter_systick": "systick", "exit_systick": "systick",
 ARCHITECTURE = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault",
                 7: "SecureFault", 11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
 FIRST_IRQ = 16
+DURATION = re.compile(r"kymo::(keyed_)?(begin|end)_of<(.+)>")
 
 
 def interrupt_names(events: str) -> dict[int, str]:
@@ -102,8 +111,10 @@ def elements(decoded: str) -> tuple[int, list[dict]]:
 def spans(first: int, items: list[dict], names: dict[int, str]) -> dict:
     """OpSy's activations, wakes, runs, interrupts, holds and contradictions;
     a handler's subject names its interrupt from `names` (handler_subject)."""
-    found = {"activations": [], "wakes": [], "runs": [], "interrupts": [], "holds": [], "contradictions": []}
+    found = {"activations": [], "wakes": [], "runs": [], "interrupts": [], "holds": [], "durations": [],
+             "contradictions": []}
     running = None  # (task or None for idle, since), None while unknown
+    begun = {}  # (type, key or None): [since], the last begun last
     entered = []  # (subject, since, handler), innermost last
     held = {}  # mutex: (task, since)
     waiting = {}  # (mutex, task): since
@@ -144,6 +155,23 @@ def spans(first: int, items: list[dict], names: dict[int, str]) -> dict:
             found["holds"].append((mutex, task, True, since, edge, is_open))
         for task, (since, reason, cause) in ready.items():
             found["activations"].append((task, reason, cause, since, edge, is_open))
+        for (of, _), stack in begun.items():
+            for since in stack:
+                found["durations"].append((of, since, edge, is_open))
+
+    def duration(n, edge, match, values):
+        keyed, begins, of = match.groups()
+        key = (of, values["kymo_key"] if keyed else None)
+        if begins == "begin":
+            stack = begun.setdefault(key, [])
+            if keyed and stack:
+                found["contradictions"].append(n)
+                stack.clear()
+            stack.append(edge)
+        elif begun.get(key):
+            found["durations"].append((of, begun[key].pop(), edge, False))
+        elif loss is None:
+            found["contradictions"].append(n)
 
     for n, item in enumerate(items):
         if item["kind"] == "suspect":
@@ -157,13 +185,16 @@ def spans(first: int, items: list[dict], names: dict[int, str]) -> dict:
         if hidden is not None:
             close_all(hidden, False)
             seen = set(ready)
-            running, entered, held, waiting, ready, loss = None, [], {}, {}, {}, hidden
+            running, entered, held, waiting, ready, begun, loss = None, [], {}, {}, {}, {}, hidden
         if item["kind"] == "lost":
             continue
         edge = (n, item["cycles"], False)
         last = edge
         name, values = item["name"], item["values"]
-        if name in ("task_started", "enter_idle"):
+        match = DURATION.fullmatch(name)
+        if match:
+            duration(n, edge, match, values)
+        elif name in ("task_started", "enter_idle"):
             if running is not None:
                 found["runs"].append((running[0], running[1], edge, False))
             running = (values.get("task"), edge)
@@ -311,6 +342,9 @@ def instances(found: dict) -> list[tuple]:
         metric = "wait" if waits else "hold"
         out.append(("mutex", mutex, metric, None, to[1] - since[1], since, to, is_open))
         out.append(("mutex", mutex, metric, task, to[1] - since[1], since, to, is_open))
+
+    for of, since, to, is_open in found["durations"]:
+        out.append(("duration", of, "duration", None, to[1] - since[1], since, to, is_open))
     return out
 
 

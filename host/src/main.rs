@@ -2,7 +2,7 @@
 
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{capture, check, decode, events, meaning, record, stats};
+use kymo::{capture, check, decode, durations, events, meaning, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -84,6 +84,8 @@ decode --meaning names it: handler:<name>, task:<name>, elapsed, unknown), time
 preempted by tasks and by handlers, net and gross execution, response time;
 and the period, from a task_ready to the next. For each handler: gross and
 net duration, period. For each mutex: holds and waits, by task and in total.
+For each type of the application's durations, its subject the event type it
+is of: each duration, from its begin to its end.
 A line each: the count, the min, the percentiles 50, 90 and 99 by nearest
 rank, the max, the mean; the jitter of a period, max - min; the share of the
 time known that a net execution takes, the time known being when the task on
@@ -232,7 +234,16 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         return Err(format!("{copy} is not a capture of kymo record").into());
     }
     let trace = Trace::read(&catalogue, &bytes, clock)?;
-    let kernel = meaning::Meaning::of_trace(&catalogue, &trace)?;
+    let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
+    let durations = durations::pair(&trace);
+    let has_durations = catalogue
+        .events
+        .values()
+        .any(|event| events::Duration::of(&event.name).is_some());
+    if !kernel.traced() && !has_durations {
+        return Err("the image has neither kernel adapter events nor durations".into());
+    }
+    kernel.add(&trace.elements, 0);
     let origin = trace.elements.iter().find_map(|element| match element {
         Element::Event { cycles, .. } => Some(*cycles),
         _ => None,
@@ -250,9 +261,13 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
         from: cycles(from)?,
         to: cycles(to)?,
     };
+    let mut instances = meaning::instances(&kernel);
+    instances.extend(durations.instances);
+    let mut contradictions = kernel.contradictions.clone();
+    contradictions.extend(durations.contradictions);
     let found = stats::Found {
-        instances: &meaning::instances(&kernel),
-        contradictions: &kernel.contradictions,
+        instances: &instances,
+        contradictions: &contradictions,
         known: &kernel.known(),
     };
     Ok(stats::compute(&trace, found, range, worst))

@@ -11,7 +11,8 @@ suite's exit (QEMU would leave there), set through QEMU's GDB stub, so that
 the recording holds the whole suite; then the recording stops. Then checks
 that:
 
-- every event is one of the adapter's, with its fields;
+- every event is one of the adapter's, or of the application's durations
+  (durations_check.cpp), with its fields;
 - every task, condition variable, mutex and handler is named from the ELF,
   never printed in hexadecimal;
 - the task an event says is running is the one the scheduler last put on the
@@ -33,7 +34,9 @@ that:
   delay and by a mutex released;
 - `kymo stats --json`, on the whole capture and on its middle half, gives
   what oracle.py computes from the event lines `kymo decode` prints: every
-  group, its counts, percentiles, histogram and worst instances.
+  group, its counts, percentiles, histogram and worst instances; and the
+  handover a task begins and a handler ends after the task's end is one
+  duration, with no contradiction.
 
 After a loss, the running task, the waiting ones, the open interrupts and the
 priorities are unknown until seen again: a check that needs them is skipped
@@ -86,7 +89,16 @@ EVENTS = {
     "mutex_released": ("exclusion", ["mutex", "owner"]),
     "mutex_blocked": ("exclusion", ["mutex", "waiter"]),
 }
-DEFAULT_FAMILIES = {"scheduling", "causality", "interrupts", "exclusion"}
+# The application's events, of durations_check.cpp: their fields, in order.
+APPLICATION = {
+    "kymo::begin_of<handover>": ["item"],
+    "kymo::end_of<handover>": [],
+    "kymo::begin_of<job>": ["number"],
+    "kymo::end_of<job>": [],
+}
+# Its durations: how many of each.
+DURATIONS = {"handover": 1, "job": 2}
+DEFAULT_FAMILIES = {"scheduling", "causality", "interrupts", "exclusion", "application"}
 POINTERS = {"task", "condition", "mutex", "owner", "waiter", "handler"}
 # The field holding the task that must be the running one.
 RUNNING = {"task_sleep": "task", "task_wait": "task", "task_wait_timeout": "task"}
@@ -134,6 +146,11 @@ def check(output: str) -> list[str]:
         if name is None:
             running, known, open_isrs = UNKNOWN, set(), [None]
             priorities.clear()
+            continue
+        if name in APPLICATION:
+            families.add("application")
+            if [field for field, _ in fields] != APPLICATION[name]:
+                errors.append(f"{line}: expected the fields {APPLICATION[name]}")
             continue
         if not name.startswith(PREFIX) or name[len(PREFIX):] not in EVENTS:
             errors.append(f"{line}: not an event of the adapter")
@@ -438,12 +455,19 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
                                 ("middle", middle, oracle.report(clocked, low, high, WORST, names))):
         errors += [f"stats {name}: {error}" for error in oracle.compare(expected, got)]
     kinds = {kind: sum(group["count"] for group in whole["groups"] if group["kind"] == kind)
-             for kind in ("task", "handler", "mutex")}
+             for kind in ("task", "handler", "mutex", "duration")}
     cut = sum(group["cut"] for group in middle["groups"])
     print(f"stats: {len(whole['groups'])} groups, instances {kinds}, cycles {whole['from']} to {whole['to']}, "
           f"{cut} cut by the middle half")
     if 0 in kinds.values():
         errors.append(f"the recording left a kind of instance unexercised: {kinds}")
+    # The handover begun by a task and ended by a handler after the task's
+    # end pairs as the jobs within it do, without contradicting anything.
+    durations = {group["subject"]: (group["count"], group["cut"]) for group in whole["groups"]
+                 if group["kind"] == "duration"}
+    if durations != {subject: (count, 0) for subject, count in DURATIONS.items()} or whole["contradictions"]:
+        errors.append(f"durations (count, cut) {durations} and {whole['contradictions']} contradictions, "
+                      f"not {DURATIONS} and none")
     # QEMU leaves the cycle counter at 0: every duration is 0, the range cuts
     # nothing, and only the board's recording checks them.
     if whole["to"] > whole["from"] and cut == 0:

@@ -5,6 +5,7 @@
 pub mod capture;
 pub mod check;
 pub mod decode;
+pub mod durations;
 pub mod elf;
 pub mod events;
 pub mod format;

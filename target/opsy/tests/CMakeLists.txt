@@ -50,6 +50,8 @@ target_include_directories(opsy_untraced PRIVATE ${KYMO_OPSY_DIR}/tests/qemu ${k
 
 # The adapter's events read back from the ring, as a case of OpSy's suite.
 target_sources(opsy_qemu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ring_check.cpp)
+# The application's durations across OpSy's contexts, as a case of the suite.
+target_sources(opsy_qemu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/durations_check.cpp)
 
 # OpSy's suite recorded by the host through QEMU's monitor, and the trace
 # checked against what the scheduler does (trace/trace.py). It needs the host

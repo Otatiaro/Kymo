@@ -74,6 +74,28 @@ enumeration (written by name) or a `char` array (written up to its first NUL);
 `{{` and `}}` write a brace. `kymo events` refuses an image whose text names a
 field the event lacks, or gives a field a specification its type does not take.
 
+An event type is also a duration. `trace::begin` opens one with the event's
+fields and `trace::end<Event>()` closes the last one of that type still open;
+`trace::scope` closes it at the end of a block. Begin and end may come from
+any context (a task, a handler, another task): the host pairs them, not the
+target. Durations that overlap in any order take a key, which the event's text
+names `{kymo_key}`:
+
+```cpp
+struct batch
+{
+    std::uint32_t id;
+    static constexpr char kymo_text[] = "batch {id} in buffer {kymo_key}";
+};
+
+trace::begin(batch{7}, buffer);   // in the producer
+trace::end<batch>(buffer);        // in the consumer's handler
+```
+
+`kymo stats` and `kymo check` give each type its `duration`. An end with
+nothing open, a key opened twice or closed while not open is counted as a
+contradiction; a duration still open when the recording ends is cut.
+
 The program enables the DWT cycle counter, which timestamps the events. An
 RTOS adapter emits the kernel's events through the same tracer:
 `target/opsy/include/kymo/opsy/hooks.hpp` for OpSy,

@@ -42,7 +42,7 @@ pub struct Metric {
 /// A subject's metric between two edges of the trace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instance {
-    /// What the subject is: task, handler, mutex.
+    /// What the subject is: task, handler, mutex, duration.
     pub kind: &'static str,
     pub subject: String,
     pub metric: Metric,

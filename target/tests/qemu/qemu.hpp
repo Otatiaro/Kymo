@@ -37,8 +37,13 @@ inline void write_unsigned(std::uint32_t value)
 	write(&digits[index]);
 }
 
-/** @brief SYS_EXIT_EXTENDED: QEMU exits with status 0 for 0, 1 otherwise. */
-[[noreturn]] inline void exit(int code)
+/**
+ * @brief SYS_EXIT_EXTENDED: QEMU exits with status 0 for 0, 1 otherwise.
+ *
+ * Out of line at every optimisation level: record.py halts the image on a
+ * breakpoint at this function, before QEMU leaves.
+ */
+[[noreturn, gnu::noinline]] inline void exit(int code)
 {
 	std::array<std::uint32_t, 2> const parameters{0x20026U, static_cast<std::uint32_t>(code)};   // ADP_Stopped_ApplicationExit
 	semihosting_call(0x20, parameters.data());
