@@ -436,6 +436,7 @@ fn the_rules_fit_the_schema_and_its_checks_catch_what_they_should() {
         PERIOD,
         HOLD,
         WAIT,
+        crate::durations::DURATION,
     ]
     .iter()
     .map(|metric| Json::String(metric.name.to_owned()))

@@ -150,7 +150,7 @@ endforeach()
 #   fields' values (std::format's specifications), against what the image
 #   says; text-bad, a text naming a field its event lacks, refused.
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
-foreach(test layout decode record symbols text text-bad)
+foreach(test layout decode record symbols text text-bad durations)
 	string(REGEX REPLACE "-bad$" "" source ${test})
 	set(definitions "")
 	set(option "")

@@ -77,6 +77,43 @@ pub struct Event {
     pub text: Option<Text>,
 }
 
+/// The member of a duration's begin that holds the event it is of.
+const DURATION_EVENT: &str = "event";
+/// The member of a keyed duration's begin and end that holds its key.
+pub const DURATION_KEY: &str = "kymo_key";
+
+/// An edge of a duration: an event of type `kymo::begin_of<Event>`,
+/// `kymo::end_of<Event>`, or their keyed variants (target/include/kymo/kymo.hpp).
+/// A begin's fields are its key, if any, then those of the event it is of,
+/// and its text that event's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Duration {
+    /// The qualified name of the event the duration is of.
+    pub of: String,
+    pub begins: bool,
+    pub keyed: bool,
+}
+
+impl Duration {
+    /// The duration an event type named `name` is an edge of, if it is one.
+    pub fn of(name: &str) -> Option<Self> {
+        const EDGES: [(&str, bool, bool); 4] = [
+            ("kymo::begin_of<", true, false),
+            ("kymo::end_of<", false, false),
+            ("kymo::keyed_begin_of<", true, true),
+            ("kymo::keyed_end_of<", false, true),
+        ];
+        EDGES.iter().find_map(|&(prefix, begins, keyed)| {
+            let of = name.strip_prefix(prefix)?.strip_suffix('>')?.trim_end();
+            Some(Self {
+                of: of.to_owned(),
+                begins,
+                keyed,
+            })
+        })
+    }
+}
+
 /// A static object of type `kymo::ring<Slots>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ring {
@@ -150,17 +187,44 @@ pub fn read(path: &Path) -> Result<Catalogue> {
             .collect::<String>();
         return Err(format!("{}: no event type ids (.kymo.ids){hints}", path.display()).into());
     }
-    let debug = debug_info(&file, ids.values().map(String::as_str).collect())?;
+    let durations: Vec<Duration> = ids.values().filter_map(|name| Duration::of(name)).collect();
+    let wanted = ids
+        .values()
+        .map(String::as_str)
+        .chain(durations.iter().map(|duration| duration.of.as_str()))
+        .collect();
+    let debug = debug_info(&file, wanted)?;
+    let layout = |name: &str, id: u16| {
+        debug.layouts.get(name).cloned().ok_or_else(|| {
+            format!(
+                "{name} (id {id}): no structure of that name in the DWARF \
+                 (an image built without -g, or a class template, whose arguments \
+                 the DWARF spells its own way)"
+            )
+        })
+    };
     let events = ids
         .into_iter()
         .map(|(id, name)| {
-            let (size, fields, template) = debug.layouts.get(&name).cloned().ok_or_else(|| {
-                format!(
-                    "{name} (id {id}): no structure of that name in the DWARF \
-                     (an image built without -g, or a class template, whose arguments \
-                     the DWARF spells its own way)"
-                )
-            })?;
+            let (size, mut fields, mut template) = layout(&name, id)?;
+            if let Some(duration) = Duration::of(&name)
+                && duration.begins
+            {
+                // The fields of the event the duration is of, where they lie
+                // in the begin, after its key; and that event's text.
+                let event = fields
+                    .iter()
+                    .find(|field| field.name == DURATION_EVENT)
+                    .map(|field| field.offset)
+                    .ok_or_else(|| format!("{name}: no member {DURATION_EVENT}"))?;
+                let (_, inner, text) = layout(&duration.of, id)?;
+                fields.retain(|field| field.name != DURATION_EVENT);
+                fields.extend(inner.into_iter().map(|field| Field {
+                    offset: event + field.offset,
+                    ..field
+                }));
+                template = text;
+            }
             let text = template
                 .map(|template| Text::parse(&template, &fields))
                 .transpose()
@@ -237,9 +301,12 @@ fn type_ids(file: &object::File) -> Result<BTreeMap<u16, String>> {
             .map_err(|error| format!("{mangled}: {error}"))?
             .demangle()
             .map_err(|error| format!("{mangled}: {error}"))?;
+        // The demangler closes a template within a template with "> >", as
+        // the DWARF does, leaving a space before the anchor's ">".
         let name = demangled
             .strip_prefix(ANCHOR_PREFIX)
             .and_then(|rest| rest.strip_suffix(ANCHOR_SUFFIX))
+            .map(str::trim_end)
             .ok_or_else(|| format!("{demangled}: not a kymo::anchor"))?;
         let id = u16::try_from(symbol.address() - section.address())?;
         if let Some(other) = ids.insert(id, name.to_owned()) {
