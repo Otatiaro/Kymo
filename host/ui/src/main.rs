@@ -25,11 +25,12 @@ const USAGE: &str = "\
 usage: kymo-ui <elf> <capture> [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
 
 Shows a capture made by kymo record --out: one row per event type of the
-image, the gaps (slots lost) and the overrun writes (a write interrupted for
-a full ring lap: events recorded near it may be wrong) marked across the
-rows. Wheel: zoom at the pointer; drag or horizontal wheel: scroll; double
-click: the whole capture. Hovering an event shows its time, index and
-fields, a subject by the name its row shows.
+image, the gaps (slots lost) marked across the rows in grey edged in red, a
+red line where narrower than a pixel, and the overrun writes (a write
+interrupted for a full ring lap: events recorded near it may be wrong) in
+light orange. Wheel: zoom at the pointer; drag or horizontal wheel: scroll;
+double click: the whole capture. Hovering an event shows its time, index
+and fields, a subject by the name its row shows.
 
 An image with a kernel adapter (OpSy's or FreeRTOS's) shows, instead of
 the event rows (its events are in the event list), lines that fill the

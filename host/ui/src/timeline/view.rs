@@ -50,6 +50,17 @@ impl View {
     }
 }
 
+/// A loss's band from column `from` to `to`, drawn: the columns its grey
+/// fills, if any, and its red edges, a column each, its first and its last.
+/// A band a pixel wide is only a red edge.
+pub(super) fn edged((from, to): (f32, f32)) -> (Option<(f32, f32)>, Vec<f32>) {
+    if to - from <= 1.0 {
+        return (None, vec![from]);
+    }
+    let fill = (to - from > 2.0).then_some((from + 1.0, to - 1.0));
+    (fill, vec![from, to - 1.0])
+}
+
 /// The widest view of a capture from `first` to `last` cycles.
 pub(super) fn widest(first: f64, last: f64) -> f64 {
     ((last - first) * 1.05).max(NARROWEST)
@@ -139,6 +150,28 @@ mod tests {
             let (start, span) = centred(at, 1000.0, 0.0, 1e6);
             assert_eq!(span, 1000.0);
             assert!(start <= at && at <= start + span, "{at}: {start} {span}");
+        }
+    }
+
+    /// A loss's band is grey between two red edges, each a column inside
+    /// it; a band a pixel wide is a red edge alone, two pixels wide two
+    /// edges and no grey.
+    #[test]
+    fn a_loss_is_grey_edged_in_red_or_a_red_line() {
+        assert_eq!(edged((10.0, 11.0)), (None, vec![10.0]));
+        assert_eq!(edged((10.0, 12.0)), (None, vec![10.0, 11.0]));
+        assert_eq!(edged((10.0, 13.0)), (Some((11.0, 12.0)), vec![10.0, 12.0]));
+        assert_eq!(edged((10.0, 50.0)), (Some((11.0, 49.0)), vec![10.0, 49.0]));
+        // Every column of the band is painted, once.
+        for to in 11..60 {
+            let (fill, edges) = edged((10.0, to as f32));
+            let mut columns: Vec<f32> = edges.clone();
+            if let Some((from, to)) = fill {
+                columns.extend((from as i32..to as i32).map(|x| x as f32));
+            }
+            columns.sort_by(f32::total_cmp);
+            let expected: Vec<f32> = (10..to).map(|x| x as f32).collect();
+            assert_eq!(columns, expected, "to {to}");
         }
     }
 

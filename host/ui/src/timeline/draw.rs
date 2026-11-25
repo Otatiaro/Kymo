@@ -3,7 +3,7 @@
 use super::load::{self, Drawn};
 use super::rows;
 use super::rows::Line;
-use super::view::{View, ticks};
+use super::view::{View, edged, ticks};
 use super::{LABELS, RULER, Timeline};
 use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
@@ -83,7 +83,7 @@ impl Timeline {
         let grid = visuals.widgets.noninteractive.bg_stroke.color;
         let palette = Palette::of(visuals);
         // The time unknown on the CPU's line, in the colour of the losses' bands.
-        let lost = palette.loss.gamma_multiply(BAND);
+        let lost = palette.lost;
         let labels = ui.painter_at(Rect::from_min_max(
             egui::pos2(rect.left(), area.top()),
             egui::pos2(area.left() - 4.0, rect.bottom()),
@@ -306,20 +306,34 @@ impl Timeline {
                 }
             }
         }
-        // A loss or a suspect line: a light band over the rows, the data
-        // readable through it, and a solid mark in the ruler.
+        // A loss: a grey band over the rows, edged in red, or a red line
+        // where it is a pixel wide. A suspect line: a light band, the data
+        // readable through it. Each with a solid mark in the ruler.
         let mut flags = Vec::new();
-        for (kind, color) in [(false, palette.loss), (true, palette.suspect)] {
+        let column = |from: f32, to: f32, color: Color32| {
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(from, area.top()), egui::pos2(to, bottom)),
+                0.0,
+                color,
+            );
+        };
+        for (suspect, color) in [(false, palette.loss), (true, palette.suspect)] {
             let marks = self
                 .marks()
-                .filter(|mark| matches!(self.trace.elements[mark.element], Element::Suspect { .. }) == kind);
-            for (from, to) in view.bands(marks) {
-                painter.rect_filled(
-                    Rect::from_min_max(egui::pos2(from, area.top()), egui::pos2(to, bottom)),
-                    0.0,
-                    color.gamma_multiply(BAND),
-                );
-                flags.push(((from + to) / 2.0, color));
+                .filter(|mark| matches!(self.trace.elements[mark.element], Element::Suspect { .. }) == suspect);
+            for band in view.bands(marks) {
+                if suspect {
+                    column(band.0, band.1, color.gamma_multiply(BAND));
+                } else {
+                    let (fill, edges) = edged(band);
+                    if let Some((from, to)) = fill {
+                        column(from, to, palette.lost);
+                    }
+                    for x in edges {
+                        column(x, x + 1.0, color);
+                    }
+                }
+                flags.push(((band.0 + band.1) / 2.0, color));
             }
         }
         // The range selected, shaded; the instance picked, framed: each at
