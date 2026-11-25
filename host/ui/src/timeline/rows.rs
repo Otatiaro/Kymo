@@ -66,6 +66,47 @@ impl Line {
     }
 }
 
+/// The lines of an image with a kernel adapter, of the `tasks`, `handlers`
+/// and `mutexes` in order, those `shown` keeps: the CPU's load first and
+/// idle last of its section, whatever `shown` says; a section without a
+/// line kept left out.
+pub(super) fn kernel_lines(
+    tasks: Vec<usize>,
+    handlers: Vec<usize>,
+    mutexes: Vec<usize>,
+    shown: impl Fn(Line) -> bool,
+) -> Vec<Line> {
+    let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
+    lines.extend(
+        tasks
+            .into_iter()
+            .map(|task| Line::Task(Some(task)))
+            .filter(|&line| shown(line)),
+    );
+    lines.push(Line::Task(None));
+    for (name, section) in [
+        (
+            "INTERRUPTS",
+            handlers.into_iter().map(Line::Handler).collect::<Vec<_>>(),
+        ),
+        ("MUTEXES", mutexes.into_iter().map(Line::Mutex).collect()),
+    ] {
+        let kept: Vec<Line> = section.into_iter().filter(|&line| shown(line)).collect();
+        if !kept.is_empty() {
+            lines.push(Line::Section(name));
+            lines.extend(kept);
+        }
+    }
+    lines
+}
+
+/// The lines a wake's arrow joins, from the line of what woke the task to
+/// the task's: none when either is not shown.
+pub(super) fn wake_rows(lines: &[Line], from: Line, to: Line) -> Option<(usize, usize)> {
+    let row = |line: Line| lines.iter().position(|&other| other == line);
+    Some((row(from)?, row(to)?))
+}
+
 /// The top of each of `lines` below the top of the first, then the bottom of
 /// the last, in `room` pixels: each line its height, the lines other than
 /// sections stretched alike to fill the room they leave.
@@ -151,30 +192,39 @@ impl Timeline {
         }
     }
 
-    /// The lines: the CPU's load, the kernel's sections, the tasks by priority,
-    /// highest first, the handlers and the mutexes by namespace (names.rs); the rows of event types without a kernel adapter, which
-    /// the event list shows with one.
+    /// The lines the namespace filter shows: the CPU's load, the kernel's
+    /// sections, the tasks by priority, highest first, the handlers and the
+    /// mutexes by namespace (names.rs); the rows of event types without a
+    /// kernel adapter, which the event list shows with one.
     pub(super) fn lines(&self) -> Vec<Line> {
+        let shown = |line: Line| self.line_shown(line);
         let Some(meaning) = &self.meaning else {
-            return (0..self.rows.len()).map(Line::Event).collect();
+            return (0..self.rows.len())
+                .map(Line::Event)
+                .filter(|&line| shown(line))
+                .collect();
         };
         let kernel = &meaning.kernel;
-        let mut lines = vec![Line::Cpu, Line::Section("TASKS")];
-        lines.extend(tasks(meaning).into_iter().map(|task| Line::Task(Some(task))));
-        lines.push(Line::Task(None));
-        if !kernel.handlers.list.is_empty() {
-            lines.push(Line::Section("INTERRUPTS"));
-            lines.extend(
-                names::by_namespace(&kernel.handlers.list)
-                    .into_iter()
-                    .map(Line::Handler),
-            );
-        }
-        if !kernel.mutexes.list.is_empty() {
-            lines.push(Line::Section("MUTEXES"));
-            lines.extend(names::by_namespace(&kernel.mutexes.list).into_iter().map(Line::Mutex));
-        }
-        lines
+        kernel_lines(
+            tasks(meaning),
+            names::by_namespace(&kernel.handlers.list),
+            names::by_namespace(&kernel.mutexes.list),
+            shown,
+        )
+    }
+
+    /// Whether the namespace filter shows `line`: the CPU's and idle's
+    /// always, the others by their subject's or their type's namespace.
+    fn line_shown(&self, line: Line) -> bool {
+        let spaces = &self.spaces;
+        let space = match line {
+            Line::Task(Some(n)) => spaces.subjects[0].get(n),
+            Line::Handler(n) => spaces.subjects[1].get(n),
+            Line::Mutex(n) => spaces.subjects[2].get(n),
+            Line::Event(row) => spaces.types.get(row),
+            Line::Section(_) | Line::Cpu | Line::Task(None) => None,
+        };
+        space.is_none_or(|space| self.filter.shown(space))
     }
 
     pub(super) fn label(&self, line: Line) -> String {

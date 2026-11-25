@@ -22,13 +22,14 @@ mod view;
 pub use status::counted;
 pub use view::View;
 
+use crate::filter::Filter;
 use crate::levels::Levels;
-use crate::listing::Events;
+use crate::listing::{Entry, Events};
 use crate::meaning::Meaning;
 use crate::names;
 use crate::panel::Panel;
 use eframe::egui;
-use kymo::events::Catalogue;
+use kymo::events::{Catalogue, Kind};
 use kymo::model::Trace;
 use kymo::stats;
 use kymo::target::Result;
@@ -36,6 +37,7 @@ use list::Tab;
 use load::{Binning, Mode};
 use measure::Measure;
 use rows::{Mark, Row};
+use std::collections::HashMap;
 use view::{clamped, whole, widest};
 
 /// The width of the column of row names.
@@ -111,6 +113,33 @@ pub struct Timeline {
     reveal: Option<usize>,
     /// The bottom panel's tab.
     tab: Tab,
+    /// The namespace filter, whether its panel is open, the namespaces it
+    /// reads, and the event list's lines it keeps.
+    filter: Filter,
+    filtering: bool,
+    spaces: Spaces,
+    kept: Option<Kept>,
+}
+
+/// The namespaces the filter reads (names.rs).
+#[derive(Default)]
+struct Spaces {
+    /// Each subject's, by kind as `Meaning::names` orders them.
+    subjects: [Vec<String>; 3],
+    /// Each subject's by its address, none at address 0.
+    at: HashMap<u64, String>,
+    /// Each row's type's, and where its pointers are in its payload: offset
+    /// and size.
+    types: Vec<String>,
+    pointers: Vec<Vec<(usize, usize)>>,
+}
+
+/// The event list's lines the filter keeps, of a range, at a generation of
+/// the filter.
+struct Kept {
+    range: (i64, i64),
+    generation: u64,
+    entries: Vec<Entry>,
 }
 
 impl Timeline {
@@ -161,14 +190,32 @@ impl Timeline {
             chosen: None,
             reveal: None,
             tab: Tab::Events,
+            filter: Filter::default(),
+            filtering: false,
+            spaces: Spaces::default(),
+            kept: None,
         };
         timeline.add(0);
         timeline.panel = timeline.meaning.as_ref().map(|meaning| {
             let (instances, full) = meaning.shorten(kymo::meaning::instances(&meaning.kernel));
             Panel::named(instances, full)
         });
+        timeline.spaces = Spaces::of(catalogue, timeline.meaning.as_ref());
+        let spaces = &timeline.spaces;
+        timeline.filter = Filter::new(
+            spaces
+                .types
+                .iter()
+                .chain(spaces.subjects.iter().flatten())
+                .map(String::as_str),
+        );
         timeline.whole();
         Ok(timeline)
+    }
+
+    /// Unticks the namespaces of a filter saved, those this image has.
+    pub fn restore(&mut self, saved: &str) {
+        self.filter.restore(saved);
     }
 
     fn origin(&self) -> i64 {
@@ -204,7 +251,43 @@ impl Timeline {
     }
 }
 
+impl Spaces {
+    fn of(catalogue: &Catalogue, meaning: Option<&Meaning>) -> Self {
+        let mut spaces = Self::default();
+        for event in catalogue.events.values() {
+            spaces.types.push(names::namespace(&event.name));
+            let pointer = |field: &&kymo::events::Field| {
+                matches!(field.ty.kind, Kind::Pointer(_)) && field.ty.size.is_some_and(|size| (1..=8).contains(&size))
+            };
+            let pointers = event.fields.iter().filter(pointer);
+            let pointers = pointers.map(|field| (field.offset as usize, field.ty.size.unwrap_or_default() as usize));
+            spaces.pointers.push(pointers.collect());
+        }
+        if let Some(meaning) = meaning {
+            let kernel = &meaning.kernel;
+            let lists = [&kernel.tasks.list, &kernel.handlers.list, &kernel.mutexes.list];
+            for (spaces_of, list) in spaces.subjects.iter_mut().zip(lists) {
+                for subject in list {
+                    let space = names::namespace(&subject.name);
+                    if subject.address != 0 {
+                        spaces.at.insert(subject.address, space.clone());
+                    }
+                    spaces_of.push(space);
+                }
+            }
+        }
+        spaces
+    }
+}
+
+/// The key the namespaces unticked are saved under.
+pub const FILTER: &str = "namespaces unticked";
+
 impl eframe::App for Timeline {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(FILTER, self.filter.saved());
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if self.measure.is_some() {
             self.measure_frame(ui.ctx(), frame.info().cpu_usage.unwrap_or_default());
@@ -214,6 +297,12 @@ impl eframe::App for Timeline {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| self.status(ui));
         });
+        if self.filtering {
+            egui::Panel::left("namespaces")
+                .resizable(true)
+                .default_size(220.0)
+                .show(ui, |ui| self.filter.show(ui));
+        }
         // A third of the window at first; the timeline's lines fill the rest.
         egui::Panel::bottom("lower")
             .resizable(true)
@@ -261,11 +350,31 @@ impl Timeline {
         let shown = panel.range().expect("a report computed");
         let (from, to) = (shown.from.unwrap_or_default(), shown.to.unwrap_or_default());
         let title = self.range_title(from, to);
-        let picked = panel.show(ui, &title);
+        let picked = panel.show(ui, &title, &|kind, name| self.subject_shown(kind, name));
         self.panel = Some(panel);
         if let Some(instance) = picked {
             self.go_to(instance.from.cycles, instance.to.cycles);
         }
+    }
+
+    /// Whether the filter shows the subject of `kind`, as
+    /// `kymo::meaning::instances` names the kinds, named `name` in full; one
+    /// of another kind, or unknown, it does.
+    fn subject_shown(&self, kind: &str, name: &str) -> bool {
+        let Some(meaning) = &self.meaning else {
+            return true;
+        };
+        let kernel = &meaning.kernel;
+        let (n, list) = match kind {
+            "task" => (0, &kernel.tasks.list),
+            "handler" => (1, &kernel.handlers.list),
+            "mutex" => (2, &kernel.mutexes.list),
+            _ => return true,
+        };
+        list.iter()
+            .position(|subject| subject.name == name)
+            .and_then(|at| self.spaces.subjects[n].get(at))
+            .is_none_or(|space| self.filter.shown(space))
     }
 
     /// Centres the view on `from` to `to`, a third of its width, and frames

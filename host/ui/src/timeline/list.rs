@@ -1,10 +1,11 @@
 //! The bottom panel: the event list of the range (ADR-072) and, with the kernel's
 //! meaning, the statistics.
 
-use super::Timeline;
 use super::hover::marked;
 use super::status::counted;
 use super::view::centred;
+use super::{Kept, Timeline};
+use crate::filter::Filter;
 use crate::listing::Entry;
 use crate::palette::{Palette, Shade};
 use eframe::egui;
@@ -14,6 +15,13 @@ use kymo::events::Pointee;
 use kymo::model::Element;
 use std::cell::RefCell;
 use std::ops::Range;
+
+/// Whether `filter` keeps an event of a type in the namespace `space`, whose
+/// pointers point at subjects in the namespaces `subjects`: one of them
+/// ticked is enough.
+fn kept<'a>(filter: &Filter, space: &str, mut subjects: impl Iterator<Item = &'a str>) -> bool {
+    filter.shown(space) || subjects.any(|subject| filter.shown(subject))
+}
 
 /// The width of the bar that marks a loss or a suspect line, in pixels.
 const MARK: f32 = 4.0;
@@ -111,10 +119,17 @@ impl Timeline {
             self.listed = Some((range.from.unwrap_or_default(), range.to.unwrap_or_default()));
         }
         let (from, to) = self.listed.expect("set above");
-        let entries = self.list.within(from, to);
+        self.keep(from, to);
+        let entries = match &self.kept {
+            Some(kept) => &kept.entries,
+            None => self.list.within(from, to),
+        };
         ui.horizontal(|ui| {
             ui.strong(self.range_title(from, to));
             ui.label(counted(entries.len() as u64, "line", "lines"));
+            if self.kept.is_some() {
+                ui.weak("of the namespaces ticked");
+            }
         });
         ui.separator();
         let symbols = &self.catalogue.symbols;
@@ -251,6 +266,54 @@ impl Timeline {
         }
     }
 
+    /// The lines from `from` to `to` cycles the namespace filter keeps, none
+    /// when it keeps all; computed again only when the range or the filter
+    /// changed.
+    fn keep(&mut self, from: i64, to: i64) {
+        if !self.filter.active() {
+            self.kept = None;
+            return;
+        }
+        let generation = self.filter.generation();
+        if self
+            .kept
+            .as_ref()
+            .is_some_and(|kept| kept.range == (from, to) && kept.generation == generation)
+        {
+            return;
+        }
+        let entries = self.list.within(from, to);
+        let entries = entries.iter().copied().filter(|entry| self.entry_kept(entry)).collect();
+        self.kept = Some(Kept {
+            range: (from, to),
+            generation,
+            entries,
+        });
+    }
+
+    /// Whether the filter keeps the line of `entry`: a loss or a suspect
+    /// line always, an event when its type's namespace is ticked or that of
+    /// a subject one of its pointers points at.
+    fn entry_kept(&self, entry: &Entry) -> bool {
+        let Element::Event { event, .. } = &self.trace.elements[entry.element] else {
+            return true;
+        };
+        let row = self
+            .ids
+            .binary_search(&event.event.id)
+            .expect("an event of the catalogue");
+        let spaces = &self.spaces;
+        let subjects = spaces.pointers[row].iter().filter_map(|&(offset, size)| {
+            let bytes = event.payload.get(offset..offset + size)?;
+            let address = bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, byte| value << 8 | u64::from(*byte));
+            spaces.at.get(&address).map(String::as_str)
+        });
+        kept(&self.filter, &spaces.types[row], subjects)
+    }
+
     /// Centres the view on `entry` at the same zoom, marks it on the
     /// timeline and in the list, and scrolls the list to it.
     fn go_to_entry(&mut self, entry: Entry) {
@@ -259,5 +322,23 @@ impl Timeline {
         self.picked = Some((entry.cycles, entry.cycles));
         self.chosen = Some(entry.element);
         self.reveal = Some(entry.element);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An event stays when its type's namespace is ticked, or that of one
+    /// of the subjects it names; else it leaves.
+    #[test]
+    fn an_event_stays_by_its_type_or_a_subject() {
+        let mut filter = Filter::new(["kymo::opsy", "app::sensors", "app::comms"]);
+        filter.toggle(filter.node("kymo").unwrap());
+        filter.toggle(filter.node("app::comms").unwrap());
+        assert!(kept(&filter, "app::sensors", std::iter::empty()));
+        assert!(kept(&filter, "kymo::opsy", ["app::comms", "app::sensors"].into_iter()));
+        assert!(!kept(&filter, "kymo::opsy", ["app::comms"].into_iter()));
+        assert!(!kept(&filter, "kymo::opsy", std::iter::empty()));
     }
 }

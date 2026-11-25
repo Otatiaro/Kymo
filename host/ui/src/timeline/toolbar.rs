@@ -27,6 +27,17 @@ impl Timeline {
             {
                 self.whole();
             }
+            ui.separator();
+            let title = if self.filter.active() {
+                "Namespaces •"
+            } else {
+                "Namespaces"
+            };
+            ui.toggle_value(&mut self.filtering, title)
+                .on_hover_text(match self.filter.active() {
+                    true => "Show or hide the namespace filter; some namespaces are unticked",
+                    false => "Show or hide the namespace filter",
+                });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme_menu(ui);
                 if self.meaning.is_some() {

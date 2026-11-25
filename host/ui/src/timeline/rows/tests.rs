@@ -56,3 +56,45 @@ fn lines_stretch_to_fill_their_room() {
     }
     assert_eq!(tops(&[Line::Section("TASKS")], 100.0), [0.0, ROW]);
 }
+
+/// A line the filter hides leaves, a section without a line kept with it;
+/// the CPU's and idle's stay, whatever the filter says.
+#[test]
+fn the_filter_keeps_the_cpu_and_idle() {
+    let lines = |shown: &dyn Fn(Line) -> bool| kernel_lines(vec![1, 0], vec![0, 1], vec![0], shown);
+    assert_eq!(
+        lines(&|_| true),
+        [
+            Line::Cpu,
+            Line::Section("TASKS"),
+            Line::Task(Some(1)),
+            Line::Task(Some(0)),
+            Line::Task(None),
+            Line::Section("INTERRUPTS"),
+            Line::Handler(0),
+            Line::Handler(1),
+            Line::Section("MUTEXES"),
+            Line::Mutex(0),
+        ]
+    );
+    assert_eq!(
+        lines(&|line| matches!(line, Line::Handler(1))),
+        [
+            Line::Cpu,
+            Line::Section("TASKS"),
+            Line::Task(None),
+            Line::Section("INTERRUPTS"),
+            Line::Handler(1),
+        ]
+    );
+    assert_eq!(lines(&|_| false), [Line::Cpu, Line::Section("TASKS"), Line::Task(None)]);
+}
+
+/// A wake's arrow joins two lines shown, never one hidden.
+#[test]
+fn no_arrow_to_a_line_hidden() {
+    let lines = [Line::Cpu, Line::Task(Some(0)), Line::Handler(2), Line::Task(None)];
+    assert_eq!(wake_rows(&lines, Line::Handler(2), Line::Task(Some(0))), Some((2, 1)));
+    assert_eq!(wake_rows(&lines, Line::Handler(1), Line::Task(Some(0))), None);
+    assert_eq!(wake_rows(&lines, Line::Handler(2), Line::Task(Some(1))), None);
+}
