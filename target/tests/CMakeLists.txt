@@ -88,6 +88,10 @@ function(kymo_qemu_image name cpu level)
 		LINK_DEPENDS "${script};${CMAKE_CURRENT_SOURCE_DIR}/qemu/sections.ld")
 	target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 	target_compile_definitions(${name} PRIVATE ${arg_DEFINITIONS})
+	if(COMMAND kymo_clang_headers)
+		kymo_clang_headers(${cpu} headers)
+		target_compile_options(${name} PRIVATE ${headers})
+	endif()
 	target_compile_options(${name} PRIVATE -mcpu=${cpu} -mthumb -${level}
 		-g -Wall -Wextra -Werror
 		-ffunction-sections -fdata-sections

@@ -9,8 +9,9 @@ Runs both images of target/tests/cost (with Kymo, and the baseline whose
 functions do nothing) and counts the instructions each cost_* function
 executes. QEMU does not model cycles; with one instruction per translation
 block and the execution trace on (-accel tcg,one-insn-per-tb=on
--d exec,nochain), each trace line is one executed instruction, which is exact
-and repeatable. Cycles are measured on hardware, not here.
+-d exec,nochain), each trace line is one executed instruction, but for a
+block QEMU says it stopped before running, which is left out: the count is
+then exact and repeatable. Cycles are measured on hardware, not here.
 
 Each function is called once, from test_main; its count runs from its entry
 until execution is back in test_main, so what it calls counts too. Its cost
@@ -36,6 +37,9 @@ import tempfile
 from pathlib import Path
 
 EXEC = re.compile(r"^Trace \d+: \S+ \[[0-9a-f]+/([0-9a-f]+)/")
+# A block logged, then left before it ran, as the main loop asks the CPU to
+# exit, when the host's timing has it: QEMU logs it again when it runs.
+STOPPED = re.compile(r"^Stopped execution of TB chain before \S+ \[([0-9a-f]+)\]")
 FUNCTION = re.compile(r"^([0-9a-f]+) ([0-9a-f]+) [Tt] (cost_\w+|_Z9test_mainv)$")
 CALLER = "_Z9test_mainv"
 CASES = ["cost_slots_1", "cost_slots_2", "cost_slots_3", "cost_slots_4", "cost_disabled",
@@ -82,6 +86,12 @@ def executed(qemu, machine, image):
                 match = EXEC.match(line)
                 if match:
                     addresses.append(int(match.group(1), 16))
+                    continue
+                stopped = STOPPED.match(line)
+                if stopped:
+                    if not addresses or addresses[-1] != int(stopped.group(1), 16):
+                        sys.exit(f"{image}: {line.strip()} follows no trace of that block")
+                    addresses.pop()
         return addresses
 
 
