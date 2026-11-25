@@ -62,6 +62,7 @@ namespace opsy
 class task_control_block;
 class condition_variable;
 class mutex;
+class scheduler;
 enum class wake_reason : std::uint8_t;
 } // namespace opsy
 
@@ -340,9 +341,42 @@ struct hooks
 		Trace::emit(kymo::opsy::mutex_blocked{.mutex = &blocking, .waiter = &waiter});
 	}
 
-	/** @brief A fault, as opsy::fault_isrs gives it to the application's handler. */
+	/**
+	 * @brief A fault, as opsy::fault_isrs gives it to the application's handler,
+	 *        with the words above its frame that may be return addresses.
+	 *
+	 * The main stack runs down from the vector table's initial stack pointer;
+	 * the process stack is the current task's. A frame outside its task's
+	 * stack (an overflow, a corrupted PSP) and a fault on the process stack
+	 * with no current task are recorded without searching.
+	 */
 	static void fault(auto const& status, auto const& frame, std::uint32_t exc_return)
 	{
+		fault_on<::opsy::scheduler>(status, frame, exc_return);
+	}
+
+private:
+	/** @brief fault(), its scheduler a parameter: complete only where OpSy calls the hook. */
+	template<typename Scheduler>
+	static void fault_on(auto const& status, auto const& frame, std::uint32_t exc_return)
+	{
+		constexpr std::uint32_t process_stack = 1U << 2; // EXC_RETURN.SPSEL
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the frame's address, as the event records it
+		auto const frame_address = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&frame));
+		std::uint32_t base = 0;
+		std::uint32_t top = 0;
+		if ((exc_return & process_stack) == 0)
+		{
+			top = main_stack_top();
+		}
+		else if (auto const* const task = Scheduler::current_task(); task != nullptr)
+		{
+			// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the stack's bounds, as the event records them
+			base = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(task->stack_base()));
+			top = base + static_cast<std::uint32_t>(task->stack_size());
+		}
+		bool const inside = top != 0 && frame_address >= base && frame_address < top;
+
 		Trace::emit(kymo::fault{
 			.cfsr = status.cfsr,
 			.hfsr = status.hfsr,
@@ -357,6 +391,10 @@ struct hooks
 			.pc = frame.pc,
 			.xpsr = frame.xpsr,
 			.exc_return = exc_return,
+			.sp = frame_address,
+			.stack_base = base,
+			.stack_top = top,
+			.returns = inside ? fault_returns(frame_address, exc_return, top) : fault_return_words{},
 		});
 	}
 };

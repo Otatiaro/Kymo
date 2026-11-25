@@ -13,7 +13,7 @@ env:
   TOOLCHAIN_VERSION: '16.2.0-1'
   # The OpSy the adapter is tested against. A change on OpSy's side reaches
   # Kymo when this moves.
-  OPSY_COMMIT: db01fd80420c9741469f4919b3a4905e249a921f
+  OPSY_COMMIT: 14f8722e114537078f61fc0b60a8a3ce48b92227
   # The FreeRTOS kernel the adapter is tested against: V11.3.3.
   FREERTOS_COMMIT: 89592801dd8b73329a7583719b7e3567b50910e5
 
@@ -221,8 +221,9 @@ jobs:
             target/freertos/tests/bench/bench.cpp
 
   # OpSy's on-target suite with the adapter's hooks, the adapter's events
-  # read back from the ring, and the suite recorded by the host with its trace
-  # checked (target/opsy/tests). -Os is what ships, -Og the
+  # read back from the ring, the call levels a fault carries, and the suite
+  # recorded by the host with its trace checked (target/opsy/tests). -Os is
+  # what ships, -Og the
   # debug build.
   opsy:
     name: OpSy adapter (cortex-${{ matrix.target }}, ${{ matrix.optimisation }})
