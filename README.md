@@ -112,7 +112,7 @@ kymo decode run.kymo                    # the events, one line each
 kymo decode run.kymo --meaning          # the kernel's spans and wakes
 kymo stats run.kymo [--json]            # latencies, durations, periods, shares
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
-kymo-ui run.kymo                        # the timeline
+kymo-ui [run.kymo]                      # the timeline; open or drop a capture
 ```
 
 The capture holds the ELF given to `record`, so it reads back on its own.

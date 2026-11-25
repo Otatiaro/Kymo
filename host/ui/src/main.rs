@@ -1,6 +1,7 @@
 //! Kymo timeline: shows a capture made by `kymo record --out`, read with the
 //! ELF of the image that made it.
 
+mod app;
 #[cfg(windows)]
 mod background;
 mod filter;
@@ -13,19 +14,25 @@ mod panel;
 mod spans;
 mod timeline;
 
+use app::{App, Options};
 use eframe::egui;
-use kymo::model::Trace;
+use kymo::events;
 use kymo::target::Result;
-use kymo::{capture, events};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Instant;
 
 const USAGE: &str = "\
-usage: kymo-ui <capture> [--elf <file>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
+usage: kymo-ui [<capture>] [--elf <file>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
 
 Shows a capture made by kymo record --out, read with the ELF it holds or
-names, or the one --elf gives: one row per event type of the
+names, or the one --elf gives. Without a capture, the window offers to open
+one: its Open button (Ctrl+O), a capture dropped on it, or the list of
+those opened recently, kept for the next runs; another one replaces the
+timeline. A capture whose ELF is not found names where it looked, and waits
+for the ELF, chosen or dropped. An error shows above the window, which
+stays.
+
+The timeline: one row per event type of the
 image, the gaps (slots lost) marked across the rows in grey edged in red, a
 red line where narrower than a pixel, and the overrun writes (a write
 interrupted for a full ring lap: events recorded near it may be wrong) in
@@ -135,34 +142,21 @@ fn run() -> Result<()> {
             _ => return Err(format!("unknown option {argument}\n\n{USAGE}").into()),
         }
     }
-    let [capture] = paths.as_slice() else {
-        return Err(USAGE.into());
+    let capture = match paths.as_slice() {
+        [] if !measure && elf.is_none() => None,
+        [capture] => Some(capture.clone()),
+        _ => return Err(USAGE.into()),
     };
-    let bytes = std::fs::read(capture).map_err(|error| format!("{}: {error}", capture.display()))?;
-    let (image, image_name) = capture::elf(&capture.display().to_string(), &bytes, elf.as_deref())?;
-    // The trace borrows the catalogue, which lives as long as the window.
-    let catalogue: &'static events::Catalogue =
-        Box::leak(Box::new(events::parse_with_svd(&image, &image_name, svd.as_deref())?));
-    let began = Instant::now();
-    let trace = Trace::read(catalogue, &bytes, clock)?;
-    let read = began.elapsed();
-    let name = capture.file_name().map_or_else(
-        || capture.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let mut timeline = timeline::Timeline::new(name, catalogue, trace, measure)?;
-    if measure {
-        println!(
-            "capture read in {:.0} ms, timeline built in {:.0} ms",
-            read.as_secs_f64() * 1e3,
-            (began.elapsed() - read).as_secs_f64() * 1e3
-        );
+    let elf = elf.map(PathBuf::from);
+    let mut app = App::new(Options { clock, svd, measure }, events::parse_with_svd);
+    // Measured, the capture opens before the window, which an error does not open.
+    if measure && let Some(capture) = &capture {
+        app.open(capture, elf.as_deref(), None)?;
     }
-    let title = format!("Kymo: {}", capture.display());
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1600.0, 900.0])
-            .with_title(title),
+            .with_title("Kymo"),
         ..Default::default()
     };
     if measure {
@@ -191,13 +185,17 @@ fn run() -> Result<()> {
             }
             #[cfg(windows)]
             background::set(context, ctx.global_style().visuals.panel_fill);
-            // The frames measured are those of the whole trace.
-            if let Some(storage) = context.storage
-                && !measure
-            {
-                timeline.restore(|key| storage.get_string(key));
+            if !measure {
+                // An error opening the capture shows in the window.
+                if let Some(capture) = &capture {
+                    let result = app.open(capture, elf.as_deref(), None);
+                    app.attempt(result);
+                }
+                if let Some(storage) = context.storage {
+                    app.restore(|key| storage.get_string(key));
+                }
             }
-            Ok(Box::new(timeline))
+            Ok(Box::new(app))
         }),
     )?;
     Ok(())

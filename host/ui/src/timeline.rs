@@ -22,6 +22,7 @@ mod view;
 mod words;
 
 pub use status::counted;
+pub use toolbar::theme_menu;
 pub use view::View;
 
 use crate::filter::Filter;
@@ -301,18 +302,28 @@ const FILTER: &str = "namespaces unticked";
 /// The key the headings folded are saved under.
 const FOLDED: &str = "namespaces folded";
 
-impl eframe::App for Timeline {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+impl Timeline {
+    /// The capture's file name.
+    pub fn capture(&self) -> &str {
+        &self.capture
+    }
+
+    /// Saves the namespaces unticked and the headings folded.
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
         storage.set_string(FILTER, self.filter.saved());
         storage.set_string(FOLDED, self.folded.iter().cloned().collect::<Vec<_>>().join("\n"));
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    /// The timeline in `ui`, the window's controls `files` draws first in
+    /// its toolbar.
+    pub fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, files: &mut dyn FnMut(&mut egui::Ui)) {
         if self.measure.is_some() {
             self.measure_frame(ui.ctx(), frame.info().cpu_usage.unwrap_or_default());
         }
         let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
-        egui::Panel::top("toolbar").frame(frame).show(ui, |ui| self.toolbar(ui));
+        egui::Panel::top("toolbar")
+            .frame(frame)
+            .show(ui, |ui| self.toolbar(ui, files));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| self.status(ui));
         });
