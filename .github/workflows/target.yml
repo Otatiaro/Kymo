@@ -108,6 +108,15 @@ jobs:
           cmake -S target/tests -B build
           -G Ninja
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/target/cmake/arm-none-eabi-clang.cmake
+          -DCMAKE_CXX_FLAGS=-Wno-error=unused-const-variable
+
+      - name: DWARF of kymo_text (diagnostic)
+        if: always()
+        run: |
+          cmake --build build --target durations-cortex-m4-Os -- -k 0 || true
+          for elf in $(find build -name 'durations-cortex-m4-Os*.elf'); do
+            echo "== $elf"; "$LLVM_ROOT/bin/llvm-dwarfdump" --name=kymo_text "$elf" || true
+          done
 
       - name: Build
         run: |
@@ -117,7 +126,7 @@ jobs:
             for level in Os O2; do targets="$targets cost-$cpu-$level cost-baseline-$cpu-$level"; done
             for level in Og Os Os-lto; do targets="$targets durations-$cpu-$level"; done
           done
-          cmake --build build --parallel --target $targets
+          cmake --build build --parallel --target $targets -- -k 0
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --verbose -R "^(cost|durations|no-text)-"
