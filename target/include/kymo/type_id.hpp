@@ -29,12 +29,22 @@
 namespace kymo
 {
 
-/** @brief Never defined: its mangled name names the type's id symbol. */
+/**
+ * @brief Never defined: its mangled name names the type's id symbol. Clang
+ *        warns of it for a type of internal linkage; nothing links to it.
+ */
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wundefined-internal"
+#endif
 template<typename Event>
 struct anchor
 {
 	static char const name;
 };
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 /**
  * @brief The id of @p Event, a link-time constant, zero-extended to a word:
