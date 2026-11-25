@@ -3,7 +3,7 @@
 use kymo::interrupts::Interrupts;
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{bench, capture, check, decode, elf, events, meaning, record, stats};
+use kymo::{capture, check, decode, events, meaning, record, stats};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -12,7 +12,6 @@ const USAGE: &str = "\
 usage: kymo events <elf> [--svd <file>]
        kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
-       kymo bench --probe <probe-rs|jlink|stlink> --elf <file> [options]
        kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
        kymo check <elf> <capture> <rules.json> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
 
@@ -66,8 +65,12 @@ written into events the probe read: events recorded near it may be wrong.
 
 record options:
   --channel <ring>   the kymo::ring object to drain, as for decode
-  --probe-id, --chip, --speed as for bench; qemu: --probe-id <host>:<port>,
-                     QEMU's monitor started with -qmp tcp:<host>:<port>,server=on,wait=off
+  --probe-id <id>    probe-rs: VID:PID[:SERIAL]; jlink, stlink: serial number;
+                     qemu: <host>:<port>, QEMU's monitor started with
+                     -qmp tcp:<host>:<port>,server=on,wait=off
+  --chip <name>      target name for probe-rs and J-Link (e.g. STM32H563ZITx)
+  --speed <kHz>      debug clock, or the closest the probe supports
+                     below it (default 24000)
   --duration <seconds>  stop after this long
   --out <file>       also keep the recording in this capture file
   --clock <Hz>       the cycle counter's frequency, kept in the capture;
@@ -106,20 +109,6 @@ when all of it keeps to the rule, fails when none does, and is unknown
 otherwise. A group absent from the range fails. A line each, then a total.
 Exits with 0 when every rule passes; 3 when one fails; 4 when none fails
 and one is unknown; 1 on an input it cannot read or a rule it cannot judge.
-
-bench: measures how fast a probe drains the trace ring of the bench image,
-and how fast SWO carries the same events with --swo-baud, and whether the
-cycle counter keeps counting once the probe leaves.
-
-bench options:
-  --probe-id <id>    probe-rs: VID:PID[:SERIAL]; jlink, stlink: serial number
-  --chip <name>      target name for probe-rs and J-Link (e.g. STM32H563ZITx)
-  --speed <kHz>      debug clock, or the closest the probe supports
-                     below it (default 24000)
-  --step <seconds>   duration of each measurement (default 2)
-  --max-rate <n>     highest rate tried, in events per tick (default 1024)
-  --swo-baud <Bd>    also measure SWO at this baud rate, alone then alongside
-                     SWD (probe-rs and jlink)
 ";
 
 fn main() -> ExitCode {
@@ -300,7 +289,7 @@ fn run() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next();
     match command.as_deref() {
-        Some("bench" | "record") => {}
+        Some("record") => {}
         Some("events") => {
             let elf = PathBuf::from(arguments.next().ok_or_else(|| usage(USAGE))?);
             let svd = match (arguments.next().as_deref(), arguments.next()) {
@@ -376,9 +365,6 @@ fn run() -> Result<()> {
     let mut chip = None;
     let mut elf = None;
     let mut speed_khz = 24_000;
-    let mut step = 2.0;
-    let mut max_events_per_tick = 1024;
-    let mut swo_baud = None;
     let mut duration = None;
     let mut out = None;
     let mut clock = None;
@@ -395,9 +381,6 @@ fn run() -> Result<()> {
             "--chip" => chip = Some(given()?),
             "--elf" => elf = Some(PathBuf::from(given()?)),
             "--speed" => speed_khz = parsed(&option, value)?,
-            "--step" => step = parsed(&option, value)?,
-            "--max-rate" => max_events_per_tick = parsed(&option, value)?,
-            "--swo-baud" => swo_baud = Some(parsed(&option, value)?),
             "--duration" => duration = Some(Duration::from_secs_f64(parsed(&option, value)?)),
             "--out" => out = Some(PathBuf::from(given()?)),
             "--clock" => clock = Some(parsed(&option, value)?),
@@ -412,17 +395,8 @@ fn run() -> Result<()> {
         speed_khz,
     };
     let elf_path = elf.ok_or_else(|| usage(USAGE))?;
-    if command.as_deref() == Some("record") {
-        let catalogue = catalogue(&elf_path, None)?;
-        let ring = catalogue.ring(channel.as_deref())?;
-        let mut target = target::open(&connection)?;
-        return record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock);
-    }
-    let elf = elf::Elf::read(&elf_path)?;
-    let settings = bench::Settings {
-        step: Duration::from_secs_f64(step),
-        max_events_per_tick,
-        swo_baud,
-    };
-    bench::run(&connection, &elf, &settings)
+    let catalogue = catalogue(&elf_path, None)?;
+    let ring = catalogue.ring(channel.as_deref())?;
+    let mut target = target::open(&connection)?;
+    record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock)
 }

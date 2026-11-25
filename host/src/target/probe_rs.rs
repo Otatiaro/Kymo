@@ -1,8 +1,6 @@
 //! Target access through the probe-rs library.
 
 use super::{Connection, Result, Target};
-use probe_rs::architecture::arm::SwoConfig;
-use probe_rs::architecture::arm::component::TraceSink;
 use probe_rs::probe::DebugProbeSelector;
 use probe_rs::probe::list::Lister;
 use probe_rs::{MemoryInterface, Permissions, Session};
@@ -45,17 +43,6 @@ impl Target for ProbeRsTarget {
 
     fn write_word(&mut self, address: u32, value: u32) -> Result<()> {
         self.session.core(0)?.write_word_32(address.into(), value)?;
-        Ok(())
-    }
-
-    fn swo_start(&mut self, tpiu_clock_hz: u32, baud: u32) -> Result<()> {
-        let config = SwoConfig::new(tpiu_clock_hz).set_baud(baud);
-        self.session.setup_tracing(0, TraceSink::Swo(config))?;
-        Ok(())
-    }
-
-    fn swo_read(&mut self, bytes: &mut Vec<u8>) -> Result<()> {
-        bytes.extend(self.session.read_trace_data()?);
         Ok(())
     }
 }
