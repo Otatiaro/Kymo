@@ -5,6 +5,7 @@ use super::{CPU, GAP, LANE, ROW, TASK, Timeline};
 use crate::levels::Levels;
 use crate::meaning::Meaning;
 use crate::names;
+use kymo::meaning::Context;
 use kymo::model::Element;
 
 /// The tasks other than idle in the order of their lines: by namespace, then
@@ -159,6 +160,18 @@ pub(super) fn kernel_lines(
 pub(super) fn wake_rows(lines: &[Line], from: Line, to: Line) -> Option<(usize, usize)> {
     let row = |line: Line| lines.iter().position(|&other| other == line);
     Some((row(from)?, row(to)?))
+}
+
+/// The line a fault that came in `context` is marked on: the task's or the
+/// handler's, else the CPU's; none when neither is shown.
+pub(super) fn fault_row(lines: &[Line], context: Context) -> Option<usize> {
+    let row = |line: Line| lines.iter().position(|&other| other == line);
+    let own = match context {
+        Context::Task(task) => row(Line::Task(task)),
+        Context::Handler(handler) => row(Line::Handler(handler)),
+        Context::Exception(_) | Context::Unknown => None,
+    };
+    own.or_else(|| row(Line::Cpu))
 }
 
 /// The top of each of `lines` below the top of the first, then the bottom of

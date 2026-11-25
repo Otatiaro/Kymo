@@ -3,6 +3,7 @@
 //! worst instances each lead to the instance on the timeline.
 
 use crate::meaning::Full;
+use crate::palette::Palette;
 use crate::timeline::counted;
 use eframe::egui;
 use egui_extras::{Column as Size, TableBuilder};
@@ -10,6 +11,14 @@ use kymo::load::Covered;
 use kymo::model::Trace;
 use kymo::stats::{self, Group, Instance, Point, Range, Report};
 use std::collections::HashMap;
+
+/// What the kernel found besides its instances, as the report counts it.
+pub struct Found<'a> {
+    pub contradictions: &'a [usize],
+    /// The elements that are faults.
+    pub faults: &'a [usize],
+    pub known: &'a Covered,
+}
 
 /// The worst instances kept for each group, as kymo stats keeps by default.
 const WORST: usize = 10;
@@ -106,12 +115,13 @@ impl Panel {
 
     /// The report over `range`, computed again only when the range is not
     /// the last one's.
-    pub fn report(&mut self, trace: &Trace, contradictions: &[usize], known: &Covered, range: Range) -> &Report {
+    pub fn report(&mut self, trace: &Trace, found: Found, range: Range) -> &Report {
         if self.report.as_ref().is_none_or(|(last, _)| *last != range) {
             let found = stats::Found {
                 instances: &self.instances,
-                contradictions,
-                known,
+                contradictions: found.contradictions,
+                faults: found.faults,
+                known: found.known,
             };
             let report = stats::compute(trace, found, range, WORST);
             self.report = Some((range, report));
@@ -168,9 +178,10 @@ impl Panel {
         })
     }
 
-    /// The table of the groups `shown` keeps, then the chosen group's worst
-    /// instances. Returns the instance clicked, if any.
-    pub fn show(&mut self, ui: &mut egui::Ui, title: &str, shown: Shown) -> Option<Instance> {
+    /// The faults of the range, each described, the table of the groups
+    /// `shown` keeps, then the chosen group's worst instances. Returns the
+    /// instance clicked, if any.
+    pub fn show(&mut self, ui: &mut egui::Ui, title: &str, faults: &[String], shown: Shown) -> Option<Instance> {
         let Some((_, report)) = &self.report else {
             return None;
         };
@@ -181,13 +192,21 @@ impl Panel {
         ui.horizontal(|ui| {
             ui.strong(title);
             ui.label(format!(
-                "{} known, {}, {} overrun writes, {} against the kernel's order",
+                "{} known, {}, {} overrun writes, {} against the kernel's order, {}",
                 stats::duration(report.known, frequency),
                 counted(report.losses as u64, "loss", "losses"),
                 report.suspects,
-                report.contradictions
+                report.contradictions,
+                counted(report.faults as u64, "fault", "faults")
             ));
         });
+        for fault in faults {
+            ui.horizontal(|ui| {
+                let (chip, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().rect_filled(chip, 2.0, Palette::of(ui.visuals()).loss);
+                ui.label(egui::RichText::new(fault).monospace());
+            });
+        }
         ui.separator();
         let order = self.order(report, shown);
         let chosen_group = self

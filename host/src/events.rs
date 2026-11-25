@@ -8,7 +8,9 @@
 //! the anchor, so the type is found by name: the symbol is demangled, and the
 //! structure of the same qualified name is looked up in the debug info.
 
+use crate::code::Code;
 use crate::interrupts::Interrupts;
+use crate::lines::Lines;
 use crate::symbols::Symbols;
 use crate::target::Result;
 use crate::text::{self, Text};
@@ -137,6 +139,10 @@ pub struct Catalogue {
     pub symbols: Symbols,
     /// The device interrupts the DWARF names (interrupts.rs).
     pub interrupts: Interrupts,
+    /// The source line of each code address.
+    pub lines: Lines,
+    /// The image's code.
+    pub code: Code,
     /// What the image seems to lack, for the user to read: it decodes all the same.
     pub warnings: Vec<String>,
 }
@@ -269,6 +275,8 @@ pub fn parse(data: &[u8], image: &str) -> Result<Catalogue> {
         rings: debug.rings,
         symbols: Symbols::read(&file, &debug.bases),
         interrupts,
+        lines: debug.lines,
+        code: Code::read(&file),
         warnings,
     })
 }
@@ -342,6 +350,7 @@ struct DebugInfo {
     bases: BTreeMap<u64, Vec<(u64, String)>>,
     /// The enumerators of each different `IRQn_Type`.
     irq_enumerations: Vec<Vec<(i64, String)>>,
+    lines: Lines,
 }
 
 /// The layout of each structure named in `wanted`, the same in every unit
@@ -490,6 +499,7 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
         rings,
         bases,
         irq_enumerations,
+        lines: Lines::read(&dwarf, &units)?,
     })
 }
 

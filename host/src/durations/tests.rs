@@ -48,6 +48,8 @@ fn catalogue() -> Catalogue {
         rings: Vec::new(),
         symbols: Symbols::default(),
         interrupts: Interrupts::default(),
+        lines: Default::default(),
+        code: Default::default(),
         warnings: Vec::new(),
     }
 }

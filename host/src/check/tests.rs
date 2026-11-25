@@ -45,6 +45,7 @@ fn report(groups: Vec<Group>, frequency: Option<f64>) -> Report {
         losses: 2,
         suspects: 0,
         contradictions: 0,
+        faults: 0,
         groups,
     }
 }
@@ -329,6 +330,17 @@ fn the_range_totals_are_bounded_too() {
         ),
         [Outcome::Fail, Outcome::Pass, Outcome::Pass]
     );
+}
+
+#[test]
+fn a_fault_fails_a_rule_of_no_fault() {
+    let rule = r#"[{"capture":"faults","max":0}]"#;
+    assert_eq!(outcomes(&report(Vec::new(), None), rule), [Outcome::Pass]);
+    let faulted = Report {
+        faults: 1,
+        ..report(Vec::new(), None)
+    };
+    assert_eq!(outcomes(&faulted, rule), [Outcome::Fail]);
 }
 
 #[test]

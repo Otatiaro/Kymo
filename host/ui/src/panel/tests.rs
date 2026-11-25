@@ -100,7 +100,15 @@ fn a_min_or_a_max_leads_to_the_instance_kymo_stats_gives() {
     let event = event();
     let trace = trace(&event);
     let mut panel = panel(&trace);
-    let report = panel.report(&trace, &[], &Covered::default(), Range::default());
+    let report = panel.report(
+        &trace,
+        Found {
+            contradictions: &[],
+            faults: &[],
+            known: &Covered::default(),
+        },
+        Range::default(),
+    );
     let json = stats::json(report);
     let groups = report.groups.clone();
     assert_eq!(groups.len(), 2);
@@ -138,7 +146,15 @@ fn the_high_values_are_a_lower_bound_after_an_exclusion() {
     let event = event();
     let trace = trace(&event);
     let mut panel = panel(&trace);
-    let report = panel.report(&trace, &[], &Covered::default(), Range::default());
+    let report = panel.report(
+        &trace,
+        Found {
+            contradictions: &[],
+            faults: &[],
+            known: &Covered::default(),
+        },
+        Range::default(),
+    );
     let cells = |subject: &str| {
         let group = report.groups.iter().find(|group| group.subject == subject).unwrap();
         Column::ALL[2..]
@@ -161,7 +177,15 @@ fn a_column_sorts_numbers_highest_first_then_the_other_way() {
     let event = event();
     let trace = trace(&event);
     let mut panel = panel(&trace);
-    panel.report(&trace, &[], &Covered::default(), Range::default());
+    panel.report(
+        &trace,
+        Found {
+            contradictions: &[],
+            faults: &[],
+            known: &Covered::default(),
+        },
+        Range::default(),
+    );
     let subjects = |panel: &Panel| {
         let report = &panel.report.as_ref().unwrap().1;
         panel
@@ -190,7 +214,15 @@ fn a_subject_hidden_leaves_the_table() {
     let trace = trace(&event);
     let full = HashMap::from([(("task", "b".to_owned()), "app::b".to_owned())]);
     let mut panel = Panel::named(panel(&trace).instances, full);
-    panel.report(&trace, &[], &Covered::default(), Range::default());
+    panel.report(
+        &trace,
+        Found {
+            contradictions: &[],
+            faults: &[],
+            known: &Covered::default(),
+        },
+        Range::default(),
+    );
     let report = &panel.report.as_ref().unwrap().1;
     let subjects = |shown: Shown| {
         panel
@@ -212,8 +244,11 @@ fn a_range_counts_only_the_instances_it_holds() {
     // Elements 2 and 3, indexes 2 and 3: a's 30 only, b's cut.
     let report = panel.report(
         &trace,
-        &[],
-        &Covered::default(),
+        Found {
+            contradictions: &[],
+            faults: &[],
+            known: &Covered::default(),
+        },
         Range {
             from: Some(20),
             to: Some(31),

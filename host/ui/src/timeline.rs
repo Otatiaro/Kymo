@@ -31,7 +31,7 @@ use crate::levels::Levels;
 use crate::listing::{Entry, Events};
 use crate::meaning::Meaning;
 use crate::names;
-use crate::panel::Panel;
+use crate::panel::{Found, Panel};
 use eframe::egui;
 use kymo::events::{Catalogue, Kind};
 use kymo::model::Trace;
@@ -385,17 +385,33 @@ impl Timeline {
         };
         let range = self.range();
         if !self.moving || panel.range().is_none() {
-            panel.report(
-                &self.trace,
-                &meaning.kernel.contradictions,
-                &meaning.load.cpu.known,
-                range,
-            );
+            let faults: Vec<usize> = meaning
+                .kernel
+                .faults
+                .iter()
+                .map(|faulted| faulted.edge.element)
+                .collect();
+            let found = Found {
+                contradictions: &meaning.kernel.contradictions,
+                faults: &faults,
+                known: &meaning.load.cpu.known,
+            };
+            panel.report(&self.trace, found, range);
         }
         let shown = panel.range().expect("a report computed");
         let (from, to) = (shown.from.unwrap_or_default(), shown.to.unwrap_or_default());
         let title = self.range_title(from, to);
-        let picked = panel.show(ui, &title, &|kind, name| self.subject_shown(kind, name));
+        let faults: Vec<String> = meaning
+            .kernel
+            .faults
+            .iter()
+            .filter(|faulted| (from..to).contains(&faulted.edge.cycles))
+            .map(|faulted| {
+                let time = self.time((faulted.edge.cycles - self.origin()) as f64);
+                format!("fault at {time}: {}", meaning.kernel.describe_fault(faulted))
+            })
+            .collect();
+        let picked = panel.show(ui, &title, &faults, &|kind, name| self.subject_shown(kind, name));
         self.panel = Some(panel);
         if let Some(instance) = picked {
             self.go_to(instance.from.cycles, instance.to.cycles);

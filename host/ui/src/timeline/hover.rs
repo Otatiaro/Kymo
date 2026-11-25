@@ -55,6 +55,7 @@ enum Swatch {
     Wait,
     Loss,
     Suspect,
+    Fault,
 }
 
 impl Swatch {
@@ -74,6 +75,7 @@ impl Swatch {
             Self::Wait => palette.wait,
             Self::Loss => palette.loss,
             Self::Suspect => palette.suspect,
+            Self::Fault => palette.loss,
         }
     }
 }
@@ -189,6 +191,31 @@ impl Timeline {
             let bars = (area.top() + tops[n] + 4.0, area.top() + tops[n + 1] - 4.0);
             let lane = super::rows::lane_at(bars, pointer.y, shown);
             cards.extend(self.duration_cards(row, lane, shown, low, high));
+        }
+        if let (Some(meaning), Some(n)) = (&self.meaning, n) {
+            let wide = view.cycles(pointer.x - super::draw::FAULT);
+            let far = view.cycles(pointer.x + super::draw::FAULT);
+            cards.extend(
+                meaning
+                    .kernel
+                    .faults
+                    .iter()
+                    .filter(|faulted| (wide..=far).contains(&faulted.edge.cycles))
+                    .filter(|faulted| super::rows::fault_row(lines, faulted.context) == Some(n))
+                    .take(8)
+                    .map(|faulted| {
+                        let mut card = Card::new("Fault".to_owned(), "", Swatch::Fault);
+                        card.facts
+                            .push(("time", self.time((faulted.edge.cycles - self.origin()) as f64)));
+                        card.facts.extend(meaning.kernel.fault_facts(faulted));
+                        if card.facts.iter().any(|(name, _)| *name == "probable-callers") {
+                            card.notes.push(
+                                "Callers from return addresses left in the stack: an old one can pass.".to_owned(),
+                            );
+                        }
+                        card
+                    }),
+            );
         }
         cards.extend(
             self.marks()

@@ -64,6 +64,35 @@ impl Symbols {
         symbols
     }
 
+    /// Symbols of `functions` alone, each its address, its size and its name.
+    #[cfg(test)]
+    pub(crate) fn of_functions(functions: &[(u64, u64, &str)]) -> Self {
+        Self {
+            functions: functions
+                .iter()
+                .map(|&(address, size, name)| Symbol {
+                    address,
+                    size,
+                    name: name.to_owned(),
+                    bases: Vec::new(),
+                })
+                .collect(),
+            objects: Vec::new(),
+        }
+    }
+
+    /// The address of the function that holds `address`, a Thumb address or
+    /// not.
+    pub fn function(&self, address: u64) -> Option<u64> {
+        let address = address & !1;
+        let index = self
+            .functions
+            .partition_point(|symbol| symbol.address <= address)
+            .checked_sub(1)?;
+        let symbol = &self.functions[index];
+        (address - symbol.address < symbol.size).then_some(symbol.address)
+    }
+
     /// The name of what a pointer to `pointee` holding `address` points at;
     /// none for a null pointer, even where an image has a symbol at 0 (a
     /// Cortex-M vector table).

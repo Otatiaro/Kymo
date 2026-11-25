@@ -67,8 +67,11 @@
 //!   or a loss; a recording that starts later counts the idle task as a
 //!   task.
 
+use crate::code::Code;
 use crate::events::{Catalogue, Event, Kind, Pointee};
+use crate::fault::{self, Fault};
 use crate::interrupts::Interrupts;
+use crate::lines::Lines;
 use crate::load::{Covered, Cpu};
 pub use crate::model::Edge;
 use crate::model::{Element, Trace};
@@ -152,6 +155,29 @@ pub struct Ready {
     /// The task_ready that starts the activation, in `Meaning::wakes`; none for
     /// an activation that starts at a loss.
     pub wake: Option<usize>,
+}
+
+/// Where a fault came: the context the core was in when it faulted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    /// In thread mode: the task on the core, or the idle task for none.
+    Task(Option<usize>),
+    /// In the innermost handler entered for the exception the fault
+    /// interrupted.
+    Handler(usize),
+    /// In the handler of an exception that has none entered: one the adapter
+    /// does not trace.
+    Exception(u16),
+    /// In thread mode while the task on the core is unknown.
+    Unknown,
+}
+
+/// A hardware fault, where it came and when.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Faulted {
+    pub fault: Fault,
+    pub context: Context,
+    pub edge: Edge,
 }
 
 /// Spans, each list in the order its spans closed.
@@ -454,6 +480,8 @@ pub(crate) enum Hook {
         mutex: Field,
         task: Option<Field>,
     },
+    /// A hardware fault, `kymo::fault`.
+    Fault(fault::Layout),
 }
 
 /// How a kernel's priorities compare.
@@ -501,6 +529,8 @@ pub(crate) struct Dialect {
 pub struct Meaning<'a> {
     symbols: &'a Symbols,
     interrupts: &'a Interrupts,
+    lines: &'a Lines,
+    code: &'a Code,
     hooks: HashMap<u16, Hook>,
     /// The wake reasons for a delay that ran out.
     elapsed: &'static [&'static str],
@@ -537,6 +567,8 @@ pub struct Meaning<'a> {
     pub closed: Spans,
     /// The elements that contradict the adapter's order.
     pub contradictions: Vec<usize>,
+    /// The hardware faults, in order.
+    pub faults: Vec<Faulted>,
     /// The task on the core and since when; none while unknown.
     running: Option<(Option<usize>, Edge)>,
     /// The handlers entered and not left, innermost last, each with its
@@ -581,10 +613,16 @@ impl<'a> Meaning<'a> {
             (false, true) => crate::freertos::dialect(catalogue)?,
             _ => crate::opsy::dialect(catalogue)?,
         };
+        let mut hooks = hooks;
+        if let Some((&id, event)) = catalogue.events.iter().find(|(_, event)| event.name == fault::EVENT) {
+            hooks.insert(id, Hook::Fault(fault::Layout::of(event)?));
+        }
         let buffering = first == 0 && hooks.values().any(|hook| matches!(hook, Hook::Starting { .. }));
         Ok(Self {
             symbols: &catalogue.symbols,
             interrupts: &catalogue.interrupts,
+            lines: &catalogue.lines,
+            code: &catalogue.code,
             hooks,
             elapsed,
             tick,
@@ -603,6 +641,7 @@ impl<'a> Meaning<'a> {
             mutexes: Subjects::default(),
             closed: Spans::default(),
             contradictions: Vec::new(),
+            faults: Vec::new(),
             running: None,
             entered: Vec::new(),
             nesting_known: true,
@@ -615,6 +654,32 @@ impl<'a> Meaning<'a> {
             loss: None,
             last: None,
         })
+    }
+
+    /// Where `context` is, by name and value as `kymo decode --meaning`
+    /// writes it: `task=<name>`, `task=idle`, `handler=<name>`,
+    /// `exception=<number>`, or `context=unknown`.
+    pub fn place(&self, context: Context) -> (&'static str, String) {
+        match context {
+            Context::Task(Some(task)) => ("task", self.tasks.list[task].name.clone()),
+            Context::Task(None) => ("task", "idle".to_owned()),
+            Context::Handler(handler) => ("handler", self.handlers.list[handler].name.clone()),
+            Context::Exception(exception) => ("exception", exception.to_string()),
+            Context::Unknown => ("context", "unknown".to_owned()),
+        }
+    }
+
+    /// Where `faulted` came, then what the fault is (`Fault::facts`).
+    pub fn fault_facts(&self, faulted: &Faulted) -> Vec<(&'static str, String)> {
+        let mut facts = vec![self.place(faulted.context)];
+        facts.extend(faulted.fault.facts(self.symbols, self.lines, self.code));
+        facts
+    }
+
+    /// `faulted` as `kymo decode --meaning` writes it after its edge: its
+    /// facts, each `name=value`.
+    pub fn describe_fault(&self, faulted: &Faulted) -> String {
+        fault::written(&self.fault_facts(faulted))
     }
 
     /// The whole of `trace`, a trace of `catalogue`'s image taken in. An
@@ -630,7 +695,7 @@ impl<'a> Meaning<'a> {
 
     /// Whether the image has a kernel adapter's events.
     pub fn traced(&self) -> bool {
-        !self.hooks.is_empty()
+        self.hooks.values().any(|hook| !matches!(hook, Hook::Fault(_)))
     }
 
     /// Takes in `elements` from `from` on.
@@ -652,7 +717,9 @@ impl<'a> Meaning<'a> {
                     let Some(hook) = hooks.get(&id) else {
                         continue;
                     };
-                    if !self.buffering {
+                    if let Hook::Fault(layout) = hook {
+                        self.fault(layout.read(&event.payload), edge);
+                    } else if !self.buffering {
                         self.hook(hook, &event.payload, edge);
                     } else if matches!(hook, Hook::Starting { .. }) {
                         self.hook(hook, &event.payload, edge);
@@ -744,6 +811,7 @@ impl<'a> Meaning<'a> {
             }
         }
         match hook {
+            Hook::Fault(layout) => self.fault(layout.read(payload), edge),
             Hook::Starting { idle } => {
                 self.idle.get_or_insert(idle.read(payload));
             }
@@ -1005,6 +1073,23 @@ impl<'a> Meaning<'a> {
                 span: Span { from, to: edge },
             });
         }
+    }
+
+    /// A fault, in the context the core was in: in thread mode, the task on
+    /// the core; in handler mode, the innermost handler entered for the
+    /// exception it interrupted. It changes no span: what follows is the
+    /// application's handler's.
+    fn fault(&mut self, fault: Fault, edge: Edge) {
+        let context = match fault.interrupted() {
+            None => self.running.map_or(Context::Unknown, |(task, _)| Context::Task(task)),
+            Some(exception) => self
+                .entered
+                .iter()
+                .rev()
+                .find(|entered| entered.3 == Some(exception))
+                .map_or(Context::Exception(exception), |entered| Context::Handler(entered.0)),
+        };
+        self.faults.push(Faulted { fault, context, edge });
     }
 
     fn run(&mut self, task: Option<usize>, edge: Edge) {
@@ -1547,7 +1632,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
 
 /// `kymo decode --meaning`'s output: the spans of a capture's trace, a line
 /// each, those still open at its end last with `to=open`; each task_ready
-/// and its cause; each time ready; then the contradictions. An edge is the
+/// and its cause; each time ready; each fault; then the contradictions. An edge is the
 /// index of its event, or `lost`.
 pub fn lines(trace: &Trace, meaning: &Meaning) -> Vec<String> {
     let mut lines = Vec::new();
@@ -1608,6 +1693,13 @@ pub fn lines(trace: &Trace, meaning: &Meaning) -> Vec<String> {
                 edge(ready.span.to)
             },
             task(Some(ready.task))
+        ));
+    }
+    for faulted in &meaning.faults {
+        lines.push(format!(
+            "fault at={} {}",
+            edge(faulted.edge),
+            meaning.describe_fault(faulted)
         ));
     }
     for &element in &meaning.contradictions {

@@ -1,7 +1,7 @@
 //! Rules on the statistics of a range, as `kymo check` judges them.
 //!
 //! A rule bounds a statistic of a group of `kymo stats`, or of the range
-//! (losses, suspect writers, contradictions), or holds it within a margin of
+//! (losses, suspect writers, contradictions, faults), or holds it within a margin of
 //! the same statistic in a reference `kymo stats --json`.
 //!
 //! Instances excluded from a group (a loss, an overrun write) have values
@@ -127,6 +127,7 @@ enum Total {
     Losses,
     Suspects,
     Contradictions,
+    Faults,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,6 +156,7 @@ impl Rule {
             What::Range(Total::Losses) => "losses".to_owned(),
             What::Range(Total::Suspects) => "suspects".to_owned(),
             What::Range(Total::Contradictions) => "contradictions".to_owned(),
+            What::Range(Total::Faults) => "faults".to_owned(),
             What::Group {
                 subject,
                 metric,
@@ -203,7 +205,8 @@ fn rule(written: Written) -> Result<Rule, String> {
             "losses" => Total::Losses,
             "suspects" => Total::Suspects,
             "contradictions" => Total::Contradictions,
-            other => return Err(format!("capture {other:?}: losses, suspects or contradictions")),
+            "faults" => Total::Faults,
+            other => return Err(format!("capture {other:?}: losses, suspects, contradictions or faults")),
         };
         if written.kind.is_some()
             || written.subject.is_some()
@@ -539,6 +542,7 @@ fn judge_rule(report: &Report, rule: &Rule, baseline: Option<&Baseline>) -> Resu
                 Total::Losses => report.losses as f64,
                 Total::Suspects => report.suspects as f64,
                 Total::Contradictions => report.contradictions as f64,
+                Total::Faults => report.faults as f64,
             };
             let outcome = decide(value, value, min, max);
             let text = format!(

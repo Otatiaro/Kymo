@@ -150,6 +150,8 @@ pub struct Report {
     pub losses: usize,
     pub suspects: u64,
     pub contradictions: usize,
+    /// The hardware faults in the range.
+    pub faults: usize,
     pub groups: Vec<Group>,
 }
 
@@ -276,6 +278,8 @@ impl Places {
 pub struct Found<'a> {
     pub instances: &'a [Instance],
     pub contradictions: &'a [usize],
+    /// The elements that are faults.
+    pub faults: &'a [usize],
     pub known: &'a Covered,
 }
 
@@ -285,6 +289,7 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
     let Found {
         instances,
         contradictions,
+        faults,
         known,
     } = found;
     let places = Places::new(trace);
@@ -320,6 +325,7 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         .iter()
         .filter(|&&element| inside(places.cycles[element]))
         .count();
+    let faults = faults.iter().filter(|&&element| inside(places.cycles[element])).count();
 
     let mut groups: Vec<Group> = Vec::new();
     let mut points: Vec<Vec<Point>> = Vec::new();
@@ -376,6 +382,7 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         losses,
         suspects,
         contradictions,
+        faults,
         groups,
     }
 }
@@ -419,13 +426,14 @@ pub fn text(report: &Report) -> Vec<String> {
         None => format!("{} cycles", cycles - report.origin),
     };
     let mut lines = vec![format!(
-        "range {} to {}: {} known, {} losses, {} suspect writers, {} contradictions",
+        "range {} to {}: {} known, {} losses, {} suspect writers, {} contradictions, {} faults",
         instant(report.from),
         instant(report.to),
         duration(report.known, frequency),
         report.losses,
         report.suspects,
-        report.contradictions
+        report.contradictions,
+        report.faults
     )];
     if let Some(index) = report.joined {
         lines[0] += &format!(", joined at index {index}");
@@ -533,6 +541,7 @@ pub fn json(report: &Report) -> String {
         "losses": report.losses,
         "suspects": report.suspects,
         "contradictions": report.contradictions,
+        "faults": report.faults,
         "groups": groups,
     })
     .to_string()

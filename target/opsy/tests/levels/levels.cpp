@@ -237,7 +237,7 @@ std::uint32_t address_of(const void* pointer)
 	return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(pointer));
 }
 
-void in_a_task()
+[[gnu::noinline]] void in_a_task()
 {
 	std::uint32_t const before = g_faults;
 	level_one();
@@ -262,7 +262,7 @@ void in_an_interrupt()
 }
 
 #ifdef __ARM_FP
-void with_a_floating_point_frame()
+[[gnu::noinline]] void with_a_floating_point_frame()
 {
 	// The floating-point registers stacked on entry, not left to the handler:
 	// the decoy is in the frame.
