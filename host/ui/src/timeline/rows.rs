@@ -1,7 +1,7 @@
 //! The lines of the timeline, and the rows of event types they show.
 
 use super::tree::{self, Guide, Kind};
-use super::{CPU, ROW, TASK, Timeline};
+use super::{CPU, GAP, LANE, ROW, TASK, Timeline};
 use crate::levels::Levels;
 use crate::meaning::Meaning;
 use crate::names;
@@ -73,17 +73,21 @@ pub(super) enum Line {
     Mutex(usize),
     /// The row of an event type.
     Event(usize),
+    /// The durations of a type, its place in `Durations::types`, in as many
+    /// lanes as it shows.
+    Duration(usize, usize),
     /// The heading of a namespace, the `n`th of the column (tree.rs).
     Group(usize),
 }
 
 impl Line {
     /// Its height in pixels: the CPU's load the tallest, a task taller than
-    /// the other lines.
+    /// the other lines, durations a lane higher for each lane past the first.
     pub(super) fn height(self) -> f32 {
         match self {
             Line::Cpu => CPU,
             Line::Task(_) => TASK,
+            Line::Duration(_, lanes) => ROW + LANE * lanes.saturating_sub(1) as f32,
             _ => ROW,
         }
     }
@@ -98,7 +102,7 @@ impl Line {
     fn arranged(self) -> bool {
         matches!(
             self,
-            Line::Task(Some(_)) | Line::Handler(_) | Line::Mutex(_) | Line::Event(_)
+            Line::Task(Some(_)) | Line::Handler(_) | Line::Mutex(_) | Line::Event(_) | Line::Duration(..)
         )
     }
 }
@@ -183,6 +187,20 @@ pub(super) fn tops(lines: &[Line], room: f32) -> Vec<f32> {
 
 /// The line `y` pixels below the top of the first, of those whose `tops`
 /// are given.
+/// The bar of lane `lane` of `lanes`, from the top, in a line's bars from
+/// `high` to `low`: the lanes share them evenly, `GAP` apart.
+pub(super) fn lane((high, low): (f32, f32), lane: usize, lanes: usize) -> (f32, f32) {
+    let step = (low - high + GAP) / lanes.max(1) as f32;
+    let from = high + step * lane as f32;
+    (from, from + step - GAP)
+}
+
+/// The lane of `lanes` at `y`, in a line's bars from `high` to `low`.
+pub(super) fn lane_at((high, low): (f32, f32), y: f32, lanes: usize) -> usize {
+    let step = (low - high + GAP) / lanes.max(1) as f32;
+    (((y - high) / step).max(0.0) as usize).min(lanes.saturating_sub(1))
+}
+
 pub(super) fn at(tops: &[f32], y: f32) -> Option<usize> {
     let n = tops.partition_point(|&top| top <= y);
     (y >= 0.0 && n > 0 && n < tops.len()).then(|| n - 1)
@@ -237,33 +255,55 @@ impl Timeline {
         if let Some(meaning) = &mut self.meaning {
             meaning.add(&self.trace.elements, from);
         }
+        if let Some(durations) = &mut self.durations {
+            durations.add(&self.trace.elements, from);
+        }
     }
 
     /// The lines the namespace filter shows: the CPU's load, the kernel's
     /// sections, the tasks by priority, highest first, the handlers and the
     /// mutexes by namespace (names.rs); the rows of event types without a
-    /// kernel adapter, which the event list shows with one.
+    /// kernel adapter, which the event list shows with one; then the
+    /// durations, by namespace.
     pub(super) fn lines(&self) -> Vec<Line> {
         let shown = |line: Line| self.line_shown(line);
-        let Some(meaning) = &self.meaning else {
-            let types: Vec<&str> = self
-                .ids
-                .iter()
-                .map(|id| self.catalogue.events[id].name.as_str())
-                .collect();
-            return by_namespace_then(&types, |_| ())
+        let mut lines = match &self.meaning {
+            None => {
+                let types: Vec<&str> = self
+                    .ids
+                    .iter()
+                    .map(|id| self.catalogue.events[id].name.as_str())
+                    .collect();
+                by_namespace_then(&types, |_| ())
+                    .into_iter()
+                    .map(Line::Event)
+                    .filter(|&line| shown(line))
+                    .collect()
+            }
+            Some(meaning) => {
+                let kernel = &meaning.kernel;
+                kernel_lines(
+                    tasks(meaning),
+                    names::by_namespace(&kernel.handlers.list),
+                    names::by_namespace(&kernel.mutexes.list),
+                    shown,
+                )
+            }
+        };
+        if let Some(durations) = &self.durations {
+            let open = durations.open();
+            let types: Vec<&str> = durations.types.iter().map(String::as_str).collect();
+            let kept: Vec<Line> = by_namespace_then(&types, |_| ())
                 .into_iter()
-                .map(Line::Event)
+                .map(|row| Line::Duration(row, durations.shown(row, &open)))
                 .filter(|&line| shown(line))
                 .collect();
-        };
-        let kernel = &meaning.kernel;
-        kernel_lines(
-            tasks(meaning),
-            names::by_namespace(&kernel.handlers.list),
-            names::by_namespace(&kernel.mutexes.list),
-            shown,
-        )
+            if !kept.is_empty() {
+                lines.push(Line::Section("DURATIONS"));
+                lines.extend(kept);
+            }
+        }
+        lines
     }
 
     /// Whether the namespace filter shows `line`: the CPU's and idle's
@@ -275,6 +315,7 @@ impl Timeline {
             Line::Handler(n) => spaces.subjects[1].get(n),
             Line::Mutex(n) => spaces.subjects[2].get(n),
             Line::Event(row) => spaces.types.get(row),
+            Line::Duration(row, _) => spaces.durations.get(row),
             Line::Section(_) | Line::Cpu | Line::Task(None) | Line::Group(_) => None,
         };
         space.is_none_or(|space| self.filter.shown(space))
@@ -367,6 +408,7 @@ impl Timeline {
             Line::Handler(n) => shown(1, n),
             Line::Mutex(n) => shown(2, n),
             Line::Event(row) => self.rows[row].name.clone(),
+            Line::Duration(row, _) => self.durations().names[row].clone(),
         }
     }
 
@@ -380,8 +422,10 @@ impl Timeline {
             (Line::Mutex(n), Some(kernel)) => kernel.mutexes.list.get(n),
             _ => None,
         };
-        if let Line::Event(row) = line {
-            return self.catalogue.events[&self.ids[row]].name.clone();
+        match line {
+            Line::Event(row) => return self.catalogue.events[&self.ids[row]].name.clone(),
+            Line::Duration(row, _) => return self.durations().types[row].clone(),
+            _ => {}
         }
         name.map_or_else(|| self.label(line), |subject| subject.name.clone())
     }
@@ -391,8 +435,13 @@ impl Timeline {
     pub(super) fn indent(line: Line) -> f32 {
         match line {
             Line::Section(_) | Line::Cpu | Line::Event(_) => 0.0,
-            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) | Line::Group(_) => 12.0,
+            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) | Line::Duration(..) | Line::Group(_) => 12.0,
         }
+    }
+
+    /// The durations, which a line of durations comes from.
+    pub(super) fn durations(&self) -> &crate::durations::Durations {
+        self.durations.as_ref().expect("a line of durations has the durations")
     }
 
     /// The marks, those after the last event at its cycles.
