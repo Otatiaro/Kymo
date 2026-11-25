@@ -38,9 +38,10 @@ highest first, and the idle task, where it holds the core; a row per
 interrupt handler, a nested one in the lower half, the
 whole row from a loss to the next task switch, the nesting unknown; a row
 per mutex, held, with its owner named where it fits, or waited for
-(fainter). Hovering a span shows its start, end and duration; a task's, its
-priority at the pointer, left out until an event gives it and from a loss
-to the next, and the last events up to the switch that ends it.
+(fainter). Handlers and mutexes follow their namespace, then their name.
+Hovering a span shows its start, end and duration; a task's, its priority
+at the pointer, left out until an event gives it and from a loss to the
+next, and the last events up to the switch that ends it.
 
 Under a task's runs, a thin grey bar marks its time ready: woken, waiting
 for the core. Hovering a run or the bar shows what woke the task, why, when,

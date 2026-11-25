@@ -3,6 +3,7 @@
 use super::{CPU, ROW, TASK, Timeline};
 use crate::levels::Levels;
 use crate::meaning::Meaning;
+use crate::names;
 use kymo::model::Element;
 
 /// The tasks other than idle in the order of their lines: highest priority
@@ -151,7 +152,7 @@ impl Timeline {
     }
 
     /// The lines: the CPU's load, the kernel's sections, the tasks by priority,
-    /// highest first; the rows of event types without a kernel adapter, which
+    /// highest first, the handlers and the mutexes by namespace (names.rs); the rows of event types without a kernel adapter, which
     /// the event list shows with one.
     pub(super) fn lines(&self) -> Vec<Line> {
         let Some(meaning) = &self.meaning else {
@@ -163,11 +164,15 @@ impl Timeline {
         lines.push(Line::Task(None));
         if !kernel.handlers.list.is_empty() {
             lines.push(Line::Section("INTERRUPTS"));
-            lines.extend((0..kernel.handlers.list.len()).map(Line::Handler));
+            lines.extend(
+                names::by_namespace(&kernel.handlers.list)
+                    .into_iter()
+                    .map(Line::Handler),
+            );
         }
         if !kernel.mutexes.list.is_empty() {
             lines.push(Line::Section("MUTEXES"));
-            lines.extend((0..kernel.mutexes.list.len()).map(Line::Mutex));
+            lines.extend(names::by_namespace(&kernel.mutexes.list).into_iter().map(Line::Mutex));
         }
         lines
     }

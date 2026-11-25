@@ -65,6 +65,24 @@ pub fn types(types: &[&str]) -> Vec<String> {
     }
 }
 
+/// The indices of `subjects` grouped by namespace: namespaces compared scope
+/// by scope, the anonymous ones left out, a namespace's own members before
+/// its nested namespaces'; within one, by name, then by address.
+pub fn by_namespace(subjects: &[Subject]) -> Vec<usize> {
+    let scopes: Vec<Vec<&str>> = subjects.iter().map(|subject| scopes(&subject.name)).collect();
+    let mut order: Vec<usize> = (0..subjects.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a_scopes, b_scopes) = (&scopes[a], &scopes[b]);
+        let (a_space, a_name) = a_scopes.split_at(a_scopes.len() - 1);
+        let (b_space, b_name) = b_scopes.split_at(b_scopes.len() - 1);
+        a_space
+            .cmp(b_space)
+            .then_with(|| a_name.cmp(b_name))
+            .then_with(|| subjects[a].address.cmp(&subjects[b].address))
+    });
+    order
+}
+
 /// The scopes of a qualified `name`, the anonymous namespaces left out: a
 /// `::` inside template arguments or a parameter list separates none.
 fn scopes(name: &str) -> Vec<&str> {
@@ -219,6 +237,45 @@ mod tests {
         assert_eq!(
             names(&[&[("app::f(app::x)::s", 1), ("app::b", 2)]]),
             [vec!["f(app::x)::s", "b"]]
+        );
+    }
+
+    /// Subjects group by namespace, a global name first, a namespace's own
+    /// members before its nested namespaces', the anonymous ones left out;
+    /// within one by name, then by address.
+    #[test]
+    fn subjects_group_by_namespace() {
+        let subjects: Vec<Subject> = [
+            ("drv::spi::g_bus", 1),
+            ("app::(anonymous namespace)::g_tick", 2),
+            ("app::sub::g_a", 3),
+            ("g_global", 4),
+            ("app::g_z", 0x30),
+            ("drv::g_dma", 6),
+            ("app::(anonymous namespace)::g_z", 0x10),
+            ("app::g_b", 8),
+            ("app::z_last", 9),
+        ]
+        .iter()
+        .map(|&(name, address)| subject(name, address))
+        .collect();
+        let order: Vec<(&str, u64)> = by_namespace(&subjects)
+            .into_iter()
+            .map(|n| (subjects[n].name.as_str(), subjects[n].address))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("g_global", 4),
+                ("app::g_b", 8),
+                ("app::(anonymous namespace)::g_tick", 2),
+                ("app::(anonymous namespace)::g_z", 0x10),
+                ("app::g_z", 0x30),
+                ("app::z_last", 9),
+                ("app::sub::g_a", 3),
+                ("drv::g_dma", 6),
+                ("drv::spi::g_bus", 1),
+            ]
         );
     }
 
