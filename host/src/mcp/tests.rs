@@ -249,7 +249,19 @@ fn the_protocol_answers_requests_and_drops_notifications() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["summary", "find", "events", "stats", "check"]);
+    assert_eq!(
+        names,
+        [
+            "summary",
+            "find",
+            "events",
+            "context",
+            "subject",
+            "intervals",
+            "stats",
+            "check"
+        ]
+    );
     for tool in response["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["required"][0], "capture", "{tool}");
     }
@@ -530,6 +542,208 @@ fn instants_read_an_index_or_a_time_with_its_unit() {
     for wrong in ["12", "#-1", "#", "ms", "inf s", "1e999s", "3 parsecs"] {
         assert!(Instant::parse(wrong).is_err(), "{wrong}");
     }
+}
+
+/// `context` gives the event an instant falls on or after, and what is open
+/// there: here no kernel, a duration open from its begin_of to its end_of.
+#[test]
+fn context_tells_what_is_open_at_an_instant() {
+    let file = File::new();
+    let mut server = server();
+    let all = decoded(&file);
+    let at = |server: &mut Server, at: &str| text(server, "context", json!({ "capture": file.name(), "at": at }));
+    let open = at(&mut server, "#19");
+    assert_eq!(
+        open.lines().collect::<Vec<_>>(),
+        [
+            format!("after {}", all[19]),
+            "kernel: the image has no kernel adapter events".to_owned(),
+            "duration app::work, lane 0, since #18, 100 (100 µs) ago".to_owned(),
+        ]
+    );
+    // An instant falls on the event at its cycles, or after the one before.
+    assert_eq!(at(&mut server, "1.9ms"), open);
+    assert_eq!(at(&mut server, "1.95ms"), open);
+    let closed = at(&mut server, "#20");
+    assert_eq!(closed.lines().next(), Some(format!("after {}", all[20]).as_str()));
+    assert!(!closed.contains("duration"), "{closed}");
+}
+
+/// `intervals` gives `intervals::of` over the capture: begin_of to end_of,
+/// one excluded by the suspect line, over a range or the whole.
+#[test]
+fn intervals_measures_from_an_event_to_the_next_of_another() {
+    let file = File::new();
+    let mut server = server();
+    let whole = text(
+        &mut server,
+        "intervals",
+        json!({ "capture": file.name(), "a": "begin_of", "b": "end_of", "worst": 2 }),
+    );
+    assert_eq!(
+        whole.lines().collect::<Vec<_>>(),
+        [
+            "17 intervals; 0 A without a B before the next A; excluded 0 by a loss, 1 by a suspect line; 0 cut",
+            "min 200 (200 µs) at #0",
+            "p50 200 (200 µs)",
+            "p90 200 (200 µs)",
+            "p99 200 (200 µs)",
+            "max 200 (200 µs) at #0",
+            "mean 200.0 cycles (200 µs)",
+            "worst:",
+            "  #0 to #2: 200 (200 µs)",
+            "  #3 to #5: 200 (200 µs)",
+        ]
+    );
+    let range = text(
+        &mut server,
+        "intervals",
+        json!({ "capture": file.name(), "a": "begin_of", "b": "end_of", "from": "#5", "to": "1.2ms" }),
+    );
+    assert!(
+        range.starts_with(
+            "2 intervals; 0 A without a B before the next A; excluded 0 by a loss, 0 by a suspect line; 1 cut\n"
+        ),
+        "{range}"
+    );
+    let (error, failed) = call(
+        &mut server,
+        "intervals",
+        json!({ "capture": file.name(), "a": "begin_of", "b": " " }),
+    );
+    assert!(failed);
+    assert_eq!(error, "a and b each need a word");
+}
+
+/// The adapter's catalogue of OpSy's tests, with the ring of the test
+/// captures.
+fn kernel_catalogue() -> Catalogue {
+    Catalogue {
+        rings: catalogue().rings,
+        ..crate::opsy::tests::catalogue()
+    }
+}
+
+fn kernel_parse(_: &[u8], _: &str, _: Option<&Path>) -> target::Result<Catalogue> {
+    Ok(kernel_catalogue())
+}
+
+const TASK: u32 = 0x2000_0100;
+const OTHER: u32 = 0x2000_0200;
+const HANDLER: u32 = 0x0800_0401;
+const NOTIFIED: u32 = 0;
+
+/// A capture of the adapter's events `steps`, each a hook and its fields, at
+/// index 0 on, `STEP` cycles apart.
+fn write_kernel(path: &Path, steps: &[(&str, &[u32])]) {
+    let catalogue = kernel_catalogue();
+    let ring = &catalogue.rings[0];
+    let header = Header {
+        first: 0,
+        clock: Some(CLOCK),
+        channel: ring.name.clone(),
+        elf: Elf::Embedded(b"not read: the catalogue is the test's".to_vec()),
+    };
+    let mut writer = Writer::create(path, &header).unwrap();
+    writer
+        .write(&Record::Pass {
+            host_ns: 0,
+            write_index: 0,
+        })
+        .unwrap();
+    for (index, &(hook, fields)) in (0..).zip(steps) {
+        let name = format!("kymo::opsy::{hook}");
+        let event = catalogue.events.values().find(|event| event.name == name).unwrap();
+        let head = u32::from(event.id) | 1 << 16 | decode::lap(index, ring) << 17;
+        let mut slot = head.to_le_bytes().to_vec();
+        slot.extend((index * STEP).to_le_bytes());
+        slot.extend(fields.iter().flat_map(|field| field.to_le_bytes()));
+        slot.resize(16, 0);
+        writer.write(&Record::Event { index, slots: &slot }).unwrap();
+    }
+    let end = steps.len() as u32;
+    writer
+        .write(&Record::Pass {
+            host_ns: 1_000_000,
+            write_index: end,
+        })
+        .unwrap();
+    writer.write(&Record::End { next: end }).unwrap();
+    writer.finish().unwrap();
+}
+
+/// `subject` lists a task's activations and a handler's runs, each with its
+/// metrics; a name neither is an error that names them.
+#[test]
+fn subject_lists_a_task_s_activations_and_a_handler_s_runs() {
+    let path = path();
+    let file = File(path.clone());
+    write_kernel(
+        &path,
+        &[
+            ("task_started", &[OTHER]),
+            ("isr_enter", &[HANDLER, 61]),
+            ("task_ready", &[TASK, NOTIFIED]),
+            ("isr_exit", &[HANDLER]),
+            ("task_started", &[TASK]),
+            ("task_wait", &[TASK]),
+            ("task_started", &[OTHER]),
+            ("isr_enter", &[HANDLER, 61]),
+            ("task_ready", &[TASK, NOTIFIED]),
+            ("isr_exit", &[HANDLER]),
+            ("task_started", &[TASK]),
+            ("task_wait", &[TASK]),
+            ("task_started", &[OTHER]),
+        ],
+    );
+    let mut server = Server::new(kernel_parse);
+    let subject = |server: &mut Server, arguments: Value| {
+        let mut arguments = arguments;
+        arguments["capture"] = json!(file.name());
+        text(server, "subject", arguments)
+    };
+    let task = subject(&mut server, json!({ "subject": "0x20000100" }));
+    let cause = "woken by notified, cause handler:0x08000401 (TIM2), latency 200 (200 µs), response 300 (300 µs), \
+gross 100 (100 µs), net 100 (100 µs), preempted by tasks 0, by handlers 0, ready 200 (200 µs)";
+    assert_eq!(
+        task.lines().collect::<Vec<_>>(),
+        [
+            "task 0x20000100: 2 activations, 2 ran; worst latency 200 (200 µs) at #2; worst response 300 (300 µs) at #2"
+                .to_owned(),
+            format!("#2 {cause}, period 600 (600 µs), ends #5"),
+            format!("#8 {cause}, blocked before 300 (300 µs), ends #11"),
+        ]
+    );
+    let window = subject(
+        &mut server,
+        json!({ "subject": "0x20000100", "from": "#3", "to": "#9" }),
+    );
+    assert_eq!(
+        window.lines().nth(1),
+        Some(format!("#8 {cause}, blocked before 300 (300 µs), ends #11").as_str())
+    );
+    assert_eq!(window.lines().count(), 2, "{window}");
+
+    let runs = [
+        "handler 0x08000401 (TIM2): 2 runs; worst gross 200 (200 µs) at #1",
+        "#1 gross 200 (200 µs), net 200 (200 µs), depth 0, period 600 (600 µs), ends #3",
+        "#7 gross 200 (200 µs), net 200 (200 µs), depth 0, ends #9",
+    ];
+    for name in ["0x08000401 (TIM2)", "0x08000401"] {
+        let handler = subject(&mut server, json!({ "subject": name }));
+        assert_eq!(handler.lines().collect::<Vec<_>>(), runs, "{name}");
+    }
+
+    let (error, failed) = call(
+        &mut server,
+        "subject",
+        json!({ "capture": file.name(), "subject": "0x0800" }),
+    );
+    assert!(failed);
+    assert_eq!(
+        error,
+        "no task or handler 0x0800; the tasks are 0x20000200, 0x20000100; the handlers are 0x08000401 (TIM2)"
+    );
 }
 
 /// Each line read on stdin answered on stdout, blank lines skipped.

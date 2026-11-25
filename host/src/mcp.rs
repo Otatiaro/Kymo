@@ -332,6 +332,22 @@ impl Loaded {
         })
     }
 
+    /// The position of the last element at or before `at`: none before the
+    /// first.
+    pub fn last_at(&self, at: Instant) -> Result<Option<usize>, String> {
+        let after = match at {
+            Instant::Index(index) => {
+                let place = u64::from(index.wrapping_sub(self.trace.first));
+                self.places.partition_point(|&other| other <= place)
+            }
+            Instant::Seconds(seconds) => {
+                let cycles = self.time(seconds)?;
+                self.cycles.partition_point(|&other| other <= cycles)
+            }
+        };
+        Ok(after.checked_sub(1))
+    }
+
     /// The cycles of `at`: those of the first element at or after an index,
     /// none past the last element.
     pub fn cycles_of(&self, at: Instant) -> Result<Option<i64>, String> {

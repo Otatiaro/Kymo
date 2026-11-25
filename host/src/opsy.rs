@@ -88,4 +88,4 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

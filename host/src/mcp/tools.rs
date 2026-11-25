@@ -1,9 +1,10 @@
 //! The tools of `kymo mcp`: what each takes, and the text it answers.
 
 use super::{Captures, Instant, Loaded, Options};
+use crate::meaning::{Edge, Meaning, Span};
 use crate::model::Element;
 use crate::words::Words;
-use crate::{check, events, meaning, record, stats};
+use crate::{check, durations, events, intervals, meaning, record, stats};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -82,7 +83,7 @@ pub struct Tool {
     run: fn(&mut Captures, &Arguments) -> Result<String, String>,
 }
 
-const TOOLS: [Tool; 5] = [
+const TOOLS: [Tool; 8] = [
     Tool {
         name: "summary",
         description: "What a capture holds: its events, slots and losses, its span and frequency, how \
@@ -137,6 +138,66 @@ filter, as find's, leaves out events; losses and suspect lines stay.",
             LIMIT_ARGUMENT,
         ],
         run: events,
+    },
+    Tool {
+        name: "context",
+        description: "The state after an event, as the kernel adapter and the durations know it: the \
+task on the core and since when, the handlers open from the outermost, the mutexes held and waited \
+for, the durations open, the tasks ready, the last wake of the task on the core, and the faults so \
+far. A time gives the state after the last event at or before it.",
+        arguments: &[Argument {
+            name: "at",
+            kind: Kind::Instant,
+            required: true,
+            description: "The instant: an event's index (#1234) or a time since the first event (12.5ms).",
+        }],
+        run: context,
+    },
+    Tool {
+        name: "subject",
+        description: "The life of a task or a handler, a line per activation or run that starts in the \
+range. A task's: the wake, its reason and cause (who unblocked it), the wake latency, the response, \
+gross and net times, the time preempted by tasks and by handlers, the time ready, the time blocked \
+since the previous activation ended, and the period to the next wake. A handler's: gross and net \
+times, depth and period. Times in cycles, then in seconds when the frequency is known.",
+        arguments: &[
+            Argument {
+                name: "subject",
+                kind: Kind::Text,
+                required: true,
+                description: "The task's or handler's name, as summary lists it.",
+            },
+            FROM,
+            TO,
+            LIMIT_ARGUMENT,
+        ],
+        run: subject,
+    },
+    Tool {
+        name: "intervals",
+        description: "The delay from each event a filter A keeps to the first event a filter B keeps \
+before the next A: the count, the A with no B, those excluded by a loss or a suspect line, those cut \
+by the range, then min, p50, p90, p99, max and mean, and the worst with the indexes of both ends. \
+An event both filters keep ends one interval and opens the next. Filters as find's: plain words are \
+alternatives, so a task's wake to its start is a=\"+task_ready +task=<address>\".",
+        arguments: &[
+            Argument {
+                name: "a",
+                kind: Kind::Text,
+                required: true,
+                description: "The filter of the events that open an interval.",
+            },
+            Argument {
+                name: "b",
+                kind: Kind::Text,
+                required: true,
+                description: "The filter of the events that close it.",
+            },
+            FROM,
+            TO,
+            argument("worst", Kind::Count, "The worst intervals given, 10 by default."),
+        ],
+        run: intervals,
     },
     Tool {
         name: "stats",
@@ -536,6 +597,404 @@ fn events(captures: &mut Captures, arguments: &Arguments) -> Result<String, Stri
         return Ok("nothing in this range".to_owned());
     }
     Ok(page(&loaded, &positions, limit, Some(to)).join("\n"))
+}
+
+/// A time: its cycles, then in seconds when the frequency is known.
+fn time(loaded: &Loaded, cycles: i64) -> String {
+    match loaded.trace.frequency {
+        Some(_) if cycles != 0 => format!("{cycles} ({})", stats::duration(cycles, loaded.trace.frequency)),
+        _ => cycles.to_string(),
+    }
+}
+
+/// Whether `subject` is named `name`: a handler also by its name without
+/// the interrupt that follows it, ` (IRQ45)`.
+fn named(subject: &meaning::Subject, name: &str) -> bool {
+    subject
+        .name
+        .strip_prefix(name)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(" ("))
+}
+
+/// An edge as the index of its event, or a loss.
+fn edge(loaded: &Loaded, edge: Edge) -> String {
+    if edge.lost {
+        "a loss".to_owned()
+    } else {
+        format!("#{}", loaded.index(edge.element))
+    }
+}
+
+/// The kernel adapter's meaning of `elements`, from the capture's start.
+fn kernel(loaded: &Loaded, elements: &[Element]) -> Result<Meaning<'static>, String> {
+    let mut kernel = Meaning::new(loaded.catalogue, loaded.trace.first).map_err(|error| error.to_string())?;
+    if !kernel.traced() {
+        return Err("the image has no kernel adapter events".to_owned());
+    }
+    kernel.add(elements, 0);
+    Ok(kernel)
+}
+
+fn context(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
+    let loaded = load(captures, arguments)?;
+    let at = arguments.instant("at")?.expect("a required argument");
+    let elements = &loaded.trace.elements;
+    let event = loaded.last_at(at)?.and_then(|last| {
+        (0..=last)
+            .rev()
+            .find(|&position| matches!(elements[position], Element::Event { .. }))
+            .map(|event| (last, event))
+    });
+    let Some((last, event)) = event else {
+        return Err("no event at or before this instant".to_owned());
+    };
+    let Element::Event { cycles: now, .. } = elements[event] else {
+        unreachable!("an event")
+    };
+    let elements = &elements[..=last];
+    let since = |from: Edge| {
+        format!(
+            "since {}, {} ago",
+            edge(&loaded, from),
+            time(&loaded, now - from.cycles)
+        )
+    };
+    let mut lines = vec![format!(
+        "after {}",
+        record::line(&loaded.catalogue.symbols, &elements[event])
+    )];
+    match kernel(&loaded, elements) {
+        Err(error) => lines.push(format!("kernel: {error}")),
+        Ok(kernel) => {
+            let task = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
+            let open = kernel.open();
+            let running = open.runs.first().map(|run| run.task);
+            lines.push(match open.runs.first() {
+                Some(run) => format!("core: {} {}", task(run.task), since(run.span.from)),
+                None => "core: unknown, a loss hides it or no switch came yet".to_owned(),
+            });
+            let mut interrupts = open.interrupts.clone();
+            interrupts.sort_by_key(|interrupt| interrupt.span.from.element);
+            if interrupts.is_empty() {
+                lines.push("handlers open: none".to_owned());
+            }
+            for interrupt in &interrupts {
+                let depth = interrupt
+                    .depth
+                    .map_or_else(|| "depth unknown".to_owned(), |depth| format!("depth {depth}"));
+                lines.push(format!(
+                    "handler {}, {depth}, {}",
+                    kernel.handlers.list[interrupt.handler].name,
+                    since(interrupt.span.from)
+                ));
+            }
+            for hold in &open.holds {
+                lines.push(format!(
+                    "mutex {} {} {}, {}",
+                    kernel.mutexes.list[hold.mutex].name,
+                    if hold.waiting { "waited for by" } else { "held by" },
+                    kernel.tasks.list[hold.task].name,
+                    since(hold.span.from)
+                ));
+            }
+            let mut activations = kernel.open_activations();
+            activations.sort_by_key(|activation| activation.span.from.element);
+            for activation in &activations {
+                let woken = match (&activation.reason, activation.cause) {
+                    (Some(reason), Some(cause)) => format!("woken by {reason}, cause {}", kernel.cause(cause)),
+                    _ => "ready from a loss".to_owned(),
+                };
+                let state = if running == Some(Some(activation.task)) {
+                    "on the core"
+                } else {
+                    "ready"
+                };
+                lines.push(format!(
+                    "{state}: {}, {woken}, {}",
+                    task(Some(activation.task)),
+                    since(activation.span.from)
+                ));
+            }
+            if let Some(Some(on)) = running
+                && let Some(wake) = kernel.wakes.iter().rev().find(|wake| wake.task == on)
+            {
+                lines.push(format!(
+                    "last wake of {}: by {}, cause {}, at {}, {} ago",
+                    task(Some(on)),
+                    wake.reason,
+                    kernel.cause(wake.cause),
+                    edge(&loaded, wake.edge),
+                    time(&loaded, now - wake.edge.cycles)
+                ));
+            }
+            if let Some(last) = kernel.faults.last() {
+                lines.push(format!(
+                    "faults so far: {}, the last at {}: {}",
+                    kernel.faults.len(),
+                    edge(&loaded, last.edge),
+                    kernel.describe_fault(last)
+                ));
+            }
+        }
+    }
+    let mut pairing = durations::Pairing::new(loaded.trace.first);
+    pairing.add(elements, 0);
+    for placed in pairing.open() {
+        lines.push(format!(
+            "duration {}, lane {}, {}",
+            placed.instance.subject,
+            placed.lane,
+            since(placed.instance.from)
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// The values of the instances `kind` of `name` gives, by the element they
+/// start at, then by metric: their totals, without detail.
+fn values_by_start<'a>(
+    instances: &'a [stats::Instance],
+    kind: &str,
+    name: &str,
+) -> BTreeMap<usize, BTreeMap<&'a str, i64>> {
+    let mut values: BTreeMap<usize, BTreeMap<&str, i64>> = BTreeMap::new();
+    for instance in instances {
+        if instance.kind == kind && instance.subject == name && instance.detail.is_none() {
+            values
+                .entry(instance.from.element)
+                .or_default()
+                .insert(instance.metric.name, instance.value);
+        }
+    }
+    values
+}
+
+/// `lines`, `limit` at most, the footer saying where to go on: `resume`
+/// gives the position of each line's start.
+fn cut(loaded: &Loaded, mut lines: Vec<String>, starts: &[usize], limit: usize, what: &str) -> Vec<String> {
+    if lines.len() > limit {
+        let total = lines.len();
+        lines.truncate(limit);
+        lines.push(format!(
+            "{limit} of {total} {what}; the rest with from=#{}",
+            loaded.index(starts[limit])
+        ));
+    }
+    lines
+}
+
+fn subject(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
+    let loaded = load(captures, arguments)?;
+    let name = arguments.text("subject")?.expect("a required argument");
+    let (from, to) = window(&loaded, arguments)?;
+    let limit = arguments.limit()?;
+    let kernel = kernel(&loaded, &loaded.trace.elements)?;
+    let instances = meaning::instances(&kernel);
+    let inside = |span: &Span| (from..to).contains(&span.from.element);
+    let mut lines = Vec::new();
+    let mut starts = Vec::new();
+    if let Some(task) = kernel.tasks.list.iter().position(|subject| subject.name == name) {
+        let values = values_by_start(&instances, "task", name);
+        let mut ready: BTreeMap<usize, i64> = BTreeMap::new();
+        for part in meaning::ready(&kernel).iter().filter(|part| part.task == task) {
+            *ready.entry(part.activation.from.element).or_default() += part.span.to.cycles - part.span.from.cycles;
+        }
+        let open = kernel.open_activations();
+        let mut activations: Vec<_> = kernel
+            .activations
+            .iter()
+            .map(|activation| (activation, false))
+            .chain(open.iter().map(|activation| (activation, true)))
+            .filter(|(activation, _)| activation.task == task)
+            .collect();
+        activations.sort_by_key(|(activation, _)| activation.span.from.element);
+        let mut ran = 0;
+        let mut worst: [Option<(i64, Edge)>; 2] = [None, None];
+        let mut previous: Option<Edge> = None;
+        for (activation, open) in activations {
+            let span = activation.span;
+            let blocked = previous.map(|end| span.from.cycles - end.cycles);
+            previous = Some(span.to);
+            if !inside(&span) {
+                continue;
+            }
+            let metrics = values.get(&span.from.element);
+            let metric = |name: &str| metrics.and_then(|metrics| metrics.get(name)).copied();
+            let mut line = match (&activation.reason, activation.cause) {
+                (Some(reason), Some(cause)) => format!(
+                    "{} woken by {reason}, cause {}",
+                    edge(&loaded, span.from),
+                    kernel.cause(cause)
+                ),
+                _ => format!("{} ready from a loss", edge(&loaded, span.from)),
+            };
+            let latency = metric("wake_latency");
+            match latency {
+                Some(latency) => {
+                    ran += 1;
+                    for (slot, value) in [(0, latency), (1, metric("response").unwrap_or(0))] {
+                        if worst[slot].is_none_or(|(most, _)| value > most) {
+                            worst[slot] = Some((value, span.from));
+                        }
+                    }
+                }
+                None => line.push_str(", never ran"),
+            }
+            let parts = [
+                ("latency", latency),
+                ("response", metric("response")),
+                ("gross", metric("gross")),
+                ("net", metric("net")),
+                ("preempted by tasks", metric("preempted_by_tasks")),
+                ("by handlers", metric("preempted_by_handlers")),
+                ("ready", ready.get(&span.from.element).copied()),
+                ("blocked before", blocked),
+                ("period", metric("period")),
+            ];
+            for (label, value) in parts {
+                if let Some(value) = value {
+                    line.push_str(&format!(", {label} {}", time(&loaded, value)));
+                }
+            }
+            if open {
+                line.push_str(&format!(", still open at {}", edge(&loaded, span.to)));
+            } else {
+                line.push_str(&format!(", ends {}", edge(&loaded, span.to)));
+            }
+            lines.push(line);
+            starts.push(span.from.element);
+        }
+        let priority = kernel.tasks.list[task]
+            .priority
+            .map_or_else(String::new, |priority| format!(", priority {priority}"));
+        let mut head = format!("task {name}{priority}: {} activations, {ran} ran", lines.len());
+        for (label, worst) in ["worst latency", "worst response"].iter().zip(worst) {
+            if let Some((value, at)) = worst {
+                head.push_str(&format!("; {label} {} at {}", time(&loaded, value), edge(&loaded, at)));
+            }
+        }
+        let mut out = vec![head];
+        out.extend(cut(&loaded, lines, &starts, limit, "activations"));
+        return Ok(out.join("\n"));
+    }
+    if let Some(handler) = kernel.handlers.list.iter().position(|subject| named(subject, name)) {
+        let name = kernel.handlers.list[handler].name.as_str();
+        let values = values_by_start(&instances, "handler", name);
+        let open = kernel.open();
+        let mut runs: Vec<_> = kernel
+            .closed
+            .interrupts
+            .iter()
+            .map(|interrupt| (interrupt, false))
+            .chain(open.interrupts.iter().map(|interrupt| (interrupt, true)))
+            .filter(|(interrupt, _)| interrupt.handler == handler && inside(&interrupt.span))
+            .collect();
+        runs.sort_by_key(|(interrupt, _)| interrupt.span.from.element);
+        let mut worst: Option<(i64, Edge)> = None;
+        for (interrupt, open) in runs {
+            let span = interrupt.span;
+            let metrics = values.get(&span.from.element);
+            let metric = |name: &str| metrics.and_then(|metrics| metrics.get(name)).copied();
+            let gross = span.to.cycles - span.from.cycles;
+            if worst.is_none_or(|(most, _)| gross > most) {
+                worst = Some((gross, span.from));
+            }
+            let mut line = format!("{} gross {}", edge(&loaded, span.from), time(&loaded, gross));
+            if let Some(net) = metric("net") {
+                line.push_str(&format!(", net {}", time(&loaded, net)));
+            }
+            line.push_str(&match interrupt.depth {
+                Some(depth) => format!(", depth {depth}"),
+                None => ", depth unknown".to_owned(),
+            });
+            if let Some(period) = metric("period") {
+                line.push_str(&format!(", period {}", time(&loaded, period)));
+            }
+            line.push_str(&if open {
+                format!(", still open at {}", edge(&loaded, span.to))
+            } else {
+                format!(", ends {}", edge(&loaded, span.to))
+            });
+            lines.push(line);
+            starts.push(span.from.element);
+        }
+        let mut head = format!("handler {name}: {} runs", lines.len());
+        if let Some((value, at)) = worst {
+            head.push_str(&format!(
+                "; worst gross {} at {}",
+                time(&loaded, value),
+                edge(&loaded, at)
+            ));
+        }
+        let mut out = vec![head];
+        out.extend(cut(&loaded, lines, &starts, limit, "runs"));
+        return Ok(out.join("\n"));
+    }
+    let names = |subjects: &meaning::Subjects| {
+        subjects
+            .list
+            .iter()
+            .map(|subject| subject.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(format!(
+        "no task or handler {name}; the tasks are {}; the handlers are {}",
+        names(&kernel.tasks),
+        names(&kernel.handlers)
+    ))
+}
+
+fn intervals(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
+    let loaded = load(captures, arguments)?;
+    let (a, b) = (arguments.words("a")?, arguments.words("b")?);
+    if !a.active() || !b.active() {
+        return Err("a and b each need a word".to_owned());
+    }
+    let range = range(&loaded, arguments)?;
+    let worst = arguments.count("worst")?.unwrap_or(10);
+    let worst = usize::try_from(worst).unwrap_or(usize::MAX);
+    let found = intervals::of(&loaded.trace, &loaded.catalogue.symbols, &a, &b, range, worst);
+    let mut lines = vec![format!(
+        "{} intervals; {} A without a B before the next A; excluded {} by a loss, {} by a suspect line; {} cut",
+        found.count, found.without, found.excluded_loss, found.excluded_suspect, found.cut
+    )];
+    let Some(distribution) = &found.distribution else {
+        lines.push("no interval counted".to_owned());
+        return Ok(lines.join("\n"));
+    };
+    let value = |value| time(&loaded, value);
+    lines.push(format!(
+        "min {} at #{}",
+        value(distribution.min.value),
+        distribution.min.index
+    ));
+    lines.push(format!("p50 {}", value(distribution.p50)));
+    lines.push(format!("p90 {}", value(distribution.p90)));
+    lines.push(format!("p99 {}", value(distribution.p99)));
+    lines.push(format!(
+        "max {} at #{}",
+        value(distribution.max.value),
+        distribution.max.index
+    ));
+    lines.push(format!(
+        "mean {:.1} cycles{}",
+        distribution.mean,
+        loaded.trace.frequency.map_or_else(String::new, |_| format!(
+            " ({})",
+            stats::duration(distribution.mean.round() as i64, loaded.trace.frequency)
+        ))
+    ));
+    lines.push("worst:".to_owned());
+    for point in &distribution.worst {
+        lines.push(format!(
+            "  #{} to #{}: {}",
+            point.index,
+            found.ends[&point.element],
+            value(point.value)
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn stats(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
