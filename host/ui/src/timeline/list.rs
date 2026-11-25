@@ -23,10 +23,24 @@ fn kept<'a>(filter: &Filter, space: &str, mut subjects: impl Iterator<Item = &'a
     filter.shown(space) || subjects.any(|subject| filter.shown(subject))
 }
 
+/// Whether a line stays: a loss's or a suspect line's, without a `row`,
+/// whatever the filters; an event's when the text filter keeps the type of
+/// its row, by its entry in `types`, and `namespaces` keeps the event.
+fn stays(row: Option<usize>, types: &[bool], namespaces: impl FnOnce(usize) -> bool) -> bool {
+    row.is_none_or(|row| types[row] && namespaces(row))
+}
+
+/// How many lines the list shows of how many in its range.
+fn of_all(shown: u64, all: u64) -> String {
+    format!("{shown} / {}", counted(all, "line", "lines"))
+}
+
 /// The width of the bar that marks a loss or a suspect line, in pixels.
 const MARK: f32 = 4.0;
 /// The room a cell leaves around its text, in pixels.
 const CELL: f32 = 16.0;
+/// The width of the text filter's box, in pixels.
+const WORDS: f32 = 220.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Tab {
@@ -119,18 +133,11 @@ impl Timeline {
             self.listed = Some((range.from.unwrap_or_default(), range.to.unwrap_or_default()));
         }
         let (from, to) = self.listed.expect("set above");
-        self.keep(from, to);
+        ui.horizontal(|ui| self.list_header(ui, from, to));
         let entries = match &self.kept {
             Some(kept) => &kept.entries,
             None => self.list.within(from, to),
         };
-        ui.horizontal(|ui| {
-            ui.strong(self.range_title(from, to));
-            ui.label(counted(entries.len() as u64, "line", "lines"));
-            if self.kept.is_some() {
-                ui.weak("of the namespaces ticked");
-            }
-        });
         ui.separator();
         let symbols = &self.catalogue.symbols;
         // A line's cells: index, type, fields; a loss's or a suspect line's
@@ -266,52 +273,99 @@ impl Timeline {
         }
     }
 
-    /// The lines from `from` to `to` cycles the namespace filter keeps, none
-    /// when it keeps all; computed again only when the range or the filter
-    /// changed.
+    /// The list's title, the text filter, and how many lines it shows: of
+    /// how many in the range while a filter leaves some out, the count a
+    /// button that clears the text.
+    fn list_header(&mut self, ui: &mut egui::Ui, from: i64, to: i64) {
+        ui.strong(self.range_title(from, to));
+        let typed = ui.add(
+            egui::TextEdit::singleline(&mut self.words.text)
+                .hint_text("types: words, -word to leave out")
+                .desired_width(WORDS),
+        );
+        if typed.changed() {
+            self.words.read();
+        }
+        self.keep(from, to);
+        let all = self.list.within(from, to).len() as u64;
+        let Some(kept) = &self.kept else {
+            ui.label(counted(all, "line", "lines"));
+            return;
+        };
+        let shown = of_all(kept.entries.len() as u64, all);
+        if self.words.active() {
+            if ui.button(shown).on_hover_text("Clear the text filter").clicked() {
+                self.words.set("");
+                self.keep(from, to);
+            }
+        } else {
+            ui.label(shown);
+        }
+        if self.filter.active() {
+            ui.weak("of the namespaces ticked");
+        }
+    }
+
+    /// The lines from `from` to `to` cycles the filters keep, none when they
+    /// keep all; computed again only when the range or a filter changed.
     fn keep(&mut self, from: i64, to: i64) {
-        if !self.filter.active() {
+        if !self.filter.active() && !self.words.active() {
             self.kept = None;
             return;
         }
         let generation = self.filter.generation();
-        if self
-            .kept
-            .as_ref()
-            .is_some_and(|kept| kept.range == (from, to) && kept.generation == generation)
-        {
+        if self.kept.as_ref().is_some_and(|kept| {
+            kept.range == (from, to) && kept.generation == generation && kept.words == self.words.text
+        }) {
             return;
         }
+        let types: Vec<bool> = self
+            .catalogue
+            .events
+            .values()
+            .map(|event| self.words.keeps(&event.name))
+            .collect();
         let entries = self.list.within(from, to);
-        let entries = entries.iter().copied().filter(|entry| self.entry_kept(entry)).collect();
+        let entries = entries
+            .iter()
+            .copied()
+            .filter(|entry| self.entry_kept(entry, &types))
+            .collect();
         self.kept = Some(Kept {
             range: (from, to),
             generation,
+            words: self.words.text.clone(),
             entries,
         });
     }
 
-    /// Whether the filter keeps the line of `entry`: a loss or a suspect
-    /// line always, an event when its type's namespace is ticked or that of
-    /// a subject one of its pointers points at.
-    fn entry_kept(&self, entry: &Entry) -> bool {
-        let Element::Event { event, .. } = &self.trace.elements[entry.element] else {
-            return true;
+    /// Whether the filters keep the line of `entry`: a loss or a suspect
+    /// line always, an event when the text filter keeps its type, by the
+    /// row's entry of `types`, and its type's namespace is ticked or that
+    /// of a subject one of its pointers points at.
+    fn entry_kept(&self, entry: &Entry, types: &[bool]) -> bool {
+        let event = match &self.trace.elements[entry.element] {
+            Element::Event { event, .. } => Some(event),
+            _ => None,
         };
-        let row = self
-            .ids
-            .binary_search(&event.event.id)
-            .expect("an event of the catalogue");
-        let spaces = &self.spaces;
-        let subjects = spaces.pointers[row].iter().filter_map(|&(offset, size)| {
-            let bytes = event.payload.get(offset..offset + size)?;
-            let address = bytes
-                .iter()
-                .rev()
-                .fold(0u64, |value, byte| value << 8 | u64::from(*byte));
-            spaces.at.get(&address).map(String::as_str)
+        let row = event.map(|event| {
+            self.ids
+                .binary_search(&event.event.id)
+                .expect("an event of the catalogue")
         });
-        kept(&self.filter, &spaces.types[row], subjects)
+        stays(row, types, |row| {
+            let spaces = &self.spaces;
+            let payload = &event.expect("a row is an event's").payload;
+            let subjects = spaces.pointers[row].iter().filter_map(|&(offset, size)| {
+                let bytes = payload.get(offset..offset + size)?;
+                let address = bytes
+                    .iter()
+                    .rev()
+                    .fold(0u64, |value, byte| value << 8 | u64::from(*byte));
+                spaces.at.get(&address).map(String::as_str)
+            });
+            kept(&self.filter, &spaces.types[row], subjects)
+        })
     }
 
     /// Centres the view on `entry` at the same zoom, marks it on the
@@ -340,5 +394,21 @@ mod tests {
         assert!(kept(&filter, "kymo::opsy", ["app::comms", "app::sensors"].into_iter()));
         assert!(!kept(&filter, "kymo::opsy", ["app::comms"].into_iter()));
         assert!(!kept(&filter, "kymo::opsy", std::iter::empty()));
+    }
+
+    /// A loss or a suspect line stays when the filters leave out every
+    /// type; an event leaves when either filter leaves it out.
+    #[test]
+    fn a_loss_stays_whatever_the_filters() {
+        assert!(stays(None, &[false], |_| false));
+        assert!(stays(Some(0), &[true], |_| true));
+        assert!(!stays(Some(0), &[false], |_| true));
+        assert!(!stays(Some(0), &[true], |_| false));
+    }
+
+    #[test]
+    fn the_count_is_of_the_lines_shown_and_of_all() {
+        assert_eq!(of_all(3, 12580), "3 / 12580 lines");
+        assert_eq!(of_all(0, 1), "0 / 1 line");
     }
 }

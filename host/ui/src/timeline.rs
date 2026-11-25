@@ -19,6 +19,7 @@ mod status;
 mod toolbar;
 mod tree;
 mod view;
+mod words;
 
 pub use status::counted;
 pub use view::View;
@@ -40,6 +41,7 @@ use measure::Measure;
 use rows::{Mark, Row};
 use std::collections::{BTreeSet, HashMap};
 use view::{clamped, whole, widest};
+use words::Words;
 
 /// The width of the column of row names.
 const LABELS: f32 = 260.0;
@@ -120,6 +122,8 @@ pub struct Timeline {
     filtering: bool,
     spaces: Spaces,
     kept: Option<Kept>,
+    /// The text filter of the event list.
+    words: Words,
     /// The headings of the column of names folded, by section and path.
     folded: BTreeSet<String>,
 }
@@ -137,11 +141,12 @@ struct Spaces {
     pointers: Vec<Vec<(usize, usize)>>,
 }
 
-/// The event list's lines the filter keeps, of a range, at a generation of
-/// the filter.
+/// The event list's lines the filters keep, of a range, at a generation of
+/// the namespace filter and a text of the text filter.
 struct Kept {
     range: (i64, i64),
     generation: u64,
+    words: String,
     entries: Vec<Entry>,
 }
 
@@ -197,6 +202,7 @@ impl Timeline {
             filtering: false,
             spaces: Spaces::default(),
             kept: None,
+            words: Words::default(),
             folded: BTreeSet::new(),
         };
         timeline.add(0);
