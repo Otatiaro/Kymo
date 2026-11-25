@@ -1,0 +1,6 @@
+# Cases on which libstdc++ writes otherwise than the committed table, and
+# why. compare.py fails when this list no longer matches.
+#
+# GCC PR 120967: with # and precision 0, a large double gets a leading NUL
+# and its point one digit early (GCC 14.2, 15.2 and trunk).
+f64	#.0f	0x7fefffffffffffff
