@@ -309,8 +309,8 @@ pub(super) fn whole(bin: &Drawn, cpu: bool) -> i64 {
     if cpu { bin.counted.1 - bin.counted.0 } else { bin.known }
 }
 
-/// The pixels left empty between two bins of the CPU's line, so that each
-/// reads as one column.
+/// The pixels left empty between two bins of a line, so that each reads as
+/// one column.
 pub(super) const GAP: f32 = 1.0;
 
 /// Paints `bins` in `mesh` within `area`, bars from `high` to `low` on whole
