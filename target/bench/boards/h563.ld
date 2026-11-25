@@ -1,7 +1,0 @@
-/* NUCLEO-H563ZI: STM32H563ZI, 2 MB flash, 640 KB SRAM (SRAM1-3 contiguous). */
-MEMORY
-{
-  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 2M
-  RAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 640K
-}
-INCLUDE common.ld

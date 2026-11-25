@@ -6,7 +6,7 @@
 
 use super::{Connection, Result, Target};
 use libloading::Library;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int};
 
 #[cfg(windows)]
 const DEFAULT_PATHS: &[&str] = &[r"C:\Program Files\SEGGER\JLink\JLink_x64.dll"];
@@ -17,16 +17,6 @@ const DEFAULT_PATHS: &[&str] = &["/opt/SEGGER/JLink/libjlinkarm.so", "libjlinkar
 const PATH_VARIABLE: &str = "KYMO_JLINK_LIBRARY";
 
 const INTERFACE_SWD: c_int = 1;
-
-/// SWO commands and modes from JLinkARMDLL.h.
-const SWO_CMD_FLUSH: u32 = 2;
-const SWO_CMD_GET_NUM_BYTES: u32 = 10;
-const SWO_CMD_SET_BUFFERSIZE_HOST: u32 = 20;
-const SWO_MODE_UART: c_int = 0;
-/// Host-side SWO buffer: a second of capture at 16 MBd.
-const SWO_HOST_BUFFER: u32 = 2 << 20;
-/// The ports the bench writes to.
-const SWO_PORTS: u32 = 1 << 1;
 
 type LogCallback = unsafe extern "C" fn(*const c_char);
 
@@ -45,12 +35,6 @@ struct Api {
     /// (address, value) -> 0 on success
     write_u32: unsafe extern "C" fn(u32, u32) -> c_int,
     close: unsafe extern "C" fn(),
-    /// (CPU speed, SWO speed, mode, stimulus port mask) -> 0 on success
-    swo_enable_target: unsafe extern "C" fn(u32, u32, c_int, u32) -> c_int,
-    /// (command, data) -> command result, negative on error
-    swo_control: unsafe extern "C" fn(u32, *mut c_void) -> c_int,
-    /// (buffer, offset, in: buffer size, out: bytes read)
-    swo_read: unsafe extern "C" fn(*mut u8, u32, *mut u32),
 }
 
 impl Api {
@@ -70,9 +54,6 @@ impl Api {
                 read_u32: *library.get(b"JLINKARM_ReadMemU32")?,
                 write_u32: *library.get(b"JLINKARM_WriteU32")?,
                 close: *library.get(b"JLINKARM_Close")?,
-                swo_enable_target: *library.get(b"JLINKARM_SWO_EnableTarget")?,
-                swo_control: *library.get(b"JLINKARM_SWO_Control")?,
-                swo_read: *library.get(b"JLINKARM_SWO_Read")?,
             })
         }
     }
@@ -191,40 +172,6 @@ impl Target for JLinkTarget {
         if result != 0 {
             return Err(format!("J-Link write at {address:#010x} returned {result}").into());
         }
-        Ok(())
-    }
-
-    fn swo_start(&mut self, tpiu_clock_hz: u32, baud: u32) -> Result<()> {
-        let mut size = SWO_HOST_BUFFER;
-        // SAFETY: the buffer size command reads one U32 from its data.
-        unsafe { (self.api.swo_control)(SWO_CMD_SET_BUFFERSIZE_HOST, (&raw mut size).cast()) };
-        // SAFETY: plain values.
-        let result = unsafe { (self.api.swo_enable_target)(tpiu_clock_hz, baud, SWO_MODE_UART, SWO_PORTS) };
-        if result < 0 {
-            return Err(format!("J-Link could not start SWO at {baud} Bd ({result})").into());
-        }
-        Ok(())
-    }
-
-    fn swo_read(&mut self, bytes: &mut Vec<u8>) -> Result<()> {
-        // SAFETY: the command takes no data.
-        let available = unsafe { (self.api.swo_control)(SWO_CMD_GET_NUM_BYTES, std::ptr::null_mut()) };
-        if available < 0 {
-            return Err(format!("J-Link SWO byte count failed ({available})").into());
-        }
-        if available == 0 {
-            return Ok(());
-        }
-        let start = bytes.len();
-        bytes.resize(start + available as usize, 0);
-        let mut count = available as u32;
-        // SAFETY: the buffer holds `count` bytes past `start`; the flush
-        // command reads the number of bytes to drop from its data.
-        unsafe {
-            (self.api.swo_read)(bytes[start..].as_mut_ptr(), 0, &mut count);
-            (self.api.swo_control)(SWO_CMD_FLUSH, (&raw mut count).cast());
-        }
-        bytes.truncate(start + count as usize);
         Ok(())
     }
 }

@@ -7,8 +7,9 @@ Kymo records what an RTOS does (which task runs and why it woke up, interrupts,
 mutexes, faults) with as little intrusion as possible, keeps working after a
 crash, and turns the recording into a timeline and metrics on the host.
 
-> **Status: early work.** Nothing is usable yet. The first step is a throughput
-> bench: how fast each debug probe can drain a trace ring from a running target.
+> **Status: early work.** The target library, the OpSy and FreeRTOS adapters,
+> recording through a probe, decoding, statistics, rule checks and the timeline
+> work; formats still change without notice.
 
 ## Principles
 

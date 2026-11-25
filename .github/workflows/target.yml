@@ -119,7 +119,7 @@ jobs:
           cargo clippy --all-targets --workspace --manifest-path host/Cargo.toml -- -D warnings
 
   # clang-tidy over the target code, with the .clang-tidy files under target/:
-  # the library and its tests, the bench image, and the OpSy adapter with its
+  # the library and its tests, and the OpSy adapter with its
   # test, each as the Arm toolchain compiles it (target/tidy.py); each public
   # header also on its own, with the library's checks. In the OpSy
   # tree only the adapter's test is Kymo's; OpSy's own sources are not checked.
@@ -158,7 +158,6 @@ jobs:
           set -euo pipefail
           toolchain="-DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/target/cmake/arm-none-eabi.cmake"
           cmake -S target/tests -B build/tests -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          cmake -S target/bench -B build/bench -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake -S target/opsy/tests -B build/opsy -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DKYMO_OPSY_DIR="$GITHUB_WORKSPACE/opsy" -DOPSY_TARGET=m33
           cmake -S target/freertos/tests -B build/freertos -G Ninja "$toolchain" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -168,7 +167,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 target/tidy.py --clang-tidy clang-tidy --build build/tests --headers target/include
-          python3 target/tidy.py --clang-tidy clang-tidy --build build/bench
           python3 target/tidy.py --clang-tidy clang-tidy --build build/opsy \
             --headers target/opsy/include target/opsy/tests/ring_check.cpp
           python3 target/tidy.py --clang-tidy clang-tidy --build build/freertos \
