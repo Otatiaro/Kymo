@@ -2,7 +2,7 @@
 """What an emit costs, counted under QEMU, held against the record.
 
     cost.py --qemu Q --machine M --nm NM --size SIZE
-            --image I --baseline B --expected cost/cost-<cpu>-<level>.json
+            --image I --baseline B [--expected cost/cost-<cpu>-<level>.json]
             [--tolerance 2] [--json out.json]
 
 Runs both images of target/tests/cost (with Kymo, and the baseline whose
@@ -20,6 +20,7 @@ The expected costs, the disabled path included, are in the record of the CPU
 and level. The exit status is 1 when a case costs more than its record plus
 the tolerance, or when a case is missing from the record or from the image.
 A drop beyond the tolerance is reported, so that the record follows the gain.
+Without a record (Clang's builds), the costs are reported and only SAME holds.
 Each application event of SAME must cost what the plain emit of its payload
 costs, instructions and flash both, with no tolerance: the exit status is 1
 otherwise.
@@ -117,7 +118,7 @@ def main() -> int:
     parser.add_argument("--size", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--baseline", required=True)
-    parser.add_argument("--expected", required=True, type=Path, help="the recorded cost of each case")
+    parser.add_argument("--expected", type=Path, help="the recorded cost of each case")
     parser.add_argument("--tolerance", type=int, default=2, help="instructions")
     parser.add_argument("--json", type=Path, help="write the measured costs here")
     args = parser.parse_args()
@@ -125,8 +126,8 @@ def main() -> int:
     kymo, kymo_sizes = counts(args.qemu, args.machine, args.nm, args.image)
     base, base_sizes = counts(args.qemu, args.machine, args.nm, args.baseline)
 
-    expected = json.loads(args.expected.read_text())
-    unknown = sorted(set(expected) - set(CASES))
+    expected = json.loads(args.expected.read_text()) if args.expected else None
+    unknown = sorted(set(expected or {}) - set(CASES))
     if unknown:
         print(f"{args.expected}: records cases the image has not: {', '.join(unknown)}")
         return 1
@@ -144,7 +145,9 @@ def main() -> int:
         flash = kymo_sizes[name] - base_sizes[name]
         flashes[name] = flash
         line = f"{name.removeprefix('cost_'):<16}{cost:>14}{flash:>15}"
-        if name not in expected:
+        if expected is None:
+            pass
+        elif name not in expected:
             line += "  not recorded"
             failed = True
         else:
