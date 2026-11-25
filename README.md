@@ -102,6 +102,13 @@ RTOS adapter emits the kernel's events through the same tracer:
 `target/freertos/include/kymo/freertos/trace.h` for FreeRTOS; each header
 says how to install it.
 
+The OpSy adapter records a hardware fault as a `kymo::fault`
+(`target/include/kymo/fault.hpp`): the fault status registers, the frame the
+core stacked and `EXC_RETURN`, before the application's fault handler runs.
+It does not freeze the trace: an interrupt of higher priority than the fault
+still writes, and overwrites what came before. A handler that keeps the board
+for the host to read calls `kymo::freeze()` first.
+
 On the host, build with `cargo build --release --manifest-path host/Cargo.toml`
 (add `-p kymo-ui` for the timeline), then:
 
