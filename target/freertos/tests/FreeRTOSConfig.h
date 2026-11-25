@@ -2,7 +2,8 @@
  * @file    FreeRTOSConfig.h
  * @brief   The test application's kernel configuration, on the Cortex-M4
  *          (port ARM_CM4F) and the Cortex-M33 (port ARM_CM33_NTZ, the core
- *          left in the Secure state QEMU starts it in).
+ *          left in the Secure state it starts in), under QEMU or, with
+ *          KYMO_BOARD, on a NUCLEO-H563ZI.
  */
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
@@ -16,7 +17,11 @@ void application_assert(char const* file, int line);
 }
 #endif
 
+#ifdef KYMO_BOARD
+#define configCPU_CLOCK_HZ 32000000UL   /* the STM32H563's reset clock: HSI, 64 MHz divided by 2 */
+#else
 #define configCPU_CLOCK_HZ 25000000UL
+#endif
 #define configTICK_RATE_HZ 1000
 #define configUSE_PREEMPTION 1
 #define configUSE_TIME_SLICING 0

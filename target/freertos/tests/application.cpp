@@ -3,7 +3,10 @@
  * @brief   The FreeRTOS test application: the control task runs one scenario
  *          after another, each taking the kernel through trace points the
  *          adapter records, then exits through qemu::exit with its verdict.
- *          trace/trace.py records it and checks the recording.
+ *          trace/trace.py records it and checks the recording. Built with
+ *          KYMO_BOARD for a NUCLEO-H563ZI, it waits for the probe to attach,
+ *          and leaves its verdict in application::verdict for
+ *          board/board.py.
  *
  * Priorities: idle 0, low 1, ephemeral 2, control 3, ping and pong 4,
  * receiver 5.
@@ -40,22 +43,45 @@
 #include <cstddef>
 #include <cstdint>
 
+#ifdef KYMO_BOARD
+namespace application
+{
+/// On the board, where board/board.py reads it through the probe: 0 while
+/// the application runs, 1 when it passed, 2 when it failed.
+std::uint32_t volatile verdict = 0;   // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): read by the probe
+}
+#endif
+
 extern "C"
 {
-/** @brief The end of the test, where trace/trace.py halts the guest and reads
- *  the verdict from r0: out of line, whatever the optimisation. */
+/** @brief The end of the test. Under QEMU, where trace/trace.py halts the
+ *  guest and reads the verdict from r0: out of line, whatever the
+ *  optimisation. On the board, the verdict for the probe, and the core kept
+ *  by the caller: no semihosting there, a breakpoint would halt it. */
 [[gnu::noinline]] void application_end(bool pass)
 {
+#ifdef KYMO_BOARD
+	application::verdict = pass ? 1 : 2;
+	for (;;)
+	{
+	}
+#else
 	qemu::finish(pass);
+#endif
 }
 
 void application_assert(char const* file, int line)
 {
+#ifndef KYMO_BOARD
 	qemu::write("assertion failed: ");
 	qemu::write(file);
 	qemu::write(":");
 	qemu::write_unsigned(static_cast<std::uint32_t>(line));
 	qemu::write("\n");
+#else
+	static_cast<void>(file);
+	static_cast<void>(line);
+#endif
 	application_end(false);
 }
 }
@@ -268,6 +294,9 @@ void control_task(void* /*unused*/)
 void test_main()
 {
 	using namespace application;
+#ifdef KYMO_BOARD
+	platform::wait(3000, configCPU_CLOCK_HZ);
+#endif
 	// The port's SysTick handler itself: the trace check names it.
 #ifdef __ARM_ARCH_7EM__
 	platform::prepare(&xPortSysTickHandler, &device_handler);

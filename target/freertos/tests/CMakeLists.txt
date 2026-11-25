@@ -67,11 +67,12 @@ function(kymo_freertos_kernel kernel cpu untraced)
 	endif()
 endfunction()
 
-# An image under QEMU, on a kernel.
-function(kymo_freertos_image image cpu kernel)
+# An image on a kernel, linked by a script that lays out the sections of
+# every QEMU image: the machine's, or the board's.
+function(kymo_freertos_image image cpu script kernel)
 	add_executable(${image} ${ARGN} ${qemu_dir}/startup.cpp)
 	set_target_properties(${image} PROPERTIES SUFFIX ".elf"
-		LINK_DEPENDS "${script_${cpu}};${qemu_dir}/sections.ld")
+		LINK_DEPENDS "${script};${qemu_dir}/sections.ld")
 	target_include_directories(${image} PRIVATE ${target_dir}/include ${qemu_dir})
 	target_link_libraries(${image} PRIVATE ${kernel})
 	set(cpu_options -mcpu=${cpu} -mthumb ${float_${cpu}})
@@ -81,21 +82,21 @@ function(kymo_freertos_image image cpu kernel)
 		-fno-exceptions -fno-rtti -fno-threadsafe-statics)
 	target_link_options(${image} PRIVATE ${cpu_options}
 		-nostdlib -nostartfiles -Wl,--gc-sections
-		-L${qemu_dir} -T ${script_${cpu}})
+		-L${qemu_dir} -T ${script})
 endfunction()
 
 foreach(cpu cortex-m4 cortex-m33)
 	set(kernel freertos-${cpu})
 	kymo_freertos_kernel(${kernel} ${cpu} OFF)
 	set(image freertos-${cpu}-Os)
-	kymo_freertos_image(${image} ${cpu} ${kernel}
+	kymo_freertos_image(${image} ${cpu} ${script_${cpu}} ${kernel}
 		${target_dir}/freertos/kymo_freertos.cpp application.cpp)
 
 	# The cost bench, untraced and traced: bench/bench.cpp.
 	kymo_freertos_kernel(${kernel}-untraced ${cpu} ON)
-	kymo_freertos_image(freertos-bench-${cpu}-untraced ${cpu} ${kernel}-untraced bench/bench.cpp)
+	kymo_freertos_image(freertos-bench-${cpu}-untraced ${cpu} ${script_${cpu}} ${kernel}-untraced bench/bench.cpp)
 	target_include_directories(freertos-bench-${cpu}-untraced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-	kymo_freertos_image(freertos-bench-${cpu}-traced ${cpu} ${kernel}
+	kymo_freertos_image(freertos-bench-${cpu}-traced ${cpu} ${script_${cpu}} ${kernel}
 		${target_dir}/freertos/kymo_freertos.cpp bench/bench.cpp)
 	target_include_directories(freertos-bench-${cpu}-traced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -109,3 +110,21 @@ foreach(cpu cortex-m4 cortex-m33)
 				--image $<TARGET_FILE:${image}> --host ${KYMO_HOST})
 	endif()
 endforeach()
+
+# The same application on a NUCLEO-H563ZI (KYMO_BOARD), recorded through its
+# ST-Link and checked (board/board.py): with -DKYMO_FREERTOS_BOARD=<ST-Link
+# serial number>. Needs probe-rs to flash it, and arm-none-eabi-nm to find
+# the verdict. Out of the CI: it needs the board.
+set(KYMO_FREERTOS_BOARD "" CACHE STRING "The serial number of the NUCLEO-H563ZI's ST-Link, to build and record board/")
+if(KYMO_FREERTOS_BOARD)
+	kymo_freertos_kernel(freertos-h563 cortex-m33 OFF)
+	target_compile_definitions(freertos-h563 PUBLIC KYMO_BOARD)
+	kymo_freertos_image(freertos-h563-Os cortex-m33 ${CMAKE_CURRENT_SOURCE_DIR}/board/h563.ld freertos-h563
+		${target_dir}/freertos/kymo_freertos.cpp application.cpp)
+	find_program(KYMO_PROBE_RS probe-rs)
+	add_test(NAME freertos_board_h563
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/board.py
+			--image $<TARGET_FILE:freertos-h563-Os> --host ${KYMO_HOST}
+			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_FREERTOS_BOARD} --nm ${CMAKE_NM})
+	set_tests_properties(freertos_board_h563 PROPERTIES TIMEOUT 120)
+endif()

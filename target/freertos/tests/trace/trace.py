@@ -115,7 +115,7 @@ SCENARIOS = [
                ("task_create", {"task": PONG, "priority": "4", "name": '"pong"'}),
                ("task_create", {"task": RECEIVER, "priority": "5", "name": '"receiver"'}),
                ("task_create", {"task": LOW, "priority": "1", "name": '"low"'}),
-               ("starting", {"core_clock": "25000000"}),
+               ("starting", {}),
                ("task_switched_in", {"task": CONTROL})]),
     ("switches", [("task_notify", {"task": PING}), ("task_switched_in", {"task": PING})]
      + [("task_notify", {"task": PONG}), ("task_switched_in", {"task": PONG}),
@@ -217,7 +217,9 @@ def check_scenarios(events: list) -> list[str]:
     return []
 
 
-def check(output: str) -> list[str]:
+def check(output: str, core_clock: str = "25000000") -> list[str]:
+    """The events against the adapter's and the scenarios', `starting`
+    giving core_clock, configCPU_CLOCK_HZ."""
     errors = []
     events, losses = parse(output)
     errors += [f"{line}: the ring holds every event, none may be lost" for line in losses]
@@ -259,6 +261,8 @@ def check(output: str) -> list[str]:
             created[values["task"]] = values["name"]
             priorities[values["task"]] = (int(values["priority"]),) * 2
         elif name == "starting":
+            if values["core_clock"] != core_clock:
+                errors.append(f"{line}: not the core clock {core_clock}")
             if created.get(values["idle"]) != '"IDLE"':
                 errors.append(f"{line}: the idle task was not created as \"IDLE\"")
         elif name == "task_switched_in":

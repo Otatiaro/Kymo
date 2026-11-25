@@ -95,4 +95,21 @@ inline void pend()
 	scs(0xE000E200) = 1U << irq;   // NVIC_ISPR0
 }
 
+/**
+ * @brief Spins for `milliseconds` on SysTick, polled, before the first event:
+ *        the time the probe takes to attach once the board is reset, so that
+ *        the recording starts with the application. The port sets SysTick up
+ *        again when the scheduler starts.
+ */
+inline void wait(std::uint32_t milliseconds, std::uint32_t core_clock)
+{
+	scs(0xE000E014) = (core_clock / 1000) - 1;   // SYST_RVR
+	scs(0xE000E018) = 0;                       // SYST_CVR
+	scs(0xE000E010) = 5;                       // SYST_CSR: the core's clock, enabled
+	for (std::uint32_t elapsed = 0; elapsed < milliseconds;)
+		if ((scs(0xE000E010) & (1U << 16)) != 0)   // COUNTFLAG, cleared by the read
+			++elapsed;
+	scs(0xE000E010) = 0;
+}
+
 } // namespace platform
