@@ -9,8 +9,14 @@
 //! found by putting the excluded values all above the known ones, then all
 //! below. A rule holds when the whole interval keeps to it, fails when none
 //! of it does, and is unknown otherwise.
+//!
+//! A rule on a curve (kind and metric `value`, its field as the detail)
+//! bounds a statistic of its samples with plain numbers. Its stat is a count,
+//! a min, a percentile, a max or a mean; its regression a percentage. Numbers
+//! compare as 64-bit floating-point.
 
-use crate::stats::{self, Group, Point, Report};
+use crate::stats::{self, Group, Point, Report, Sampled};
+use crate::values::{self, Curve};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
@@ -87,6 +93,8 @@ enum Quantity {
     /// A percentage, as a fraction.
     Fraction(f64),
     Count(f64),
+    /// A number that is not a whole one: a bound of a curve.
+    Number(f64),
 }
 
 /// `50us`, `1.5 ms`, `300cycles`, `40%`.
@@ -111,13 +119,14 @@ fn quantity(text: &str) -> Result<Quantity, String> {
     })
 }
 
-/// A bound as JSON gives it: an integer count, or a quantity with its unit.
+/// A bound as JSON gives it: an integer count, a number, or a quantity with
+/// its unit.
 fn bound(value: &Value) -> Result<Quantity, String> {
     match value {
-        Value::Number(number) => number
-            .as_u64()
-            .map(|count| Quantity::Count(count as f64))
-            .ok_or_else(|| format!("{number}: a count is a whole number")),
+        Value::Number(number) => Ok(match number.as_u64() {
+            Some(count) => Quantity::Count(count as f64),
+            None => Quantity::Number(number.as_f64().unwrap_or(f64::NAN)),
+        }),
         Value::String(text) => quantity(text),
         other => Err(format!("{other}: a bound is a count or a quantity with its unit")),
     }
@@ -247,11 +256,15 @@ fn rule(written: Written) -> Result<Rule, String> {
         (true, true) => return Err(format!("{name}: bounds or a regression, not both")),
         _ => {}
     }
+    if metric == values::KIND {
+        return value_rule(written.kind, subject, written.detail, stat, min, max, regression);
+    }
     for quantity in [min, max].into_iter().flatten() {
         let fits = match quantity {
             Quantity::Seconds(..) | Quantity::Cycles(_) => stat.is_duration(),
             Quantity::Fraction(_) => stat == Stat::Share,
             Quantity::Count(_) => stat == Stat::Count,
+            Quantity::Number(_) => false,
         };
         if !fits {
             let what = match stat {
@@ -273,6 +286,54 @@ fn rule(written: Written) -> Result<Rule, String> {
             subject,
             metric,
             detail: written.detail,
+            stat,
+        },
+        min,
+        max,
+        regression,
+    })
+}
+
+/// A rule on a curve: its field as the detail, plain numbers as bounds.
+fn value_rule(
+    kind: Option<String>,
+    subject: String,
+    detail: Option<String>,
+    stat: Stat,
+    min: Option<Quantity>,
+    max: Option<Quantity>,
+    regression: Option<Quantity>,
+) -> Result<Rule, String> {
+    let name = format!("{subject} {} {}", values::KIND, stat.name());
+    if kind.as_deref().is_some_and(|kind| kind != values::KIND) {
+        return Err(format!("{name}: the kind of a value is value"));
+    }
+    let Some(detail) = detail else {
+        return Err(format!("{name}: give the field as the detail"));
+    };
+    if matches!(stat, Stat::Jitter | Stat::Share) {
+        return Err(format!("{name}: a value has no {}", stat.name()));
+    }
+    for quantity in [min, max].into_iter().flatten() {
+        let fits = match quantity {
+            Quantity::Count(_) => true,
+            Quantity::Number(_) => stat != Stat::Count,
+            _ => false,
+        };
+        if !fits {
+            let what = if stat == Stat::Count { "a count" } else { "a number" };
+            return Err(format!("{name}: a bound is {what}"));
+        }
+    }
+    if regression.is_some_and(|regression| !matches!(regression, Quantity::Fraction(_))) {
+        return Err(format!("{name}: a regression of a value is a percentage"));
+    }
+    Ok(Rule {
+        what: What::Group {
+            kind: Some(values::KIND.to_owned()),
+            subject,
+            metric: values::KIND.to_owned(),
+            detail: Some(detail),
             stat,
         },
         min,
@@ -333,16 +394,16 @@ struct BaselineGroup {
 #[derive(Debug, Deserialize)]
 struct BaselineDistribution {
     min: BaselinePoint,
-    p50: i64,
-    p90: i64,
-    p99: i64,
+    p50: f64,
+    p90: f64,
+    p99: f64,
     max: BaselinePoint,
     mean: f64,
 }
 
 #[derive(Debug, Deserialize)]
 struct BaselinePoint {
-    value: i64,
+    value: f64,
 }
 
 pub fn baseline(text: &str) -> Result<Baseline, String> {
@@ -364,11 +425,11 @@ impl BaselineGroup {
         }
         let distribution = self.distribution.as_ref()?;
         Some(match stat {
-            Stat::Min => distribution.min.value as f64,
-            Stat::P50 => distribution.p50 as f64,
-            Stat::P90 => distribution.p90 as f64,
-            Stat::P99 => distribution.p99 as f64,
-            Stat::Max => distribution.max.value as f64,
+            Stat::Min => distribution.min.value,
+            Stat::P50 => distribution.p50,
+            Stat::P90 => distribution.p90,
+            Stat::P99 => distribution.p99,
+            Stat::Max => distribution.max.value,
             Stat::Mean => distribution.mean,
             Stat::Jitter => self.jitter? as f64,
             Stat::Share => self.share?,
@@ -378,15 +439,30 @@ impl BaselineGroup {
 }
 
 /// The values between which the true value of rank `rank` lies, among the
-/// group's known values and `excluded` more of any value.
-fn ranked(values: &[i64], excluded: usize, rank: usize) -> (f64, f64) {
-    let high = values.get(rank - 1).map_or(f64::INFINITY, |&value| value as f64);
+/// group's known values, lowest first, and `excluded` more of any value.
+fn ranked(values: &[f64], excluded: usize, rank: usize) -> (f64, f64) {
+    let high = values.get(rank - 1).copied().unwrap_or(f64::INFINITY);
     let low = if rank > excluded {
-        values[rank - excluded - 1] as f64
+        values[rank - excluded - 1]
     } else {
         f64::NEG_INFINITY
     };
     (low, high)
+}
+
+/// The interval of a statistic of `stat` over `values`, lowest first, and
+/// `excluded` more of any value; its mean `mean`.
+fn spread_interval(values: &[f64], excluded: usize, stat: Stat, mean: (f64, f64)) -> (f64, f64) {
+    let all = values.len() + excluded;
+    match stat {
+        Stat::Min => ranked(values, excluded, 1),
+        Stat::P50 => ranked(values, excluded, (50 * all).div_ceil(100).max(1)),
+        Stat::P90 => ranked(values, excluded, (90 * all).div_ceil(100).max(1)),
+        Stat::P99 => ranked(values, excluded, (99 * all).div_ceil(100).max(1)),
+        Stat::Max => ranked(values, excluded, all),
+        Stat::Mean => mean,
+        Stat::Jitter | Stat::Share | Stat::Count => unreachable!("not a statistic of the values"),
+    }
 }
 
 /// The interval that holds the statistic, none without an instance counted;
@@ -406,20 +482,36 @@ fn interval(group: &Group, stat: Stat, known: i64) -> Result<Option<(f64, f64)>,
     let Some(distribution) = &group.distribution else {
         return Ok(None);
     };
-    let values = &distribution.values;
+    let values: Vec<f64> = distribution.values.iter().map(|&value| value as f64).collect();
     let all = count + excluded;
     let unbounded = |low: f64| (low, if excluded > 0 { f64::INFINITY } else { low });
     Ok(Some(match stat {
-        Stat::Min => ranked(values, excluded, 1),
-        Stat::P50 => ranked(values, excluded, (50 * all).div_ceil(100).max(1)),
-        Stat::P90 => ranked(values, excluded, (90 * all).div_ceil(100).max(1)),
-        Stat::P99 => ranked(values, excluded, (99 * all).div_ceil(100).max(1)),
-        Stat::Max => ranked(values, excluded, all),
-        Stat::Mean => unbounded(distribution.total as f64 / all as f64),
         Stat::Jitter => unbounded((distribution.max.value - distribution.min.value) as f64),
         Stat::Share => unbounded(group.share(known).unwrap_or(0.0)),
-        Stat::Count => unreachable!(),
+        stat => spread_interval(
+            &values,
+            excluded,
+            stat,
+            unbounded(distribution.total as f64 / all as f64),
+        ),
     }))
+}
+
+/// The interval that holds the statistic of a curve, none without a sample
+/// counted. An excluded sample may have any value.
+fn value_interval(sampled: &Sampled, stat: Stat) -> Option<(f64, f64)> {
+    let excluded = sampled.excluded_suspect;
+    if stat == Stat::Count {
+        return Some((sampled.count as f64, (sampled.count + excluded) as f64));
+    }
+    let spread = sampled.spread.as_ref()?;
+    let values: Vec<f64> = spread.values.iter().map(|value| value.as_f64()).collect();
+    let mean = if excluded > 0 {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    } else {
+        (spread.mean, spread.mean)
+    };
+    Some(spread_interval(&values, excluded, stat, mean))
 }
 
 fn decide(low: f64, high: f64, min: Option<f64>, max: Option<f64>) -> Outcome {
@@ -490,7 +582,7 @@ fn relation(
     parts.join(" and ")
 }
 
-fn place(point: &Point) -> String {
+fn place<V>(point: &Point<V>) -> String {
     match point.seconds {
         Some(seconds) => format!(", at {seconds:.6} s (event {})", point.index),
         None => format!(", at event {}", point.index),
@@ -543,8 +635,105 @@ fn amount(quantity: Quantity, frequency: Option<f64>, name: &str) -> Result<f64,
         Quantity::Seconds(number, divisor) => frequency
             .map(|hz| number * hz / divisor)
             .ok_or_else(|| format!("{name}: a bound in seconds needs the capture's frequency: give it with --clock")),
-        Quantity::Cycles(value) | Quantity::Fraction(value) | Quantity::Count(value) => Ok(value),
+        Quantity::Cycles(value) | Quantity::Fraction(value) | Quantity::Count(value) | Quantity::Number(value) => {
+            Ok(value)
+        }
     }
+}
+
+/// The group's statistic in the baseline, or the verdict when it has none.
+fn baseline_value(
+    baseline: &Baseline,
+    name: &str,
+    (kind, subject, metric, detail): (&str, &str, &str, Option<&str>),
+    stat: Stat,
+) -> Result<f64, Verdict> {
+    let reference = baseline.groups.iter().find(|reference| {
+        reference.kind == kind
+            && reference.subject == subject
+            && reference.metric == metric
+            && reference.detail.as_deref() == detail
+    });
+    let Some(reference) = reference else {
+        return Err(verdict(Outcome::Unknown, name, "absent from the baseline".to_owned()));
+    };
+    if reference.lower_bound {
+        return Err(verdict(
+            Outcome::Unknown,
+            name,
+            "the baseline excluded instances of it: make the baseline again".to_owned(),
+        ));
+    }
+    reference
+        .value(stat)
+        .ok_or_else(|| verdict(Outcome::Unknown, name, "no instance of it in the baseline".to_owned()))
+}
+
+/// The verdict of a rule on the curve `curve`, its bounds `min` and `max`.
+fn judge_value(
+    report: &Report,
+    rule: &Rule,
+    (curve, stat): (Curve, Stat),
+    (min, max): (Option<f64>, Option<f64>),
+    baseline: Option<&Baseline>,
+) -> Result<Verdict, String> {
+    let name = rule.name();
+    if !report.curves.contains(&curve) {
+        return Err(format!(
+            "{name}: {curve} is not a numeric field of an application event"
+        ));
+    }
+    let Some(sampled) = report.values.iter().find(|sampled| sampled.curve == curve) else {
+        return Ok(verdict(Outcome::Unknown, &name, "no sample in the range".to_owned()));
+    };
+    let Some(interval) = value_interval(sampled, stat) else {
+        return Ok(verdict(
+            Outcome::Unknown,
+            &name,
+            "no sample counted in the range".to_owned(),
+        ));
+    };
+    let mut note = String::new();
+    if sampled.excluded_suspect > 0 {
+        note = format!(" ({} excluded: suspect)", sampled.excluded_suspect);
+    }
+    let (min, max, reference) = match rule.regression {
+        None => (min, max, String::new()),
+        Some(margin) => {
+            let baseline = baseline.ok_or_else(|| format!("{name}: a regression needs a baseline"))?;
+            let key = (
+                values::KIND,
+                curve.subject.as_str(),
+                values::KIND,
+                Some(curve.field.as_str()),
+            );
+            let value = match baseline_value(baseline, &name, key, stat) {
+                Ok(value) => value,
+                Err(verdict) => return Ok(verdict),
+            };
+            let fraction = amount(margin, None, &name)?;
+            let text = format!(" (baseline {value} {:+} %)", fraction * 100.0);
+            (None, Some(value + value.abs() * fraction), text)
+        }
+    };
+    let outcome = decide(interval.0, interval.1, min, max);
+    let mut at = String::new();
+    if outcome == Outcome::Fail
+        && matches!(stat, Stat::Min | Stat::Max)
+        && let Some(spread) = &sampled.spread
+    {
+        if max.is_some_and(|max| interval.0 > max) {
+            at = place(&spread.max);
+        } else if min.is_some_and(|min| interval.1 < min) {
+            at = place(&spread.min);
+        }
+    }
+    let text = format!(
+        "{} {}{reference}{at}{note}",
+        show_interval(None, interval, None),
+        relation(outcome, None, interval, min, max, None)
+    );
+    Ok(verdict(outcome, &name, text))
 }
 
 fn judge_rule(report: &Report, rule: &Rule, baseline: Option<&Baseline>) -> Result<Verdict, String> {
@@ -576,6 +765,15 @@ fn judge_rule(report: &Report, rule: &Rule, baseline: Option<&Baseline>) -> Resu
             stat,
         } => (kind, subject, metric, detail, *stat),
     };
+    if metric == values::KIND
+        && let Some(field) = detail
+    {
+        let curve = Curve {
+            subject: subject.clone(),
+            field: field.clone(),
+        };
+        return judge_value(report, rule, (curve, stat), (min, max), baseline);
+    }
     let found: Vec<&Group> = report
         .groups
         .iter()
@@ -616,28 +814,15 @@ fn judge_rule(report: &Report, rule: &Rule, baseline: Option<&Baseline>) -> Resu
         None => (min, max, String::new()),
         Some(margin) => {
             let baseline = baseline.ok_or_else(|| format!("{name}: a regression needs a baseline"))?;
-            let reference = baseline.groups.iter().find(|reference| {
-                reference.kind == group.kind
-                    && reference.subject == group.subject
-                    && reference.metric == group.metric.name
-                    && reference.detail == group.detail
-            });
-            let Some(reference) = reference else {
-                return Ok(verdict(Outcome::Unknown, &name, "absent from the baseline".to_owned()));
-            };
-            if reference.lower_bound {
-                return Ok(verdict(
-                    Outcome::Unknown,
-                    &name,
-                    "the baseline excluded instances of it: make the baseline again".to_owned(),
-                ));
-            }
-            let Some(mut value) = reference.value(stat) else {
-                return Ok(verdict(
-                    Outcome::Unknown,
-                    &name,
-                    "no instance of it in the baseline".to_owned(),
-                ));
+            let key = (
+                group.kind,
+                group.subject.as_str(),
+                group.metric.name,
+                group.detail.as_deref(),
+            );
+            let mut value = match baseline_value(baseline, &name, key, stat) {
+                Ok(value) => value,
+                Err(verdict) => return Ok(verdict),
             };
             if stat.is_duration()
                 && let (Some(now), Some(then)) = (frequency, baseline.frequency)

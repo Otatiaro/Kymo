@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "kymo check rules",
-  "description": "Rules on the statistics kymo stats gives of a capture. A duration is a string with its unit: s, ms, us, ns or cycles (\"50us\", \"300cycles\"); a share a percentage (\"40%\"); a count a whole number.",
+  "description": "Rules on the statistics kymo stats gives of a capture. A duration is a string with its unit: s, ms, us, ns or cycles (\"50us\", \"300cycles\"); a share a percentage (\"40%\"); a count a whole number; a value of a curve a plain number.",
   "type": "object",
   "additionalProperties": false,
   "required": ["rules"],
@@ -11,12 +11,12 @@
     "rules": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/bound" }, { "$ref": "#/$defs/regression" }, { "$ref": "#/$defs/range" }] } }
   },
   "$defs": {
-    "kind": { "enum": ["task", "handler", "mutex", "duration"], "description": "Needed only when the subject and the metric name groups of several kinds." },
-    "subject": { "type": "string", "description": "As kymo stats names it: name@0x... for a name other symbols share." },
-    "metric": { "enum": ["wake_latency", "preempted_by_tasks", "preempted_by_handlers", "net", "gross", "response", "period", "hold", "wait", "duration"] },
-    "detail": { "type": "string", "description": "What divides the metric: a wake reason, a cause of wake (handler:<name>, task:<name>, elapsed, unknown), a task. Absent for the total." },
+    "kind": { "enum": ["task", "handler", "mutex", "duration", "value"], "description": "Needed only when the subject and the metric name groups of several kinds." },
+    "subject": { "type": "string", "description": "As kymo stats names it: name@0x... for a name other symbols share; for a value, the application event." },
+    "metric": { "enum": ["wake_latency", "preempted_by_tasks", "preempted_by_handlers", "net", "gross", "response", "period", "hold", "wait", "duration", "value"], "description": "value for a curve: a numeric field of an application event, its field as the detail." },
+    "detail": { "type": "string", "description": "What divides the metric: a wake reason, a cause of wake (handler:<name>, task:<name>, elapsed, unknown), a task; for a value, its field. Absent for the total." },
     "stat": { "enum": ["min", "p50", "p90", "p99", "max", "mean", "jitter", "count", "share"] },
-    "quantity": { "type": ["string", "integer"], "description": "A duration with its unit, a percentage for a share, a whole number for a count." },
+    "quantity": { "type": ["string", "number"], "description": "A duration with its unit, a percentage for a share, a whole number for a count, a plain number for a value." },
     "bound": {
       "type": "object",
       "additionalProperties": false,

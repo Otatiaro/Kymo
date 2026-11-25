@@ -22,11 +22,18 @@
 //!
 //! A share is over the time known in the range: the adapter says when the
 //! state of what it measures is known (`Meaning::known`).
+//!
+//! A curve's samples (values.rs) count when their event is in the range. A
+//! sample whose index an overrun write covers is excluded; a NaN is counted
+//! apart. A loss excludes nothing: a sample is a single event. Their spread
+//! gives the count, the min and the max with their samples, the percentiles
+//! as above and the mean.
 
 use crate::events::{self, Catalogue};
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
 use crate::target::Result;
+use crate::values::{self, Curve, Number, Values};
 use crate::{durations, meaning};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -67,8 +74,8 @@ pub struct Range {
 
 /// A value and where its instance starts: an event's index and instant.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Point {
-    pub value: i64,
+pub struct Point<V = i64> {
+    pub value: V,
     pub element: usize,
     pub index: u32,
     pub cycles: i64,
@@ -135,6 +142,33 @@ impl Group {
     }
 }
 
+/// The samples of a curve in the range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spread {
+    /// The min and its sample, the earliest among equals.
+    pub min: Point<Number>,
+    pub p50: Number,
+    pub p90: Number,
+    pub p99: Number,
+    /// The max and its sample, the earliest among equals.
+    pub max: Point<Number>,
+    pub mean: f64,
+    /// Every value, lowest first.
+    pub values: Vec<Number>,
+}
+
+/// A curve's statistics: its samples in the range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sampled {
+    pub curve: Curve,
+    pub count: usize,
+    /// The samples an overrun write may have made.
+    pub excluded_suspect: usize,
+    pub nan: usize,
+    /// None without a sample counted.
+    pub spread: Option<Spread>,
+}
+
 pub struct Report {
     /// The frequency of the seconds; none without one.
     pub frequency: Option<f64>,
@@ -156,10 +190,14 @@ pub struct Report {
     /// The hardware faults in the range.
     pub faults: usize,
     pub groups: Vec<Group>,
+    /// The curves the image declares, in order.
+    pub curves: Vec<Curve>,
+    /// The curves sampled in the range, in order.
+    pub values: Vec<Sampled>,
 }
 
 /// The value of rank ceil(percent·n/100) among `sorted`, at least the first.
-pub fn percentile(sorted: &[i64], percent: usize) -> i64 {
+pub fn percentile<V: Copy>(sorted: &[V], percent: usize) -> V {
     let rank = (percent * sorted.len()).div_ceil(100).max(1);
     sorted[rank - 1]
 }
@@ -204,6 +242,75 @@ pub fn distribution(points: &[Point], worst: usize) -> Option<Distribution> {
         worst: by_value.into_iter().take(worst).cloned().collect(),
         values: sorted,
     })
+}
+
+/// The spread of a curve's samples `points`.
+pub fn spread(points: &[Point<Number>]) -> Option<Spread> {
+    let mut by_value: Vec<&Point<Number>> = points.iter().collect();
+    by_value.sort_by(|a, b| a.value.total_cmp(&b.value).then(a.element.cmp(&b.element)));
+    let min = (*by_value.first()?).clone();
+    let sorted: Vec<Number> = by_value.iter().map(|point| point.value).collect();
+    let top = sorted[sorted.len() - 1];
+    let max = (*by_value[sorted.partition_point(|value| value.total_cmp(&top).is_lt())]).clone();
+    let integers: Option<i128> = sorted
+        .iter()
+        .map(|value| match value {
+            Number::Integer(value) => Some(*value),
+            Number::Float(_) => None,
+        })
+        .sum();
+    let total = integers.map_or_else(|| sorted.iter().map(|value| value.as_f64()).sum(), |total| total as f64);
+    Some(Spread {
+        min,
+        p50: percentile(&sorted, 50),
+        p90: percentile(&sorted, 90),
+        p99: percentile(&sorted, 99),
+        max,
+        mean: total / sorted.len() as f64,
+        values: sorted,
+    })
+}
+
+/// The statistics of the curves `values` sampled over `range` of `trace`.
+pub fn sampled(trace: &Trace, values: &Values, range: Range) -> Vec<Sampled> {
+    let places = Places::new(trace);
+    let low = range.from.unwrap_or(i64::MIN);
+    let high = range.to.unwrap_or(i64::MAX);
+    let mut curves: Vec<(Sampled, Vec<Point<Number>>)> = Vec::new();
+    let mut by_curve: HashMap<&Curve, usize> = HashMap::new();
+    for sample in &values.samples {
+        if sample.at.cycles < low || sample.at.cycles >= high {
+            continue;
+        }
+        let curve = *by_curve.entry(&sample.curve).or_insert_with(|| {
+            let empty = Sampled {
+                curve: sample.curve.clone(),
+                count: 0,
+                excluded_suspect: 0,
+                nan: 0,
+                spread: None,
+            };
+            curves.push((empty, Vec::new()));
+            curves.len() - 1
+        });
+        let (counts, points) = &mut curves[curve];
+        if places.covers_suspect(sample.at, sample.at) {
+            counts.excluded_suspect += 1;
+        } else if sample.value.is_nan() {
+            counts.nan += 1;
+        } else {
+            counts.count += 1;
+            points.push(places.point(sample.value, sample.at));
+        }
+    }
+    curves.sort_by(|a, b| a.0.curve.cmp(&b.0.curve));
+    curves
+        .into_iter()
+        .map(|(sampled, points)| Sampled {
+            spread: spread(&points),
+            ..sampled
+        })
+        .collect()
 }
 
 /// What the trace says around each element.
@@ -265,7 +372,7 @@ impl Places {
         self.suspects.iter().any(|&(from, to)| from <= high && to > low)
     }
 
-    fn point(&self, value: i64, edge: Edge) -> Point {
+    fn point<V>(&self, value: V, edge: Edge) -> Point<V> {
         Point {
             value,
             element: edge.element,
@@ -287,8 +394,8 @@ pub struct Found<'a> {
 }
 
 /// The statistics of `trace`, read with `catalogue`, over `range`: those of
-/// its kernel adapter and its durations, the `worst` highest instances kept
-/// for each group. An image with neither is an error.
+/// its kernel adapter, its durations and its curves, the `worst` highest
+/// instances kept for each group. An image with none is an error.
 pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize) -> Result<Report> {
     let mut kernel = meaning::Meaning::new(catalogue, trace.first)?;
     let durations = durations::pair(trace);
@@ -296,8 +403,9 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
         .events
         .values()
         .any(|event| events::Duration::of(&event.name).is_some());
-    if !kernel.traced() && !has_durations {
-        return Err("the image has neither kernel adapter events nor durations".into());
+    let values = values::sample(catalogue, trace);
+    if !kernel.traced() && !has_durations && values.curves.is_empty() {
+        return Err("the image has no kernel adapter events, durations or values".into());
     }
     kernel.add(&trace.elements, 0);
     let mut instances = meaning::instances(&kernel);
@@ -311,7 +419,10 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
         faults: &faults,
         known: &kernel.known(),
     };
-    Ok(compute(trace, found, range, worst))
+    let mut report = compute(trace, found, range, worst);
+    report.values = sampled(trace, &values, range);
+    report.curves = values.curves;
+    Ok(report)
 }
 
 /// The statistics of what the adapter `found` over `range` of `trace`, the
@@ -415,6 +526,8 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         contradictions,
         faults,
         groups,
+        curves: Vec::new(),
+        values: Vec::new(),
     }
 }
 
@@ -442,7 +555,7 @@ pub fn duration(cycles: i64, frequency: Option<f64>) -> String {
 }
 
 /// Where an instance starts: its event's index, and its instant.
-fn at(point: &Point) -> String {
+fn at<V>(point: &Point<V>) -> String {
     match point.seconds {
         Some(seconds) => format!("#{} ({seconds:.6} s)", point.index),
         None => format!("#{}", point.index),
@@ -508,6 +621,36 @@ pub fn text(report: &Report) -> Vec<String> {
         }
         lines.push(line);
     }
+    for sampled in &report.values {
+        let curve = &sampled.curve;
+        let mut line = format!(
+            "{kind} {} {kind} {}: {}",
+            curve.subject,
+            curve.field,
+            sampled.count,
+            kind = values::KIND
+        );
+        if let Some(spread) = &sampled.spread {
+            line += &format!(
+                ", min {} at {}, p50 {}, p90 {}, p99 {}, max {} at {}, mean {}",
+                spread.min.value,
+                at(&spread.min),
+                spread.p50,
+                spread.p90,
+                spread.p99,
+                spread.max.value,
+                at(&spread.max),
+                spread.mean,
+            );
+        }
+        if sampled.nan > 0 {
+            line += &format!(", {} NaN", sampled.nan);
+        }
+        if sampled.excluded_suspect > 0 {
+            line += &format!(" (excluded: {} suspect)", sampled.excluded_suspect);
+        }
+        lines.push(line);
+    }
     lines
 }
 
@@ -517,6 +660,56 @@ fn point(point: &Point) -> Value {
         "index": point.index,
         "cycles": point.cycles,
         "seconds": point.seconds,
+    })
+}
+
+/// A sample's value as JSON: an integer exactly, a floating-point number
+/// null when it is not finite.
+fn number(value: Number) -> Value {
+    match value {
+        Number::Integer(value) => i64::try_from(value)
+            .map(Value::from)
+            .or_else(|_| u64::try_from(value).map(Value::from))
+            .unwrap_or(Value::Null),
+        Number::Float(value) => json!(value),
+    }
+}
+
+fn sample(point: &Point<Number>) -> Value {
+    json!({
+        "value": number(point.value),
+        "index": point.index,
+        "cycles": point.cycles,
+        "seconds": point.seconds,
+    })
+}
+
+/// A curve's statistics as a group of the JSON.
+fn curve(sampled: &Sampled) -> Value {
+    let distribution = sampled.spread.as_ref().map(|spread| {
+        json!({
+            "min": sample(&spread.min),
+            "p50": number(spread.p50),
+            "p90": number(spread.p90),
+            "p99": number(spread.p99),
+            "max": sample(&spread.max),
+            "mean": spread.mean,
+        })
+    });
+    json!({
+        "kind": values::KIND,
+        "subject": sampled.curve.subject,
+        "metric": values::KIND,
+        "detail": sampled.curve.field,
+        "count": sampled.count,
+        "excluded_loss": 0,
+        "excluded_suspect": sampled.excluded_suspect,
+        "cut": 0,
+        "lower_bound": sampled.excluded_suspect > 0,
+        "jitter": null,
+        "share": null,
+        "nan": sampled.nan,
+        "distribution": distribution,
     })
 }
 
@@ -559,6 +752,7 @@ pub fn json(report: &Report) -> String {
                 "distribution": distribution,
             })
         })
+        .chain(report.values.iter().map(curve))
         .collect();
     json!({
         "schema": "kymo-stats",
