@@ -142,7 +142,8 @@ filter, as find's, leaves out events; losses and suspect lines stay.",
         name: "stats",
         description: "The statistics of kymo stats --json over a range: for each task, handler, mutex \
 and duration, its count, distribution, worst instances and share, and the losses, suspect lines and \
-contradictions that bound them. Needs the kernel adapter's events or durations.",
+contradictions that bound them. Needs the kernel adapter's events or durations. Over a whole \
+capture of a few dozen tasks it runs to a hundred kilobytes: name the subjects summary lists.",
         arguments: &[
             FROM,
             TO,
