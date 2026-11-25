@@ -16,9 +16,13 @@ pub struct Palette {
     pub ready: Color32,
     /// The arrow from what woke a task to the task.
     pub wake: Color32,
-    /// A loss and a suspect line: their marks in the ruler, and, at `BAND`'s
-    /// opacity, their bands over the rows.
+    /// A loss: its mark in the ruler and its band's edges.
     pub loss: Color32,
+    /// A loss's band over the rows, and the time unknown on the CPU's line:
+    /// a translucent grey.
+    pub lost: Color32,
+    /// A suspect line: its mark in the ruler, and, at `BAND`'s opacity, its
+    /// band over the rows.
     pub suspect: Color32,
     /// The owner's name, written on a hold.
     pub owner: Color32,
@@ -80,6 +84,8 @@ const LIGHT: Palette = Palette {
     ready: Color32::from_rgb(0x6e, 0x77, 0x81),
     wake: Color32::from_rgb(0xa2, 0x1c, 0xaf),
     loss: Color32::from_rgb(0xc6, 0x28, 0x28),
+    // #59636e at 20 %, premultiplied.
+    lost: Color32::from_rgba_premultiplied(0x12, 0x14, 0x16, 0x33),
     suspect: Color32::from_rgb(0xb4, 0x5f, 0x06),
     owner: Color32::WHITE,
     surface: Color32::from_rgb(0xf0, 0xf2, 0xf5),
@@ -114,6 +120,8 @@ const DARK: Palette = Palette {
     ready: Color32::from_rgb(0x8b, 0x95, 0xa1),
     wake: Color32::from_rgb(0xe8, 0x79, 0xf9),
     loss: Color32::from_rgb(0xf0, 0x64, 0x64),
+    // #9aa3ae at 30 %, premultiplied.
+    lost: Color32::from_rgba_premultiplied(0x2e, 0x31, 0x34, 0x4d),
     suspect: Color32::from_rgb(0xe0, 0xa0, 0x30),
     owner: Color32::BLACK,
     surface: Color32::from_rgb(0x1e, 0x21, 0x27),
@@ -139,8 +147,8 @@ const DARK: Palette = Palette {
     ],
 };
 
-/// The opacity of a loss's or a suspect line's band over the rows: the data
-/// stays readable through it.
+/// The opacity of a suspect line's band over the rows: the data stays
+/// readable through it.
 pub const BAND: f32 = 0.15;
 
 impl Palette {
