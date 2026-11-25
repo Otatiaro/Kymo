@@ -32,8 +32,6 @@ struct Api {
     connect: unsafe extern "C" fn() -> c_int,
     /// (address, count, words, status per word) -> words read, negative on error
     read_u32: unsafe extern "C" fn(u32, u32, *mut u32, *mut u8) -> c_int,
-    /// (address, value) -> 0 on success
-    write_u32: unsafe extern "C" fn(u32, u32) -> c_int,
     close: unsafe extern "C" fn(),
 }
 
@@ -52,7 +50,6 @@ impl Api {
                 get_speed: *library.get(b"JLINKARM_GetSpeed")?,
                 connect: *library.get(b"JLINKARM_Connect")?,
                 read_u32: *library.get(b"JLINKARM_ReadMemU32")?,
-                write_u32: *library.get(b"JLINKARM_WriteU32")?,
                 close: *library.get(b"JLINKARM_Close")?,
             })
         }
@@ -162,15 +159,6 @@ impl Target for JLinkTarget {
         };
         if read != words.len() as c_int {
             return Err(format!("J-Link read at {address:#010x} returned {read}").into());
-        }
-        Ok(())
-    }
-
-    fn write_word(&mut self, address: u32, value: u32) -> Result<()> {
-        // SAFETY: plain values.
-        let result = unsafe { (self.api.write_u32)(address, value) };
-        if result != 0 {
-            return Err(format!("J-Link write at {address:#010x} returned {result}").into());
         }
         Ok(())
     }

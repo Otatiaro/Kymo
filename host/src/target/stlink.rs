@@ -91,8 +91,6 @@ struct Api {
     connect: unsafe extern "C" fn(ConnectParameters) -> c_int,
     /// (address, out buffer allocated by the library, size) -> 0 on success
     read: unsafe extern "C" fn(c_uint, *mut *mut u8, c_uint) -> c_int,
-    /// (address, data, size) -> 0 on success
-    write: unsafe extern "C" fn(c_uint, *mut c_char, c_uint) -> c_int,
     free: unsafe extern "C" fn(*mut c_void),
     disconnect: unsafe extern "C" fn(),
     set_loaders_path: unsafe extern "C" fn(*const c_char),
@@ -110,7 +108,6 @@ impl Api {
                 delete_list: *library.get(b"deleteInterfaceList")?,
                 connect: *library.get(b"connectStLink")?,
                 read: *library.get(b"readMemory")?,
-                write: *library.get(b"writeMemory")?,
                 free: *library.get(b"freeLibraryMemory")?,
                 disconnect: *library.get(b"disconnect")?,
                 set_loaders_path: *library.get(b"setLoadersPath")?,
@@ -256,16 +253,6 @@ impl Target for StLinkTarget {
                 *word = u32::from_le_bytes(*chunk);
             }
             (self.api.free)(data.cast());
-        }
-        Ok(())
-    }
-
-    fn write_word(&mut self, address: u32, value: u32) -> Result<()> {
-        let mut bytes = value.to_le_bytes();
-        // SAFETY: the buffer holds the 4 bytes written.
-        let result = unsafe { (self.api.write)(address, bytes.as_mut_ptr().cast(), 4) };
-        if result != 0 {
-            return Err(format!("ST-Link write at {address:#010x} failed ({result})").into());
         }
         Ok(())
     }

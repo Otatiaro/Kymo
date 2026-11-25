@@ -40,9 +40,4 @@ impl Target for ProbeRsTarget {
         self.session.core(0)?.read_32(address.into(), words)?;
         Ok(())
     }
-
-    fn write_word(&mut self, address: u32, value: u32) -> Result<()> {
-        self.session.core(0)?.write_word_32(address.into(), value)?;
-        Ok(())
-    }
 }

@@ -301,10 +301,6 @@ impl Target for Simulated {
         }
         Ok(())
     }
-
-    fn write_word(&mut self, _address: u32, _value: u32) -> Result<()> {
-        Err("read only".into())
-    }
 }
 
 fn catalogue() -> Catalogue {
@@ -539,10 +535,6 @@ impl Target for Scripted {
         }
         words.copy_from_slice(&self.memory[at..at + words.len()]);
         Ok(())
-    }
-
-    fn write_word(&mut self, _address: u32, _value: u32) -> Result<()> {
-        Err("read only".into())
     }
 }
 
