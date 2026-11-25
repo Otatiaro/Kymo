@@ -121,6 +121,16 @@ fn runs_opsy(file: &object::File) -> bool {
     })
 }
 
+/// The catalogue of the image at `path`, the interrupts its DWARF does not
+/// name named by the SVD file `svd`.
+pub fn read_with_svd(path: &Path, svd: Option<&Path>) -> Result<Catalogue> {
+    let mut catalogue = read(path)?;
+    if let Some(svd) = svd {
+        catalogue.interrupts = catalogue.interrupts.or(&Interrupts::from_svd(svd)?);
+    }
+    Ok(catalogue)
+}
+
 /// The catalogue of the image at `path`.
 pub fn read(path: &Path) -> Result<Catalogue> {
     let data = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;

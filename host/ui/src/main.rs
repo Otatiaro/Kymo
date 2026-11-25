@@ -15,7 +15,6 @@ mod timeline;
 
 use eframe::egui;
 use kymo::events;
-use kymo::interrupts::Interrupts;
 use kymo::model::Trace;
 use kymo::target::Result;
 use std::path::PathBuf;
@@ -137,11 +136,7 @@ fn run() -> Result<()> {
         return Err(USAGE.into());
     };
     // The trace borrows the catalogue, which lives as long as the window.
-    let mut read_catalogue = events::read(elf)?;
-    if let Some(svd) = svd {
-        read_catalogue.interrupts = read_catalogue.interrupts.or(&Interrupts::from_svd(&svd)?);
-    }
-    let catalogue: &'static events::Catalogue = Box::leak(Box::new(read_catalogue));
+    let catalogue: &'static events::Catalogue = Box::leak(Box::new(events::read_with_svd(elf, svd.as_deref())?));
     let bytes = std::fs::read(capture).map_err(|error| format!("{}: {error}", capture.display()))?;
     let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;
