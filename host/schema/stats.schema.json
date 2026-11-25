@@ -26,18 +26,19 @@
       "additionalProperties": false,
       "required": ["kind", "subject", "metric", "detail", "count", "excluded_loss", "excluded_suspect", "cut", "lower_bound", "jitter", "share", "distribution"],
       "properties": {
-        "kind": { "type": "string", "description": "task, handler, mutex or duration." },
+        "kind": { "type": "string", "description": "task, handler, mutex, duration or value. A value group is a curve: its subject an application event, its metric value, its detail a numeric field." },
         "subject": { "type": "string" },
         "metric": { "type": "string" },
         "detail": { "type": ["string", "null"], "description": "What divides the metric further: a wake reason, a cause of wake (handler:<name>, task:<name>, elapsed, unknown), a task; null for its total." },
-        "count": { "type": "integer", "minimum": 0, "description": "The instances counted." },
+        "count": { "type": "integer", "minimum": 0, "description": "The instances counted; for a curve, its samples counted, NaN apart." },
         "excluded_loss": { "type": "integer", "minimum": 0, "description": "The instances that touch a loss." },
         "excluded_suspect": { "type": "integer", "minimum": 0, "description": "The instances that cover an overrun write." },
         "cut": { "type": "integer", "minimum": 0, "description": "The instances cut by the range, or open at the end." },
         "lower_bound": { "type": "boolean", "description": "Whether instances were excluded: the max and the high percentiles are then a lower bound." },
         "jitter": { "type": ["integer", "null"], "description": "Max - min, for a period." },
         "share": { "type": ["number", "null"], "description": "The total over the time known, for a net execution." },
-        "distribution": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/distribution" }], "description": "null without an instance counted." }
+        "nan": { "type": "integer", "minimum": 0, "description": "A curve's NaN samples; only in a value group." },
+        "distribution": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/distribution" }, { "$ref": "#/$defs/spread" }], "description": "null without an instance counted; a spread for a value group." }
       }
     },
     "distribution": {
@@ -63,6 +64,32 @@
           }
         },
         "worst": { "type": "array", "items": { "$ref": "#/$defs/point" }, "description": "The highest values, the earliest first among equals." }
+      }
+    },
+    "spread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "p50", "p90", "p99", "max", "mean"],
+      "description": "A curve's samples: their values as the field holds them, an integer exactly or a floating-point number.",
+      "properties": {
+        "min": { "$ref": "#/$defs/sample" },
+        "p50": { "type": "number" },
+        "p90": { "type": "number" },
+        "p99": { "type": "number" },
+        "max": { "$ref": "#/$defs/sample" },
+        "mean": { "type": "number" }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "index", "cycles", "seconds"],
+      "description": "A value of a curve, and the event that carried it.",
+      "properties": {
+        "value": { "type": "number" },
+        "index": { "type": "integer", "minimum": 0 },
+        "cycles": { "type": "integer" },
+        "seconds": { "type": ["number", "null"] }
       }
     },
     "point": {

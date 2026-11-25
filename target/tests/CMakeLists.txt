@@ -152,9 +152,13 @@ endforeach()
 #   functions and objects the image points at;
 # - text: events whose types declare a text, written by kymo decode with their
 #   fields' values (std::format's specifications), against what the image
-#   says; text-bad, a text naming a field its event lacks, refused.
+#   says; text-bad, a text naming a field its event lacks, refused;
+# - durations: begins and ends paired by kymo decode, stats and check, against
+#   the durations the image measures;
+# - values: the numeric fields of application events read as curves by kymo
+#   stats and check, against the values the image emits.
 find_program(KYMO_HOST kymo HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../host/target/release)
-foreach(test layout decode record symbols text text-bad durations)
+foreach(test layout decode record symbols text text-bad durations values)
 	string(REGEX REPLACE "-bad$" "" source ${test})
 	set(definitions "")
 	set(option "")

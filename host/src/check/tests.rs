@@ -4,6 +4,7 @@ use crate::meaning::{
 };
 use crate::stats::tests::{Json, fits_schema, violations};
 use crate::stats::{Metric, distribution};
+use crate::values::Number;
 
 const SCHEMA: &str = include_str!("../../schema/check.schema.json");
 
@@ -47,6 +48,8 @@ fn report(groups: Vec<Group>, frequency: Option<f64>) -> Report {
         contradictions: 0,
         faults: 0,
         groups,
+        curves: Vec::new(),
+        values: Vec::new(),
     }
 }
 
@@ -392,6 +395,164 @@ fn a_regression_compares_with_the_baseline_that_stats_wrote() {
     assert!(super::baseline(r#"{"schema":"kymo-check","version":1,"frequency":null,"groups":[]}"#).is_err());
 }
 
+/// The curve `subject.field`, its samples `values` at events 10, 20, … one
+/// second apart, `suspect` more excluded.
+fn curve(subject: &str, field: &str, values: &[Number], suspect: usize) -> Sampled {
+    let points: Vec<Point<Number>> = values
+        .iter()
+        .enumerate()
+        .map(|(n, &value)| Point {
+            value,
+            element: n,
+            index: 10 * (n as u32 + 1),
+            cycles: 1_000 * (n as i64 + 1),
+            seconds: Some(n as f64 + 1.0),
+        })
+        .collect();
+    Sampled {
+        curve: Curve {
+            subject: subject.to_owned(),
+            field: field.to_owned(),
+        },
+        count: values.len(),
+        excluded_suspect: suspect,
+        nan: 0,
+        spread: stats::spread(&points),
+    }
+}
+
+/// A report of the curves `sampled`, and of `declared` with no sample.
+fn sampled(sampled: Vec<Sampled>, declared: &[(&str, &str)]) -> Report {
+    let mut curves: Vec<Curve> = sampled.iter().map(|sampled| sampled.curve.clone()).collect();
+    curves.extend(declared.iter().map(|&(subject, field)| Curve {
+        subject: subject.to_owned(),
+        field: field.to_owned(),
+    }));
+    Report {
+        curves,
+        values: sampled,
+        ..report(Vec::new(), Some(1e6))
+    }
+}
+
+fn integers(values: &[i128]) -> Vec<Number> {
+    values.iter().map(|&value| Number::Integer(value)).collect()
+}
+
+#[test]
+fn a_value_rule_bounds_a_curve_with_plain_numbers() {
+    let x = curve("app::setpoint", "x", &integers(&[-5, 3, 12, 7]), 0);
+    let f = curve("app::setpoint", "f", &[Number::Float(-0.5), Number::Float(2.25)], 0);
+    let f = Sampled { nan: 1, ..f };
+    let report = sampled(vec![x, f], &[("app::setpoint", "idle")]);
+    let json = stats::json(&report);
+    crate::stats::tests::check_schema(&json);
+    assert!(
+        json.contains(r#""kind":"value","subject":"app::setpoint","metric":"value","detail":"f""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""nan":1"#), "{json}");
+    let rules = r#"[
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"max","max":12},
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"max","max":11},
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"min","min":-5},
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"min","min":-4.5},
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"mean","min":4.25,"max":4.25},
+        {"subject":"app::setpoint","metric":"value","detail":"x","stat":"count","min":4,"max":4},
+        {"kind":"value","subject":"app::setpoint","metric":"value","detail":"f","stat":"max","max":2.25},
+        {"subject":"app::setpoint","metric":"value","detail":"f","stat":"max","max":2.2},
+        {"subject":"app::setpoint","metric":"value","detail":"idle","stat":"max","max":0}
+    ]"#;
+    let verdicts = judged(&report, rules, None).unwrap();
+    let outcomes: Vec<Outcome> = verdicts.iter().map(|verdict| verdict.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            Outcome::Pass,
+            Outcome::Fail,
+            Outcome::Pass,
+            Outcome::Fail,
+            Outcome::Pass,
+            Outcome::Pass,
+            Outcome::Pass,
+            Outcome::Fail,
+            Outcome::Unknown,
+        ]
+    );
+    assert!(
+        verdicts[1]
+            .line
+            .starts_with("FAIL     app::setpoint value x max: 12 > 11"),
+        "{}",
+        verdicts[1].line
+    );
+    assert!(verdicts[1].line.ends_with("(event 30)"), "{}", verdicts[1].line);
+    assert!(verdicts[3].line.ends_with("(event 10)"), "{}", verdicts[3].line);
+    // A field that is no curve of the image is an error, not a verdict.
+    let absent = r#"[{"subject":"app::setpoint","metric":"value","detail":"z","stat":"max","max":1}]"#;
+    let error = judged(&report, absent, None).unwrap_err();
+    assert!(error.contains("not a numeric field"), "{error}");
+}
+
+#[test]
+fn a_suspect_sample_widens_a_value_rule_into_an_interval() {
+    let report = sampled(vec![curve("app::setpoint", "x", &integers(&[1, 2, 3]), 1)], &[]);
+    assert_eq!(
+        outcomes(
+            &report,
+            r#"[{"subject":"app::setpoint","metric":"value","detail":"x","stat":"max","max":3},
+                {"subject":"app::setpoint","metric":"value","detail":"x","stat":"max","max":2},
+                {"subject":"app::setpoint","metric":"value","detail":"x","stat":"min","min":0},
+                {"subject":"app::setpoint","metric":"value","detail":"x","stat":"count","max":4},
+                {"subject":"app::setpoint","metric":"value","detail":"x","stat":"count","max":3}]"#
+        ),
+        [
+            Outcome::Unknown,
+            Outcome::Fail,
+            Outcome::Unknown,
+            Outcome::Pass,
+            Outcome::Unknown,
+        ]
+    );
+}
+
+#[test]
+fn a_value_rule_written_wrong_is_refused() {
+    for wrong in [
+        r#"{"rules":[{"subject":"e","metric":"value","stat":"max","max":1}]}"#,
+        r#"{"rules":[{"kind":"task","subject":"e","metric":"value","detail":"x","stat":"max","max":1}]}"#,
+        r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"jitter","max":1}]}"#,
+        r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"share","max":1}]}"#,
+        r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"max","max":"1us"}]}"#,
+        r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"count","max":1.5}]}"#,
+        r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"max","regression":"2us"}]}"#,
+        r#"{"rules":[{"subject":"a","metric":"net","stat":"max","max":1.5}]}"#,
+    ] {
+        assert!(rules(wrong).is_err(), "{wrong} is read");
+    }
+}
+
+#[test]
+fn a_value_regression_compares_with_the_baseline_that_stats_wrote() {
+    let then = sampled(vec![curve("app::setpoint", "x", &integers(&[-100, 200]), 0)], &[]);
+    let baseline = baseline(&stats::json(&then)).unwrap();
+    let judge = |values: &[i128], rules: &str| -> Vec<Outcome> {
+        let now = sampled(vec![curve("app::setpoint", "x", &integers(values), 0)], &[]);
+        judged(&now, rules, Some(&baseline))
+            .unwrap()
+            .into_iter()
+            .map(|verdict| verdict.outcome)
+            .collect()
+    };
+    let max = r#"[{"subject":"app::setpoint","metric":"value","detail":"x","stat":"max","regression":"10%"}]"#;
+    assert_eq!(judge(&[0, 220], max), [Outcome::Pass]);
+    assert_eq!(judge(&[0, 221], max), [Outcome::Fail]);
+    // The margin is a share of the value's magnitude, above it.
+    let min = r#"[{"subject":"app::setpoint","metric":"value","detail":"x","stat":"min","regression":"10%"}]"#;
+    assert_eq!(judge(&[-90, 0], min), [Outcome::Pass]);
+    assert_eq!(judge(&[-89, 0], min), [Outcome::Fail]);
+}
+
 #[test]
 fn the_rules_fit_the_schema_and_its_checks_catch_what_they_should() {
     let example = r#"{
@@ -404,6 +565,7 @@ fn the_rules_fit_the_schema_and_its_checks_catch_what_they_should() {
         { "subject": "g_sampler", "metric": "net", "stat": "p99", "regression": "10%" },
         { "subject": "g_sampler", "metric": "period", "stat": "jitter", "regression": "2us" },
         { "subject": "g_sampler", "metric": "net", "stat": "count", "min": 1 },
+        { "subject": "axis::setpoint", "metric": "value", "detail": "position", "stat": "max", "max": 12.5 },
         { "capture": "losses", "max": 0 }
       ]
     }"#;
@@ -452,6 +614,7 @@ fn the_rules_fit_the_schema_and_its_checks_catch_what_they_should() {
     ]
     .iter()
     .map(|metric| Json::String(metric.name.to_owned()))
+    .chain([Json::String(crate::values::KIND.to_owned())])
     .collect();
     assert_eq!(metrics, &names);
 }

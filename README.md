@@ -98,6 +98,17 @@ trace::end<batch>(buffer);        // in the consumer's handler
 nothing open, a key opened twice or closed while not open is counted as a
 contradiction; a duration still open when the recording ends is cut.
 
+Each numeric field of an application event is a curve: an integer of 1, 2, 4
+or 8 bytes, signed or not, or a `float` or `double`; a `bool`, a `char`, an
+enumeration, an array and kymo's own events are not. Each emission is a
+sample. `kymo stats` gives each curve its `value` group, named
+`<event> value <field>`: the count, the NaN apart, min, percentiles, max and
+mean; `kymo check` bounds them with plain numbers:
+
+```json
+{ "subject": "moved", "metric": "value", "detail": "load", "stat": "max", "max": 95.0 }
+```
+
 Neither costs more than `emit`: a begin is the emit of the event's fields, a
 keyed begin of the key and the fields, an end of nothing, a keyed end of the
 key, to the instruction and the byte (`target/tests/cost`, in CI). A text is
@@ -136,7 +147,7 @@ kymo events app.elf                     # the event types the ELF declares
 kymo record --probe probe-rs --chip STM32H563ZITx --elf app.elf --out run.kymo
 kymo decode run.kymo                    # the events, one line each
 kymo decode run.kymo --meaning          # the kernel's spans and wakes
-kymo stats run.kymo [--json]            # latencies, durations, periods, shares
+kymo stats run.kymo [--json]            # latencies, durations, periods, shares, values
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
 kymo-ui [run.kymo]                      # the timeline; open, drop or paste the URL of a capture
 ```
