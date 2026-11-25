@@ -160,7 +160,13 @@ kymo stats run.kymo [--json]            # latencies, durations, periods, shares,
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
 kymo-ui [run.kymo]                      # the timeline; open, drop or paste the URL of a capture
 kymo-ui run.kymo --value moved.load     # with that curve shown
+kymo mcp                                # an MCP server on stdio: captures read by an agent
 ```
+
+`kymo mcp` serves an agent through the Model Context Protocol: each tool takes
+a capture's path and answers text: `summary`, `find`, `events`, `context` (what
+is open at an instant), `subject` (a task's activations, a handler's runs),
+`intervals` (from an event to the next of another), `stats` and `check`.
 
 > [!WARNING]
 > A capture holds the ELF given to `record`: the program's code, its symbols,

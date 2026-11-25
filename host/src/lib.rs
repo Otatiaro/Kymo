@@ -13,6 +13,7 @@ pub mod fault;
 pub mod format;
 mod freertos;
 pub mod interrupts;
+pub mod intervals;
 pub mod lines;
 pub mod load;
 pub mod mcp;

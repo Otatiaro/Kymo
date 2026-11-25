@@ -34,7 +34,7 @@ const HOOKS: [(&str, &[&str]); 15] = [
 /// OpSy's wake reasons, by value.
 const REASONS: [&str; 4] = ["notified", "timed_out", "sleep_elapsed", "mutex_granted"];
 
-fn catalogue() -> Catalogue {
+pub(crate) fn catalogue() -> Catalogue {
     let mut events = BTreeMap::new();
     for (n, (hook, fields)) in HOOKS.iter().enumerate() {
         let id = n as u16 + 1;
