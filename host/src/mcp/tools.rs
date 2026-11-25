@@ -14,6 +14,8 @@ use std::rc::Rc;
 const LIMIT: u64 = 200;
 /// The elements `events` gives before and after `around` unless told.
 const AROUND: u64 = 10;
+/// The lines `fault` gives before the fault unless told.
+const BEFORE_FAULT: u64 = 20;
 
 /// What an argument holds.
 #[derive(Clone, Copy)]
@@ -83,7 +85,7 @@ pub struct Tool {
     run: fn(&mut Captures, &Arguments) -> Result<String, String>,
 }
 
-const TOOLS: [Tool; 9] = [
+const TOOLS: [Tool; 10] = [
     Tool {
         name: "summary",
         description: "What a capture holds: its events, slots and losses, its span and frequency, how \
@@ -271,6 +273,26 @@ JSON object, its baseline read from the working directory.",
             TO,
         ],
         run: check,
+    },
+    Tool {
+        name: "fault",
+        description: "A hardware fault the capture holds, decoded: where it came (task, handler or \
+exception), the fault status bits, the fault address when valid, pc and lr with their function and \
+source line, the stack and the frame's address, the probable callers, the stacked registers; then \
+the state after it, as context gives it, and the lines before it.",
+        arguments: &[
+            argument(
+                "number",
+                Kind::Count,
+                "Which fault, 1 for the first, in the order they came; 1 by default.",
+            ),
+            argument(
+                "before",
+                Kind::Count,
+                "The lines given before the fault, 20 by default.",
+            ),
+        ],
+        run: fault,
     },
 ];
 
@@ -682,22 +704,23 @@ fn context(captures: &mut Captures, arguments: &Arguments) -> Result<String, Str
     let Some((last, event)) = event else {
         return Err("no event at or before this instant".to_owned());
     };
+    Ok(state(&loaded, last, event).join("\n"))
+}
+
+/// The state after the elements up to `last`, `event` the last event among
+/// them: the lines `context` gives.
+fn state(loaded: &Loaded, last: usize, event: usize) -> Vec<String> {
+    let elements = &loaded.trace.elements;
     let Element::Event { cycles: now, .. } = elements[event] else {
         unreachable!("an event")
     };
     let elements = &elements[..=last];
-    let since = |from: Edge| {
-        format!(
-            "since {}, {} ago",
-            edge(&loaded, from),
-            time(&loaded, now - from.cycles)
-        )
-    };
+    let since = |from: Edge| format!("since {}, {} ago", edge(loaded, from), time(loaded, now - from.cycles));
     let mut lines = vec![format!(
         "after {}",
         record::line(&loaded.catalogue.symbols, &elements[event])
     )];
-    match kernel(&loaded, elements) {
+    match kernel(loaded, elements) {
         Err(error) => lines.push(format!("kernel: {error}")),
         Ok(kernel) => {
             let task = |task: Option<usize>| task.map_or("idle", |task| kernel.tasks.list[task].name.as_str());
@@ -757,15 +780,15 @@ fn context(captures: &mut Captures, arguments: &Arguments) -> Result<String, Str
                     task(Some(on)),
                     wake.reason,
                     kernel.cause(wake.cause),
-                    edge(&loaded, wake.edge),
-                    time(&loaded, now - wake.edge.cycles)
+                    edge(loaded, wake.edge),
+                    time(loaded, now - wake.edge.cycles)
                 ));
             }
             if let Some(last) = kernel.faults.last() {
                 lines.push(format!(
                     "faults so far: {}, the last at {}: {}",
                     kernel.faults.len(),
-                    edge(&loaded, last.edge),
+                    edge(loaded, last.edge),
                     kernel.describe_fault(last)
                 ));
             }
@@ -781,6 +804,80 @@ fn context(captures: &mut Captures, arguments: &Arguments) -> Result<String, Str
             since(placed.instance.from)
         ));
     }
+    lines
+}
+
+fn fault(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
+    let loaded = load(captures, arguments)?;
+    let elements = &loaded.trace.elements;
+    let mut kernel = Meaning::new(loaded.catalogue, loaded.trace.first).map_err(|error| error.to_string())?;
+    kernel.add(elements, 0);
+    let count = kernel.faults.len();
+    if count == 0 {
+        return Err("the capture holds no fault".to_owned());
+    }
+    let number = arguments.count("number")?.unwrap_or(1);
+    let faulted = usize::try_from(number)
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|at| kernel.faults.get(at))
+        .ok_or_else(|| format!("number is 1 to {count}"))?;
+    let at = faulted.edge.element;
+    let fault = &faulted.fault;
+    let mut header = format!("fault {number} of {count} at {}", edge(&loaded, faulted.edge));
+    if let Some(origin) = loaded.origin {
+        header.push_str(&format!(
+            ", {} after the first event",
+            time(&loaded, faulted.edge.cycles - origin)
+        ));
+    }
+    let mut lines = vec![header];
+    lines.extend(
+        kernel
+            .fault_facts(faulted)
+            .into_iter()
+            .map(|(name, value)| format!("{name}: {value}")),
+    );
+    let registers = [
+        ("r0", fault.r0),
+        ("r1", fault.r1),
+        ("r2", fault.r2),
+        ("r3", fault.r3),
+        ("r12", fault.r12),
+        ("lr", fault.lr),
+        ("pc", fault.pc),
+        ("xpsr", fault.xpsr),
+        ("cfsr", fault.cfsr),
+        ("hfsr", fault.hfsr),
+        ("exc_return", fault.exc_return),
+    ];
+    lines.push(format!(
+        "registers: {}",
+        registers
+            .iter()
+            .map(|(name, value)| format!("{name}=0x{value:08x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    lines.push("context:".to_owned());
+    lines.extend(
+        state(&loaded, at, at)
+            .into_iter()
+            .skip(1)
+            .filter(|line| !line.starts_with("faults so far"))
+            .map(|line| format!("  {line}")),
+    );
+    let before = usize::try_from(arguments.count("before")?.unwrap_or(BEFORE_FAULT)).unwrap_or(usize::MAX);
+    let positions: Vec<usize> = (at.saturating_sub(before)..at).collect();
+    lines.push(match positions.len() {
+        0 => "nothing before it".to_owned(),
+        count => format!("the {count} lines before it:"),
+    });
+    lines.extend(
+        page(&loaded, &positions, usize::MAX, None)
+            .into_iter()
+            .map(|line| format!("  {line}")),
+    );
     Ok(lines.join("\n"))
 }
 

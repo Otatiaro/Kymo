@@ -230,7 +230,7 @@ fn a_task_runs_from_its_start_to_the_next() {
 
 /// A fault's words up to exc_return: a precise bus fault at 0x08000124,
 /// coming with `exc_return` in exception `exception`.
-fn fault(exc_return: u32, exception: u32) -> [u32; 13] {
+pub(crate) fn fault(exc_return: u32, exception: u32) -> [u32; 13] {
     let cfsr = (1 << 9) | (1 << 15);
     [
         cfsr,

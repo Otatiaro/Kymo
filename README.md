@@ -167,7 +167,8 @@ kymo mcp                                # an MCP server on stdio: captures read 
 a capture's path and answers text: `summary`, `find`, `events`, `context` (what
 is open at an instant), `subject` (a task's activations, a handler's runs),
 `intervals` (from an event to the next of another), `stats`, `compare` (the
-statistics of two captures face to face) and `check`.
+statistics of two captures face to face), `check` and `fault` (a hardware fault
+decoded, the state after it and the lines before it).
 
 > [!WARNING]
 > A capture holds the ELF given to `record`: the program's code, its symbols,

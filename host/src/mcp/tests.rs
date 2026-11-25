@@ -260,7 +260,8 @@ fn the_protocol_answers_requests_and_drops_notifications() {
             "intervals",
             "stats",
             "compare",
-            "check"
+            "check",
+            "fault"
         ]
     );
     for tool in response["result"]["tools"].as_array().unwrap() {
@@ -684,6 +685,81 @@ fn compare_gives_each_group_of_two_captures_and_their_difference() {
     assert_eq!(error, "no group of app::rest in either capture");
 }
 
+/// `fault` decodes the fault it is asked for, gives the state after it and
+/// the lines before it; a capture without one, or a number past the last,
+/// is an error.
+#[test]
+fn fault_gives_the_fault_its_state_and_what_came_before() {
+    let capture = File(path());
+    let mut thread = crate::opsy::tests::fault(0xffff_fffd, 0);
+    thread[4] = 0x1234;
+    let mut handler = crate::opsy::tests::fault(0xffff_fff1, 45);
+    handler[3] = 0x4000_0008;
+    write_kernel_from(
+        &capture.0,
+        5000,
+        &[
+            ("task_ready", &[TASK, NOTIFIED]),
+            ("task_started", &[TASK]),
+            ("fault", &thread),
+            ("isr_enter", &[HANDLER, 45]),
+            ("fault", &handler),
+        ],
+    );
+    let mut server = Server::new(kernel_parse);
+    let first = text(&mut server, "fault", json!({ "capture": capture.name(), "before": 1 }));
+    assert_eq!(
+        first.lines().collect::<Vec<_>>(),
+        [
+            "fault 1 of 2 at #2, 200 (200 µs) after the first event",
+            "task: 0x20000100",
+            "bits: PRECISERR,BFARVALID",
+            "bfar: 0x40000000",
+            "pc: 0x08000124",
+            "lr: 0x00000000",
+            "stack: psp",
+            "sp: 0x00000000",
+            "registers: r0=0x00001234 r1=0x00000000 r2=0x00000000 r3=0x00000000 r12=0x00000000 \
+lr=0x00000000 pc=0x08000124 xpsr=0x01000000 cfsr=0x00008200 hfsr=0x00000000 exc_return=0xfffffffd",
+            "context:",
+            "  core: 0x20000100 since #1, 100 (100 µs) ago",
+            "  handlers open: none",
+            "  on the core: 0x20000100, woken by notified, cause unknown, since #0, 200 (200 µs) ago",
+            "  last wake of 0x20000100: by notified, cause unknown, at #0, 200 (200 µs) ago",
+            "the 1 lines before it:",
+            "  event 1 5100 0.000100000 kymo::opsy::task_started task=0x20000100",
+        ]
+    );
+    let second = text(&mut server, "fault", json!({ "capture": capture.name(), "number": 2 }));
+    let lines: Vec<&str> = second.lines().collect();
+    assert_eq!(
+        lines[0], "fault 2 of 2 at #12, 1200 (1.20 ms) after the first event",
+        "{second}"
+    );
+    assert_eq!(lines[1], "handler: 0x08000401 (IRQ29)", "{second}");
+    assert_eq!(lines[3], "bfar: 0x40000008", "{second}");
+    assert!(second.contains("\nthe 4 lines before it:\n"), "{second}");
+    assert!(
+        second.contains("\n  handler 0x08000401 (IRQ29), depth 0, since #11"),
+        "{second}"
+    );
+
+    let alone = text(&mut server, "fault", json!({ "capture": capture.name(), "before": 0 }));
+    assert!(alone.ends_with("\nnothing before it"), "{alone}");
+
+    let (error, failed) = call(&mut server, "fault", json!({ "capture": capture.name(), "number": 3 }));
+    assert!(failed);
+    assert_eq!(error, "number is 1 to 2");
+    let (error, failed) = call(&mut server, "fault", json!({ "capture": capture.name(), "number": 0 }));
+    assert!(failed);
+    assert_eq!(error, "number is 1 to 2");
+    let none = File(path());
+    write_kernel(&none.0, &[("task_started", &[TASK])]);
+    let (error, failed) = call(&mut server, "fault", json!({ "capture": none.name() }));
+    assert!(failed);
+    assert_eq!(error, "the capture holds no fault");
+}
+
 /// The adapter's catalogue of OpSy's tests, with the ring of the test
 /// captures.
 fn kernel_catalogue() -> Catalogue {
@@ -702,9 +778,15 @@ const OTHER: u32 = 0x2000_0200;
 const HANDLER: u32 = 0x0800_0401;
 const NOTIFIED: u32 = 0;
 
-/// A capture of the adapter's events `steps`, each a hook and its fields, at
-/// index 0 on, `STEP` cycles apart.
+/// A capture of the adapter's events `steps`, each a hook (or `fault`) and
+/// its fields, at index 0 on, each index `STEP` cycles after the one before,
+/// the first at cycle 0.
 fn write_kernel(path: &Path, steps: &[(&str, &[u32])]) {
+    write_kernel_from(path, 0, steps);
+}
+
+/// The capture of `write_kernel`, its first event at cycle `start`.
+fn write_kernel_from(path: &Path, start: u32, steps: &[(&str, &[u32])]) {
     let catalogue = kernel_catalogue();
     let ring = &catalogue.rings[0];
     let header = Header {
@@ -720,17 +802,29 @@ fn write_kernel(path: &Path, steps: &[(&str, &[u32])]) {
             write_index: 0,
         })
         .unwrap();
-    for (index, &(hook, fields)) in (0..).zip(steps) {
-        let name = format!("kymo::opsy::{hook}");
+    let mut index = 0;
+    for &(hook, fields) in steps {
+        let name = match hook {
+            "fault" => crate::fault::EVENT.to_owned(),
+            hook => format!("kymo::opsy::{hook}"),
+        };
         let event = catalogue.events.values().find(|event| event.name == name).unwrap();
+        let count = decode::slots_for(event.size) as u32;
+        let mut payload: Vec<u8> = fields.iter().flat_map(|field| field.to_le_bytes()).collect();
+        payload.resize(8 + 12 * (count as usize - 1), 0);
         let head = u32::from(event.id) | 1 << 16 | decode::lap(index, ring) << 17;
-        let mut slot = head.to_le_bytes().to_vec();
-        slot.extend((index * STEP).to_le_bytes());
-        slot.extend(fields.iter().flat_map(|field| field.to_le_bytes()));
-        slot.resize(16, 0);
-        writer.write(&Record::Event { index, slots: &slot }).unwrap();
+        let mut slots = head.to_le_bytes().to_vec();
+        slots.extend((start + index * STEP).to_le_bytes());
+        slots.extend(&payload[..8]);
+        for (slot, words) in (1..).zip(payload[8..].chunks(12)) {
+            let tail = u32::from(event.id) | decode::lap(index + slot, ring) << 17;
+            slots.extend(tail.to_le_bytes());
+            slots.extend(words);
+        }
+        writer.write(&Record::Event { index, slots: &slots }).unwrap();
+        index += count;
     }
-    let end = steps.len() as u32;
+    let end = index;
     writer
         .write(&Record::Pass {
             host_ns: 1_000_000,
