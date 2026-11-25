@@ -51,7 +51,7 @@
       "required": ["capture"],
       "anyOf": [{ "required": ["max"] }, { "required": ["min"] }],
       "properties": {
-        "capture": { "enum": ["losses", "suspects", "contradictions"] },
+        "capture": { "enum": ["losses", "suspects", "contradictions", "faults"] },
         "min": { "type": "integer", "minimum": 0 },
         "max": { "type": "integer", "minimum": 0 }
       }

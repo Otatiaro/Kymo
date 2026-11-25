@@ -331,6 +331,8 @@ fn catalogue() -> Catalogue {
         }],
         symbols: Default::default(),
         interrupts: Default::default(),
+        lines: Default::default(),
+        code: Default::default(),
         warnings: Vec::new(),
     }
 }

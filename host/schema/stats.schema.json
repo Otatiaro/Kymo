@@ -4,7 +4,7 @@
   "description": "Statistics of a range of a capture. Durations and instants are in cycles of the trace's cycle counter; seconds are since the first event, at the frequency given, null without one.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "version", "frequency", "from", "to", "origin", "known", "joined", "losses", "suspects", "contradictions", "groups"],
+  "required": ["schema", "version", "frequency", "from", "to", "origin", "known", "joined", "losses", "suspects", "contradictions", "faults", "groups"],
   "properties": {
     "schema": { "const": "kymo-stats" },
     "version": { "const": 1 },
@@ -17,6 +17,7 @@
     "losses": { "type": "integer", "minimum": 0, "description": "The losses read in the range; the start of a recording is not one." },
     "suspects": { "type": "integer", "minimum": 0, "description": "The writers reported overrun in the range." },
     "contradictions": { "type": "integer", "minimum": 0 },
+    "faults": { "type": "integer", "minimum": 0, "description": "The hardware faults in the range (kymo::fault)." },
     "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } }
   },
   "$defs": {

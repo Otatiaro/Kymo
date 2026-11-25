@@ -18,6 +18,8 @@ fn parse(_: &[u8], _: &str, _: Option<&Path>) -> Result<Catalogue> {
         }],
         symbols: Default::default(),
         interrupts: Default::default(),
+        lines: Default::default(),
+        code: Default::default(),
         warnings: Vec::new(),
     })
 }

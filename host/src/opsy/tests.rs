@@ -84,11 +84,41 @@ fn catalogue() -> Catalogue {
             text: None,
         },
     );
+    // The fault event: its words, then its return addresses.
+    let word = |name: &str, offset: u64, size: u64, kind: Kind| EventField {
+        name: name.to_owned(),
+        offset,
+        ty: Type {
+            name: name.to_owned(),
+            size: Some(size),
+            kind,
+        },
+    };
+    let unsigned = Kind::Base(DwAte(gimli::DW_ATE_unsigned.0));
+    let mut fields: Vec<EventField> = crate::fault::WORDS
+        .iter()
+        .zip(0..)
+        .map(|(name, n)| word(name, 4 * n, 4, unsigned.clone()))
+        .collect();
+    let returns = word("uint32_t", 0, 4, unsigned.clone()).ty;
+    fields.push(word("returns", 64, 32, Kind::Array(Box::new(returns), vec![8])));
+    events.insert(
+        101,
+        Event {
+            id: 101,
+            name: crate::fault::EVENT.to_owned(),
+            size: 96,
+            fields,
+            text: None,
+        },
+    );
     Catalogue {
         events,
         rings: Vec::new(),
         symbols: Symbols::default(),
         interrupts: Interrupts::from_enumerators(&[(45, "TIM2_IRQn".to_owned())]),
+        lines: Default::default(),
+        code: Default::default(),
         warnings: Vec::new(),
     }
 }
@@ -118,6 +148,8 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
         }
         let name = if step == "tick" {
             "app::tick".to_owned()
+        } else if step == "fault" {
+            crate::fault::EVENT.to_owned()
         } else {
             format!("{PREFIX}{step}")
         };
@@ -193,6 +225,76 @@ fn a_task_runs_from_its_start_to_the_next() {
             "run from=3 to=4 task=idle",
             "run from=4 to=open task=0x20000100",
         ]
+    );
+}
+
+/// A fault's words up to exc_return: a precise bus fault at 0x08000124,
+/// coming with `exc_return` in exception `exception`.
+fn fault(exc_return: u32, exception: u32) -> [u32; 13] {
+    let cfsr = (1 << 9) | (1 << 15);
+    [
+        cfsr,
+        0,
+        0,
+        0x4000_0000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x0800_0124,
+        0x0100_0000 | exception,
+        exc_return,
+    ]
+}
+
+const FAULT: &str = "bits=PRECISERR,BFARVALID bfar=0x40000000 pc=0x08000124 lr=0x00000000";
+
+#[test]
+fn a_fault_on_the_task_or_in_the_handler_it_came_in() {
+    let thread = fault(0xffff_fffd, 0);
+    let lines = spans(0, &[("task_started", &[A]), ("fault", &thread)]);
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("fault at=1 task=0x20000100 {FAULT} stack=psp sp=0x00000000")
+    );
+    let lines = spans(0, &[("enter_idle", &[]), ("fault", &thread)]);
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("fault at=1 task=idle {FAULT} stack=psp sp=0x00000000")
+    );
+    // Before any task is known on the core.
+    let lines = spans(0, &[("fault", &thread)]);
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("fault at=0 context=unknown {FAULT} stack=psp sp=0x00000000")
+    );
+    // In the innermost handler entered for the exception it interrupted.
+    let handler = fault(0xffff_fff1, 45);
+    let lines = spans(
+        0,
+        &[
+            ("task_started", &[A]),
+            ("isr_enter", &[H, 45]),
+            ("isr_enter", &[G, 46]),
+            ("isr_exit", &[G]),
+            ("fault", &handler),
+        ],
+    );
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("fault at=4 handler=0x08000401 (IRQ29) {FAULT} stack=msp sp=0x00000000")
+    );
+    // In an exception no handler entered is for.
+    let untraced = fault(0xffff_fff1, 11);
+    let lines = spans(
+        0,
+        &[("task_started", &[A]), ("isr_enter", &[H, 45]), ("fault", &untraced)],
+    );
+    assert_eq!(
+        lines.last().unwrap(),
+        &format!("fault at=2 exception=11 {FAULT} stack=msp sp=0x00000000")
     );
 }
 
@@ -706,9 +808,11 @@ fn report_from(first: u32, steps: &[(&str, &[u32])], range: stats::Range) -> sta
         pieces.add(&trace.elements, split);
         assert_eq!(crate::meaning::instances(&pieces), instances, "split at {split}");
     }
+    let faults: Vec<usize> = whole.faults.iter().map(|faulted| faulted.edge.element).collect();
     let found = stats::Found {
         instances: &instances,
         contradictions: &whole.contradictions,
+        faults: &faults,
         known: &whole.known(),
     };
     let report = stats::compute(&trace, found, range, 100);
@@ -833,6 +937,19 @@ fn an_activation_splits_into_what_preempts_it() {
     );
 }
 
+#[test]
+fn the_faults_of_the_range_are_counted() {
+    let thread = fault(0xffff_fffd, 0);
+    let steps: &[(&str, &[u32])] = &[("task_started", &[A]), ("fault", &thread), ("task_sleep", &[A])];
+    let range = |from, to| stats::Range {
+        from: Some(from),
+        to: Some(to),
+    };
+    assert_eq!(report(steps, stats::Range::default()).faults, 1);
+    assert_eq!(report(steps, range(10, 20)).faults, 1);
+    assert_eq!(report(steps, range(0, 10)).faults, 0);
+    assert_eq!(report(steps, range(20, 30)).faults, 0);
+}
 /// A recording that starts after index 0 joined the trace: the state before
 /// it is unknown, so the instance it cuts is excluded, but it is not a loss.
 #[test]
@@ -856,7 +973,7 @@ fn a_recording_that_joined_late_is_not_a_loss() {
     assert_eq!(net(&joined), (1, 1, 0, 0, vec![10]));
     let text = stats::text(&joined).join("\n");
     assert!(
-        text.contains(", 0 losses, 0 suspect writers, 0 contradictions, joined at index 5\n"),
+        text.contains(", 0 losses, 0 suspect writers, 0 contradictions, 0 faults, joined at index 5\n"),
         "{text}"
     );
     let json = stats::json(&joined);

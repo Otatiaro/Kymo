@@ -112,6 +112,13 @@ else()
 		PASS_REGULAR_EXPRESSION "error: .*no event type ids \\(\\.kymo\\.ids\\). the image runs OpSy without Kymo's hooks")
 	add_test(NAME opsy_hooked_${OPSY_TARGET} COMMAND ${KYMO_HOST} events $<TARGET_FILE:opsy_qemu_tests>)
 	set_tests_properties(opsy_hooked_${OPSY_TARGET} PROPERTIES FAIL_REGULAR_EXPRESSION "warning:")
+
+	# The call levels image recorded by the host, each fault's probable callers
+	# named by kymo decode --meaning (levels/levels.py).
+	add_test(NAME kymo_opsy_levels_host_${OPSY_TARGET}
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/levels/levels.py
+			--qemu ${KYMO_QEMU} --machine ${machine}
+			--image $<TARGET_FILE:kymo_opsy_levels> --host ${KYMO_HOST})
 endif()
 
 # An OpSy program on a NUCLEO-H563ZI (board/board.cpp), recorded through its
@@ -157,4 +164,20 @@ if(KYMO_OPSY_BOARD)
 	target_compile_options(opsy_board_modules PRIVATE -g ${OPSY_OPTIMISATION})
 	target_compile_definitions(opsy_board_modules PRIVATE KYMO_TEST_RING_SLOTS=1024)
 	target_include_directories(opsy_board_modules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+
+	# A fault in a task (board/fault.cpp): the trace frozen and the core held,
+	# the fault recorded and checked (board/fault.py).
+	add_executable(opsy_board_fault
+		${KYMO_OPSY_DIR}/scheduler.cpp
+		${KYMO_OPSY_DIR}/tests/qemu/startup.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/board/fault.cpp)
+	opsy_qemu_image(opsy_board_fault)
+	target_compile_options(opsy_board_fault PRIVATE -g ${OPSY_OPTIMISATION})
+	target_compile_definitions(opsy_board_fault PRIVATE KYMO_TEST_RING_SLOTS=1024)
+	target_include_directories(opsy_board_fault PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+	add_test(NAME opsy_board_fault_h563
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/fault.py
+			--image $<TARGET_FILE:opsy_board_fault> --host ${KYMO_HOST}
+			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
+	set_tests_properties(opsy_board_fault_h563 PROPERTIES TIMEOUT 120)
 endif()

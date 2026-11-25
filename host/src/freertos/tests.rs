@@ -90,6 +90,8 @@ fn catalogue() -> Catalogue {
         rings: Vec::new(),
         symbols: Symbols::default(),
         interrupts: Interrupts::from_enumerators(&[(45, "TIM2_IRQn".to_owned())]),
+        lines: Default::default(),
+        code: Default::default(),
         warnings: Vec::new(),
     }
 }

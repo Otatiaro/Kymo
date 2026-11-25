@@ -355,6 +355,27 @@ impl Timeline {
                 }
             }
         }
+        // A fault: a red diamond, outlined, on the row it came in.
+        if let Some(meaning) = &self.meaning {
+            for faulted in &meaning.kernel.faults {
+                let Some(n) = rows::fault_row(&lines[..shown], faulted.context) else {
+                    continue;
+                };
+                let x = view.column(faulted.edge.cycles) + 0.5;
+                if x < area.left() || x >= area.right() {
+                    continue;
+                }
+                let centre = egui::pos2(x, area.top() + (tops[n] + tops[n + 1]) / 2.0);
+                let points = [(0.0, -FAULT), (FAULT, 0.0), (0.0, FAULT), (-FAULT, 0.0)]
+                    .map(|(dx, dy)| centre + egui::vec2(dx, dy))
+                    .to_vec();
+                painter.add(egui::Shape::convex_polygon(
+                    points,
+                    palette.loss,
+                    Stroke::new(1.0, palette.surface),
+                ));
+            }
+        }
         // A loss: a grey band over the rows, edged in red, or a red line
         // where it is a pixel wide. A suspect line: a light band, the data
         // readable through it. Each with a solid mark in the ruler.
@@ -489,6 +510,9 @@ impl Timeline {
 
 /// How far each heading indents the names under it, in pixels.
 const GUIDE: f32 = 16.0;
+
+/// Half the width and height of a fault's diamond, in pixels.
+pub(super) const FAULT: f32 = 6.0;
 
 /// The width of a heading's mark and the gap after it, in pixels.
 const MARK: f32 = 13.0;

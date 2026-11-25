@@ -42,6 +42,15 @@ handler open but the kernel's (`handler:<name>`) or else the task on the core
 adapter hides in the task it interrupts. Then a line for each time a task is
 ready and not on the core (`ready`): from its task_ready to its first run,
 then each time it is preempted, to the end of its activation. Then a line
+`fault at=<index>` for each hardware fault (kymo::fault): where it came
+(`task=<name>`, `task=idle`, `handler=<name>`, `exception=<number>` for an
+exception the adapter does not trace, `context=unknown`); the bits set in
+CFSR and HFSR; the fault address MMFAR or BFAR holds when valid; pc and lr
+with their function and source line; the stack the frame is on and its
+address; `frame=untrusted` when stacking it faulted, `frame=outside-stack`
+when it is outside the task's stack; and `probable-callers=[...]`, the first
+three return addresses above the frame that follow a call to the level below
+in the ELF's code: an old one left in the stack can pass. Then a line
 `contradiction <index>` for each event against the order the adapter's
 events keep.
 
@@ -113,8 +122,8 @@ bounds a statistic (min, p50, p90, p99, max, mean, jitter, count, share) of
 a group (subject, metric, detail, kind) with min and max, as a duration with
 its unit (50us, 2ms, 300cycles), a percentage or a count; or holds it within
 a regression (10%, 2us) of the same statistic in the baseline, a kymo stats
---json the file names; or bounds the losses, suspects or contradictions of
-the range. Excluded instances make each statistic an interval: a rule passes
+--json the file names; or bounds the losses, suspects, contradictions or
+hardware faults of the range. Excluded instances make each statistic an interval: a rule passes
 when all of it keeps to the rule, fails when none does, and is unknown
 otherwise. A group absent from the range fails. A line each, then a total.
 Exits with 0 when every rule passes; 3 when one fails; 4 when none fails
@@ -282,9 +291,11 @@ fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
     instances.extend(durations.instances);
     let mut contradictions = kernel.contradictions.clone();
     contradictions.extend(durations.contradictions);
+    let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
     let found = stats::Found {
         instances: &instances,
         contradictions: &contradictions,
+        faults: &faults,
         known: &kernel.known(),
     };
     Ok(stats::compute(&trace, found, range, worst))

@@ -4,13 +4,16 @@
 
 pub mod capture;
 pub mod check;
+pub mod code;
 pub mod decode;
 pub mod durations;
 pub mod elf;
 pub mod events;
+pub mod fault;
 pub mod format;
 mod freertos;
 pub mod interrupts;
+pub mod lines;
 pub mod load;
 pub mod meaning;
 pub mod model;
