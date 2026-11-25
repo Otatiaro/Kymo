@@ -118,6 +118,36 @@ jobs:
           cargo test --release --workspace --manifest-path host/Cargo.toml
           cargo clippy --all-targets --workspace --manifest-path host/Cargo.toml -- -D warnings
 
+  # The host on Windows, the platform of a desk: kymo and kymo-ui built,
+  # tested and linted there.
+  windows:
+    name: Host on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: host
+
+      - name: Build and test kymo and kymo-ui
+        run: |
+          cargo build --release --workspace --manifest-path host/Cargo.toml
+          cargo test --release --workspace --manifest-path host/Cargo.toml
+          cargo clippy --all-targets --workspace --manifest-path host/Cargo.toml -- -D warnings
+
+  # The host's dependencies against the RustSec advisory database.
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: cargo audit
+        run: |
+          cargo install --locked cargo-audit
+          cargo audit --file host/Cargo.lock
+
   # clang-tidy over the target code, with the .clang-tidy files under target/:
   # the library and its tests, and the OpSy adapter with its
   # test, each as the Arm toolchain compiles it (target/tidy.py); each public
