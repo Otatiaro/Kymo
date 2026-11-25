@@ -119,16 +119,19 @@ struct tracer
 	template<typename Event>
 	[[gnu::always_inline]] static void emit(Event const& event)
 	{
-		if ((control.load(std::memory_order_relaxed) & bit(family_of<Event>)) == 0)
-			return;
-		Trace::channel(on<family_of<Event>>{}).write(type_id_word<Event>(), timestamp(), event);
+		emit_as<Event>(event);
 	}
 
-	/** @brief Opens a duration of @p Event, as emit() writes an event. */
+	/**
+	 * @brief Opens a duration of @p Event, as emit() writes an event: the
+	 *        payload of begin_of<Event> is @p event itself, written in place.
+	 */
 	template<typename Event>
 	[[gnu::always_inline]] static void begin(Event const& event)
 	{
-		emit(begin_of<Event>{event});
+		static_assert(sizeof(begin_of<Event>) == sizeof(Event) && alignof(begin_of<Event>) == alignof(Event),
+		              "begin_of<Event> is laid out as Event");
+		emit_as<begin_of<Event>>(event);
 	}
 
 	/** @brief Opens a duration of @p Event under @p key. */
@@ -176,6 +179,18 @@ struct tracer
 	}
 
 private:
+	/**
+	 * @brief Writes @p payload under the type id of @p Type, to the channel of
+	 *        @p Type's family, unless that family is disabled or the trace frozen.
+	 */
+	template<typename Type, typename Payload>
+	[[gnu::always_inline]] static void emit_as(Payload const& payload)
+	{
+		if ((control.load(std::memory_order_relaxed) & bit(family_of<Type>)) == 0)
+			return;
+		Trace::channel(on<family_of<Type>>{}).write(type_id_word<Type>(), timestamp(), payload);
+	}
+
 	tracer() = default;
 	friend Trace;
 };

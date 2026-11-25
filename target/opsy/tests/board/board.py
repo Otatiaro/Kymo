@@ -9,7 +9,8 @@ capture. Not through the stlink backend: STM32CubeProgrammer, attaching to an
 STM32H5 even in hot-plug mode, halts the core and disables every interrupt.
 Then checks, besides trace.py's checks of the events and of `kymo stats`
 against oracle.py, here with real durations and the middle half cutting
-instances:
+instances, the application's `sampling` durations among them, bounded by
+`kymo check` rules:
 
 - that interrupts nest: every entry of the nested handler is inside the
   timer's, and every timer period has one;
@@ -36,7 +37,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trace"))
-from trace import parse, check, check_rules, check_stats  # noqa: E402
+from trace import SAMPLING, parse, check, check_rules, check_stats  # noqa: E402
 
 CHIP = "STM32H563ZITx"
 PERIOD = 1e-3  # seconds
@@ -157,7 +158,8 @@ def main() -> int:
             print(decode.stderr)
             print("kymo decode failed")
             return 1
-        errors = (check(decode.stdout) + check_board(decode.stdout) + check_stats(args.host, args.image, capture)
+        errors = (check(decode.stdout) + check_board(decode.stdout)
+                  + check_stats(args.host, args.image, capture, {SAMPLING: None})
                   + check_rules(args.host, args.image, capture))
         lost = re.search(r"(\d+) slots lost", record.stderr)
         if lost is None or int(lost.group(1)) != 0:

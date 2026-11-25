@@ -12,7 +12,8 @@
  * Two tasks share a mutex. `logger`, the lower, holds it for about half a
  * period, then sleeps; `sampler`, woken by the timer, takes it. When the
  * timer comes while `logger` holds it, `sampler` blocks, `logger` inherits
- * its priority, and the mutex is handed over on release.
+ * its priority, and the mutex is handed over on release. Each period
+ * `sampler` takes is a duration, `sampling`, the wait for the mutex included.
  *
  * Built without NDEBUG: the idle task spins on NOP, and the probe can read
  * the ring while nothing runs.
@@ -21,6 +22,7 @@
 #include "qemu_test.hpp"
 
 #include <opsy.hpp>
+#include <opsy_trace.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -113,6 +115,12 @@ void start_timer()
 	reg(tim_cr1) = 1u;  // CEN
 }
 
+/// A period sampler takes: from its wake to the mutex released, the wait for the mutex included.
+struct sampling
+{
+	std::uint32_t tick;
+};
+
 void sampler()
 {
 	// From a running task: a priority change before scheduler::start asks
@@ -128,6 +136,7 @@ void sampler()
 				g_tick.wait(g_lock);
 			g_ticks = 0;
 		}
+		auto const sampled = trace::scope(sampling{g_shared});
 		std::lock_guard guard{g_mutex};
 		++g_shared;
 	}

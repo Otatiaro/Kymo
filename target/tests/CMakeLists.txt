@@ -174,6 +174,22 @@ foreach(test layout decode record symbols text text-bad durations)
 	endforeach()
 endforeach()
 
+# - no-text: the texts of the durations image, an application that only emits
+#   its events, are in its DWARF, never in what the target loads
+#   (objcopy -O binary). The text image prints its texts, so holds them.
+foreach(cpu cortex-m33 cortex-m4)
+	foreach(level Og Os Os-lto)
+		set(name no-text-${cpu}-${level})
+		if(KYMO_HOST AND Python3_EXECUTABLE)
+			add_test(NAME ${name} COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/no_text.py
+				--host ${KYMO_HOST} --objcopy ${CMAKE_OBJCOPY} --image $<TARGET_FILE:durations-${cpu}-${level}>)
+		else()
+			add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo "missing: KYMO_HOST or Python")
+			set_tests_properties(${name} PROPERTIES WILL_FAIL ON)
+		endif()
+	endforeach()
+endforeach()
+
 # - interrupts: the device interrupts named from the DWARF's IRQn_Type, in
 #   SvdGenerator's convention, in a vendor's CMSIS one, or in both (none
 #   named, a warning); then with an SVD file naming those the DWARF does not.
