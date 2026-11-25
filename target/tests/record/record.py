@@ -344,7 +344,7 @@ def killed(args, port: int, control: int, capture: str) -> int:
     record.stdin.close()
 
     errors = []
-    replay = subprocess.run([args.host, "decode", args.image, capture],
+    replay = subprocess.run([args.host, "decode", capture],
                             capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
     cut = re.search(r"cut short at byte (\d+), after index (\d+)", replay.stderr)
     if replay.returncode != 0:
@@ -412,7 +412,7 @@ def main() -> int:
             print("kymo record failed")
             return 1
         errors = check(output, args.lap)
-        replay = subprocess.run([args.host, "decode", args.image, capture],
+        replay = subprocess.run([args.host, "decode", capture],
                                 capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
         if replay.returncode != 0:
             errors.append(f"kymo decode of the capture failed: {replay.stderr.strip()}")

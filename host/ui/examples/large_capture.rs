@@ -2,14 +2,16 @@
 //! events of the small capture repeated with their indexes and laps shifted,
 //! a loss and a suspect line in each copy, and synthetic times.
 //!
-//! usage: large_capture <elf> <capture> <out> <events>
+//! usage: large_capture <capture> <out> <events>
+//!
+//! The large capture holds or names the ELF the small one does.
 //!
 //! For instance, from a capture of the OpSy QEMU suite made by
 //! `kymo record --out`:
 //!
 //! ```text
-//! cargo run --release -p kymo-ui --example large_capture -- opsy_qemu_tests.elf suite.kcap large.kcap 1000000
-//! kymo-ui opsy_qemu_tests.elf large.kcap --measure
+//! cargo run --release -p kymo-ui --example large_capture -- suite.kcap large.kcap 1000000
+//! kymo-ui large.kcap --measure
 //! ```
 
 use kymo::capture::{self, Header, Record, Writer};
@@ -29,11 +31,12 @@ const SUSPECT: usize = 200;
 
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [elf, input, output, wanted] = arguments.as_slice() else {
-        return Err("usage: large_capture <elf> <capture> <out> <events>".into());
+    let [input, output, wanted] = arguments.as_slice() else {
+        return Err("usage: large_capture <capture> <out> <events>".into());
     };
-    let catalogue = events::read(&PathBuf::from(elf))?;
     let bytes = std::fs::read(input)?;
+    let (image, image_name) = capture::elf(input, &bytes, None)?;
+    let catalogue = events::parse(&image, &image_name)?;
     let wanted: usize = wanted.parse()?;
     let capture::Capture { header, records, .. } = capture::read(&bytes)?;
     let ring = catalogue.ring(Some(&header.channel))?;
@@ -68,6 +71,7 @@ fn main() -> Result<()> {
             first: header.first,
             clock: Some(25_000_000),
             channel: header.channel.clone(),
+            elf: header.elf,
         },
     )?;
     let mut written = 0usize;

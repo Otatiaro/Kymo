@@ -13,12 +13,13 @@ fn describe(record: &Record) -> String {
 
 /// A capture of each kind of record, with the byte each record ends at and
 /// the index after the last event or loss up to it.
-fn capture(name: &str) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) {
+fn capture(name: &str, elf: Elf) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) {
     let path = std::env::temp_dir().join(format!("kymo-capture-{name}-{}.kcap", std::process::id()));
     let header = Header {
         first: 5,
         clock: Some(1_000_000),
         channel: "kymo::ring".into(),
+        elf,
     };
     let slots: Vec<u8> = (0..48).collect();
     let records = [
@@ -82,7 +83,7 @@ fn capture(name: &str) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) {
 
 #[test]
 fn a_capture_cut_anywhere_reads_up_to_its_last_whole_record() {
-    let (bytes, header_bytes, ends) = capture("cut");
+    let (bytes, header_bytes, ends) = capture("cut", Elf::Embedded(vec![0x7f, b'E', b'L', b'F']));
     for length in 0..=bytes.len() {
         let read = read(&bytes[..length]);
         if length < header_bytes {
@@ -108,7 +109,87 @@ fn a_capture_cut_anywhere_reads_up_to_its_last_whole_record() {
 
 #[test]
 fn an_unknown_record_tag_is_an_error() {
-    let (mut bytes, header_bytes, _) = capture("tag");
+    let (mut bytes, header_bytes, _) = capture("tag", Elf::Reference("/images/board.elf".into()));
     bytes[header_bytes] = 6;
     assert!(read(&bytes).is_err());
+}
+
+#[test]
+fn the_header_holds_the_elf_embedded_or_named() {
+    for elf in [
+        Elf::Embedded((0..=255).collect()),
+        Elf::Reference("D:\\images\\board.elf".into()),
+        Elf::Reference("https://example.com/builds/42/board.elf".into()),
+    ] {
+        let path = std::env::temp_dir().join(format!("kymo-capture-elf-{}.kcap", std::process::id()));
+        let written = Header {
+            first: 5,
+            clock: None,
+            channel: "kymo::ring".into(),
+            elf,
+        };
+        Writer::create(&path, &written).unwrap().finish().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let read = header(&bytes).unwrap();
+        assert_eq!((read.first, read.clock, &read.channel), (5, None, &written.channel));
+        assert_eq!(read.elf, written.elf);
+        assert!(super::read(&bytes).unwrap().records.is_empty());
+    }
+}
+
+/// A file of the temporary directory holding `bytes`, its path as text.
+fn file(name: &str, bytes: &[u8]) -> String {
+    let path = std::env::temp_dir().join(format!("kymo-capture-{name}-{}", std::process::id()));
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn the_elf_comes_from_the_capture_unless_given() {
+    let embedded = capture("embedded", Elf::Embedded(b"embedded".to_vec())).0;
+    let (elf, name) = super::elf("run.kcap", &embedded, None).unwrap();
+    assert_eq!(
+        (elf.as_slice(), name.as_str()),
+        (&b"embedded"[..], "the ELF in run.kcap")
+    );
+
+    let given = file("given.elf", b"given");
+    assert_eq!(
+        super::elf("run.kcap", &embedded, Some(&given)).unwrap(),
+        (b"given".to_vec(), given.clone())
+    );
+
+    let named = file("named.elf", b"named");
+    let referenced = capture("referenced", Elf::Reference(named.clone())).0;
+    assert_eq!(
+        super::elf("run.kcap", &referenced, None).unwrap(),
+        (b"named".to_vec(), named.clone())
+    );
+    assert_eq!(super::elf("run.kcap", &referenced, Some(&given)).unwrap().0, b"given");
+
+    std::fs::remove_file(&named).unwrap();
+    let missing = super::elf("run.kcap", &referenced, None).unwrap_err().to_string();
+    assert!(missing.contains(&named) && missing.contains("--elf"), "{missing}");
+    let remote = capture("remote", Elf::Reference("https://example.com/board.elf".into())).0;
+    let remote = super::elf("run.kcap", &remote, None).unwrap_err().to_string();
+    assert!(
+        remote.contains("https://example.com/board.elf") && remote.contains("--elf"),
+        "{remote}"
+    );
+
+    let ring = super::elf("ring.bin", &[0; 64], None).unwrap_err().to_string();
+    assert!(ring.contains("--elf"), "{ring}");
+    assert_eq!(super::elf("ring.bin", &[0; 64], Some(&given)).unwrap().0, b"given");
+    std::fs::remove_file(&given).unwrap();
+}
+
+#[test]
+fn a_reference_names_a_file_by_its_absolute_path() {
+    let url = "http://example.com/builds/42/board.elf";
+    assert_eq!(reference(url).unwrap(), url);
+    let relative = reference(&format!("build{}board.elf", std::path::MAIN_SEPARATOR)).unwrap();
+    let expected = std::env::current_dir().unwrap().join("build").join("board.elf");
+    assert_eq!(relative, expected.to_string_lossy());
+    assert!(std::path::Path::new(&relative).is_absolute());
 }

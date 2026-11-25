@@ -36,7 +36,7 @@ use crate::model::{Element, Trace};
 use crate::target::{self, Result, Target};
 use crate::time::Timeline;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -653,7 +653,7 @@ pub fn run(
     catalogue: &Catalogue,
     ring: &Ring,
     duration: Option<Duration>,
-    out: Option<&Path>,
+    out: Option<(PathBuf, capture::Elf)>,
     clock: Option<u64>,
 ) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -671,12 +671,17 @@ pub fn run(
     let mut recorder = Recorder::start(target, catalogue, ring)?;
     let first = recorder.next();
     println!("record {first}");
-    let header = capture::Header {
-        first,
-        clock,
-        channel: ring.name.clone(),
-    };
-    let capture = out.map(|out| Writer::create(out, &header)).transpose()?;
+    let capture = out
+        .map(|(out, elf)| {
+            let header = capture::Header {
+                first,
+                clock,
+                channel: ring.name.clone(),
+                elf,
+            };
+            Writer::create(&out, &header)
+        })
+        .transpose()?;
     let (passes, received) = std::sync::mpsc::channel::<Pass>();
     std::thread::scope(|scope| {
         let writer = scope.spawn(move || write(catalogue, received, capture, clock).map_err(|error| error.to_string()));

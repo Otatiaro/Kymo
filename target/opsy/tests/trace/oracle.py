@@ -4,7 +4,7 @@
     expected = oracle.report(decoded, low, high, worst, names)
     errors = oracle.compare(expected, json.loads(stats_json))
 
-`decoded` is what `kymo decode <elf> <capture>` prints: the record line, then
+`decoded` is what `kymo decode <capture>` prints: the record line, then
 an element per line (event, lost, suspect), then the end line. The elements
 are numbered in that order; an edge is (element, cycles, lost).
 

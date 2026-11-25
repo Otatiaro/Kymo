@@ -3,7 +3,7 @@
 //! included, in a few milliseconds.
 
 use super::{Item, Recorder};
-use crate::capture::{Header, Record, Writer};
+use crate::capture::{Elf, Header, Record, Writer};
 use crate::events::{Catalogue, Event, Ring};
 use crate::model::{Element, Trace};
 use crate::target::{Result, Target};
@@ -778,6 +778,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
             first: recorder.next(),
             clock: Some(clock),
             channel: ring.name.clone(),
+            elf: Elf::Reference(String::new()),
         };
         let mut writer = Writer::create(&path, &header).unwrap();
         let (mut items, mut yielded) = (Vec::new(), Vec::new());

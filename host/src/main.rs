@@ -9,10 +9,14 @@ use std::time::Duration;
 
 const USAGE: &str = "\
 usage: kymo events <elf> [--svd <file>]
-       kymo decode <elf> <ring or capture> [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
+       kymo decode <ring or capture> [--elf <file>] [--channel <ring>] [--clock <Hz>] [--meaning] [--svd <file>]
        kymo record --probe <probe-rs|jlink|stlink|qemu> --elf <file> [options]
-       kymo stats <elf> <capture> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
-       kymo check <elf> <capture> <rules.json> [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
+       kymo stats <capture> [--elf <file>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>] [--worst <n>] [--json]
+       kymo check <capture> <rules.json> [--elf <file>] [--from <s>] [--to <s>] [--clock <Hz>] [--svd <file>]
+
+A capture holds the ELF of the image it was recorded from, or names it
+(record --elf-ref); --elf reads it with another. A copy of a ring needs
+--elf.
 
 events: lists the event types of an image, read from its ELF: each type id,
 the type it stands for, its size, and each field's offset, size and type.
@@ -71,7 +75,12 @@ record options:
   --speed <kHz>      debug clock, or the closest the probe supports
                      below it (default 24000)
   --duration <seconds>  stop after this long
-  --out <file>       also keep the recording in this capture file
+  --out <file>       also keep the recording in this capture file, with the
+                     ELF --elf gives in it
+  --elf-ref <file or URL>
+                     name the image's ELF in the capture rather than keep it
+                     there: a file, kept as an absolute path, or an http(s)
+                     URL
   --clock <Hz>       the cycle counter's frequency, kept in the capture;
                      without it, measured
 
@@ -146,9 +155,10 @@ fn parsed<T: std::str::FromStr>(option: &str, value: Option<String>) -> Result<T
         .map_err(|_| usage(format!("{option}: cannot read {value}")))
 }
 
-/// The range, clock and SVD options of stats and check.
+/// The ELF, range, clock and SVD options of stats and check.
 #[derive(Clone, Default)]
 struct Window {
+    elf: Option<String>,
     clock: Option<u64>,
     from: Option<f64>,
     to: Option<f64>,
@@ -159,6 +169,7 @@ impl Window {
     /// Takes `option` and its value if it is one of the window's.
     fn take(&mut self, option: &str, arguments: &mut impl Iterator<Item = String>) -> Result<bool> {
         match option {
+            "--elf" => self.elf = Some(parsed(option, arguments.next())?),
             "--from" => self.from = Some(parsed(option, arguments.next())?),
             "--to" => self.to = Some(parsed(option, arguments.next())?),
             "--clock" => self.clock = Some(parsed(option, arguments.next())?),
@@ -169,8 +180,8 @@ impl Window {
     }
 }
 
-/// The kernel's statistics of the capture `copy` of the image `elf`.
-fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> Result<()> {
+/// The kernel's statistics of the capture `copy`.
+fn stats(copy: &str, mut arguments: impl Iterator<Item = String>) -> Result<()> {
     let mut window = Window::default();
     let mut worst = 10;
     let mut json = false;
@@ -184,7 +195,7 @@ fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> 
             _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
         }
     }
-    let report = report(elf, copy, &window, worst)?;
+    let report = report(copy, &window, worst)?;
     if json {
         println!("{}", stats::json(&report));
     } else {
@@ -195,9 +206,9 @@ fn stats(elf: &str, copy: &str, mut arguments: impl Iterator<Item = String>) -> 
     Ok(())
 }
 
-/// The rules of the file `rules` judged on the capture `copy` of the image
-/// `elf`: the exit code says how they stand.
-fn check(elf: &str, copy: &str, rules: &str, mut arguments: impl Iterator<Item = String>) -> Result<ExitCode> {
+/// The rules of the file `rules` judged on the capture `copy`: the exit code
+/// says how they stand.
+fn check(copy: &str, rules: &str, mut arguments: impl Iterator<Item = String>) -> Result<ExitCode> {
     let mut window = Window::default();
     while let Some(option) = arguments.next() {
         if !window.take(&option, &mut arguments)? {
@@ -214,7 +225,7 @@ fn check(elf: &str, copy: &str, rules: &str, mut arguments: impl Iterator<Item =
             Some(check::baseline(&text).map_err(|error| format!("{}: {error}", path.display()))?)
         }
     };
-    let report = report(elf, copy, &window, 1)?;
+    let report = report(copy, &window, 1)?;
     let verdicts =
         check::judge(&report, &rules_read, baseline.as_ref()).map_err(|error| format!("{rules}: {error}"))?;
     for verdict in &verdicts {
@@ -224,15 +235,21 @@ fn check(elf: &str, copy: &str, rules: &str, mut arguments: impl Iterator<Item =
     Ok(ExitCode::from(check::code(&verdicts)))
 }
 
-/// The statistics of the capture `copy` of the image `elf`, over the window.
-fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
-    let Window { clock, from, to, svd } = window;
+/// The statistics of the capture `copy`, over the window.
+fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
+    let Window {
+        elf,
+        clock,
+        from,
+        to,
+        svd,
+    } = window;
     let (clock, from, to) = (*clock, *from, *to);
-    let catalogue = catalogue(Path::new(elf), svd.as_deref())?;
     let bytes = std::fs::read(copy).map_err(|error| format!("{copy}: {error}"))?;
     if !capture::is_capture(&bytes) {
         return Err(format!("{copy} is not a capture of kymo record").into());
     }
+    let catalogue = catalogue_of(copy, &bytes, elf.as_deref(), svd.as_deref())?;
     let trace = Trace::read(&catalogue, &bytes, clock)?;
     let mut kernel = meaning::Meaning::new(&catalogue, trace.first)?;
     let durations = durations::pair(&trace);
@@ -276,7 +293,19 @@ fn report(elf: &str, copy: &str, window: &Window, worst: usize) -> Result<stats:
 /// The catalogue of the image at `path`, its warnings printed, the
 /// interrupts its DWARF does not name named by the SVD file `svd`.
 fn catalogue(path: &Path, svd: Option<&Path>) -> Result<events::Catalogue> {
-    let catalogue = events::read_with_svd(path, svd)?;
+    warned(events::read_with_svd(path, svd)?)
+}
+
+/// The catalogue to read `bytes`, the capture or copy of the ring `copy`,
+/// with: of the ELF `elf` when given, else of the one the capture holds or
+/// names (see `catalogue`).
+fn catalogue_of(copy: &str, bytes: &[u8], elf: Option<&str>, svd: Option<&Path>) -> Result<events::Catalogue> {
+    let (image, name) = capture::elf(copy, bytes, elf)?;
+    warned(events::parse_with_svd(&image, &name, svd)?)
+}
+
+/// `catalogue`, its warnings printed.
+fn warned(catalogue: events::Catalogue) -> Result<events::Catalogue> {
     for warning in &catalogue.warnings {
         eprintln!("warning: {warning}");
     }
@@ -289,10 +318,10 @@ fn run() -> Result<ExitCode> {
     match command.as_deref() {
         Some("record") => {}
         Some("check") => {
-            let (Some(elf), Some(copy), Some(rules)) = (arguments.next(), arguments.next(), arguments.next()) else {
+            let (Some(copy), Some(rules)) = (arguments.next(), arguments.next()) else {
                 return Err(usage(USAGE));
             };
-            return check(&elf, &copy, &rules, arguments);
+            return check(&copy, &rules, arguments);
         }
         Some("events") => {
             let elf = PathBuf::from(arguments.next().ok_or_else(|| usage(USAGE))?);
@@ -308,9 +337,10 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Some("decode") => {
-            let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
+            let Some(copy) = arguments.next() else {
                 return Err(usage(USAGE));
             };
+            let mut elf = None;
             let mut channel = None;
             let mut clock = None;
             let mut spans = false;
@@ -322,14 +352,15 @@ fn run() -> Result<ExitCode> {
                 }
                 let value = arguments.next();
                 match option.as_str() {
+                    "--elf" => elf = Some(parsed::<String>(&option, value)?),
                     "--channel" => channel = Some(parsed::<String>(&option, value)?),
                     "--clock" => clock = Some(parsed(&option, value)?),
                     "--svd" => svd = Some(parsed::<PathBuf>(&option, value)?),
                     _ => return Err(usage(format!("unknown option {option}\n\n{USAGE}"))),
                 }
             }
-            let catalogue = catalogue(Path::new(&elf), svd.as_deref())?;
             let bytes = std::fs::read(&copy).map_err(|error| format!("{copy}: {error}"))?;
+            let catalogue = catalogue_of(&copy, &bytes, elf.as_deref(), svd.as_deref())?;
             if capture::is_capture(&bytes) {
                 if channel.is_some() {
                     return Err("--channel names the ring of a copy; a capture names its own".into());
@@ -354,10 +385,10 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Some("stats") => {
-            let (Some(elf), Some(copy)) = (arguments.next(), arguments.next()) else {
+            let Some(copy) = arguments.next() else {
                 return Err(usage(USAGE));
             };
-            stats(&elf, &copy, arguments)?;
+            stats(&copy, arguments)?;
             return Ok(ExitCode::SUCCESS);
         }
         _ => return Err(usage(USAGE)),
@@ -366,6 +397,7 @@ fn run() -> Result<ExitCode> {
     let mut probe = None;
     let mut chip = None;
     let mut elf = None;
+    let mut elf_ref = None;
     let mut speed_khz = 24_000;
     let mut duration = None;
     let mut out = None;
@@ -382,6 +414,7 @@ fn run() -> Result<ExitCode> {
             "--probe-id" => probe = Some(given()?),
             "--chip" => chip = Some(given()?),
             "--elf" => elf = Some(PathBuf::from(given()?)),
+            "--elf-ref" => elf_ref = Some(given()?),
             "--speed" => speed_khz = parsed(&option, value)?,
             "--duration" => duration = Some(Duration::from_secs_f64(parsed(&option, value)?)),
             "--out" => out = Some(PathBuf::from(given()?)),
@@ -399,7 +432,16 @@ fn run() -> Result<ExitCode> {
     let elf_path = elf.ok_or_else(|| usage(USAGE))?;
     let catalogue = catalogue(&elf_path, None)?;
     let ring = catalogue.ring(channel.as_deref())?;
+    let out = match (out, elf_ref) {
+        (None, None) => None,
+        (None, Some(_)) => return Err(usage("--elf-ref names the ELF in the capture --out writes")),
+        (Some(out), Some(place)) => Some((out, capture::Elf::Reference(capture::reference(&place)?))),
+        (Some(out), None) => {
+            let elf = std::fs::read(&elf_path).map_err(|error| format!("{}: {error}", elf_path.display()))?;
+            Some((out, capture::Elf::Embedded(elf)))
+        }
+    };
     let mut target = target::open(&connection)?;
-    record::run(target.as_mut(), &catalogue, ring, duration, out.as_deref(), clock)?;
+    record::run(target.as_mut(), &catalogue, ring, duration, out, clock)?;
     Ok(ExitCode::SUCCESS)
 }
