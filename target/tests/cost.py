@@ -20,6 +20,9 @@ The expected costs, the disabled path included, are in the record of the CPU
 and level. The exit status is 1 when a case costs more than its record plus
 the tolerance, or when a case is missing from the record or from the image.
 A drop beyond the tolerance is reported, so that the record follows the gain.
+Each application event of SAME must cost what the plain emit of its payload
+costs, instructions and flash both, with no tolerance: the exit status is 1
+otherwise.
 It also reports the flash of each function and the sections' growth.
 """
 
@@ -34,7 +37,13 @@ from pathlib import Path
 EXEC = re.compile(r"^Trace \d+: \S+ \[[0-9a-f]+/([0-9a-f]+)/")
 FUNCTION = re.compile(r"^([0-9a-f]+) ([0-9a-f]+) [Tt] (cost_\w+|_Z9test_mainv)$")
 CALLER = "_Z9test_mainv"
-CASES = ["cost_slots_1", "cost_slots_2", "cost_slots_3", "cost_slots_4", "cost_disabled"]
+CASES = ["cost_slots_1", "cost_slots_2", "cost_slots_3", "cost_slots_4", "cost_disabled",
+         "cost_text", "cost_empty", "cost_begin", "cost_end",
+         "cost_words_3", "cost_keyed_begin", "cost_words_1", "cost_keyed_end"]
+# The application's events and the plain emit of the same payload: each pair
+# costs the same, in instructions and in flash (ADR-088).
+SAME = [("cost_text", "cost_slots_1"), ("cost_begin", "cost_slots_1"), ("cost_end", "cost_empty"),
+        ("cost_keyed_begin", "cost_words_3"), ("cost_keyed_end", "cost_words_1")]
 
 
 def functions(nm, image):
@@ -124,6 +133,7 @@ def main() -> int:
 
     failed = False
     measured = {}
+    flashes = {}
     print(f"{'case':<16}{'instructions':>14}{'flash (bytes)':>15}")
     for name in CASES:
         if kymo[name] == 0 or base[name] == 0:
@@ -132,6 +142,7 @@ def main() -> int:
         cost = kymo[name] - base[name]
         measured[name] = cost
         flash = kymo_sizes[name] - base_sizes[name]
+        flashes[name] = flash
         line = f"{name.removeprefix('cost_'):<16}{cost:>14}{flash:>15}"
         if name not in expected:
             line += "  not recorded"
@@ -144,6 +155,12 @@ def main() -> int:
             elif difference < -args.tolerance:
                 line += f"  dropped by {-difference} under the recorded {expected[name]}: update the record"
         print(line)
+
+    for name, plain in SAME:
+        if (measured[name], flashes[name]) != (measured[plain], flashes[plain]):
+            print(f"{name} costs {measured[name]} instructions and {flashes[name]} bytes, "
+                  f"{plain} {measured[plain]} and {flashes[plain]}: not the same")
+            failed = True
 
     growth = [k - b for k, b in zip(sections(args.size, args.image), sections(args.size, args.baseline))]
     print(f"sections: text +{growth[0]}, data +{growth[1]}, bss +{growth[2]} bytes")

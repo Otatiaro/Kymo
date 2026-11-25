@@ -34,9 +34,11 @@ that:
   delay and by a mutex released;
 - `kymo stats --json`, on the whole capture and on its middle half, gives
   what oracle.py computes from the event lines `kymo decode` prints: every
-  group, its counts, percentiles, histogram and worst instances; and the
-  handover a task begins and a handler ends after the task's end is one
-  duration, with no contradiction.
+  group, its counts, percentiles, histogram and worst instances, the
+  durations included; and the handover a task begins and a handler ends
+  after the task's end is one duration, with no contradiction;
+- `kymo check` passes at the oracle's bounds of every group, durations
+  included, and fails one cycle past them.
 
 After a loss, the running task, the waiting ones, the open interrupts and the
 priorities are unknown until seen again: a check that needs them is skipped
@@ -89,14 +91,18 @@ EVENTS = {
     "mutex_released": ("exclusion", ["mutex", "owner"]),
     "mutex_blocked": ("exclusion", ["mutex", "waiter"]),
 }
-# The application's events, of durations_check.cpp: their fields, in order.
+# The application's events, of durations_check.cpp and of the board's
+# program (board/board.cpp): their fields, in order.
+SAMPLING = "app::(anonymous namespace)::sampling"
 APPLICATION = {
     "kymo::begin_of<handover>": ["item"],
     "kymo::end_of<handover>": [],
     "kymo::begin_of<job>": ["number"],
     "kymo::end_of<job>": [],
+    f"kymo::begin_of<{SAMPLING}>": ["tick"],
+    f"kymo::end_of<{SAMPLING}>": [],
 }
-# Its durations: how many of each.
+# The suite's durations: how many of each, none cut.
 DURATIONS = {"handover": 1, "job": 2}
 DEFAULT_FAMILIES = {"scheduling", "causality", "interrupts", "exclusion", "application"}
 POINTERS = {"task", "condition", "mutex", "owner", "waiter", "handler"}
@@ -119,16 +125,16 @@ def parse(output: str) -> list:
     """
     items = []
     for line in output.splitlines():
-        words = line.split(" ", 5)
+        words = line.split(" ", 4)
         if words[0] == "record" and int(words[1]) != 0:
             items.append((line, None, None))
         elif words[0] == "lost":
             items.append((line, None, None))
         elif words[0] == "event":
-            # A name may hold a space, "(anonymous namespace)": a field
-            # starts where a word is followed by "=".
-            fields = re.split(r" (?=\w+=)", words[5]) if len(words) > 5 else []
-            items.append((line, words[4], [tuple(field.split("=", 1)) for field in fields]))
+            # A name or a value may hold a space, "(anonymous namespace)": a
+            # field starts where a word is followed by "=".
+            name, *fields = re.split(r" (?=\w+=)", words[4])
+            items.append((line, name, [tuple(field.split("=", 1)) for field in fields]))
     return items
 
 
@@ -420,9 +426,11 @@ def check_spans(output: str, decoded: str, names: dict[int, str]) -> list[str]:
     return errors
 
 
-def check_stats(host: str, image: str, capture: str) -> list[str]:
+def check_stats(host: str, image: str, capture: str, durations: dict[str, int | None] = DURATIONS) -> list[str]:
     """kymo stats --json against oracle.py, on the whole capture and on its
-    middle half, every kind of instance seen and some cut by the range."""
+    middle half, every kind of instance seen and some cut by the range; the
+    durations those of @p durations, each its count, none cut (None: some,
+    the last one perhaps cut by the end of the recording), no contradiction."""
     def run(*arguments) -> str:
         done = subprocess.run([host, *arguments], capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS)
         if done.returncode != 0:
@@ -463,11 +471,14 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
         errors.append(f"the recording left a kind of instance unexercised: {kinds}")
     # The handover begun by a task and ended by a handler after the task's
     # end pairs as the jobs within it do, without contradicting anything.
-    durations = {group["subject"]: (group["count"], group["cut"]) for group in whole["groups"]
-                 if group["kind"] == "duration"}
-    if durations != {subject: (count, 0) for subject, count in DURATIONS.items()} or whole["contradictions"]:
-        errors.append(f"durations (count, cut) {durations} and {whole['contradictions']} contradictions, "
-                      f"not {DURATIONS} and none")
+    found = {group["subject"]: (group["count"], group["cut"]) for group in whole["groups"]
+             if group["kind"] == "duration"}
+    expected = all(subject in found and (found[subject] == (count, 0) if count is not None
+                                         else found[subject][0] > 0 and found[subject][1] <= 1)
+                   for subject, count in durations.items())
+    if not expected or found.keys() != durations.keys() or whole["contradictions"]:
+        errors.append(f"durations (count, cut) {found} and {whole['contradictions']} contradictions, "
+                      f"not {durations} and none")
     # QEMU leaves the cycle counter at 0: every duration is 0, the range cuts
     # nothing, and only the board's recording checks them.
     if whole["to"] > whole["from"] and cut == 0:

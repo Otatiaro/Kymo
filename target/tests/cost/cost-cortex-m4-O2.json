@@ -3,5 +3,13 @@
   "cost_slots_2": 46,
   "cost_slots_3": 58,
   "cost_slots_4": 71,
-  "cost_disabled": 4
+  "cost_disabled": 4,
+  "cost_text": 32,
+  "cost_empty": 29,
+  "cost_begin": 32,
+  "cost_end": 29,
+  "cost_words_3": 44,
+  "cost_keyed_begin": 44,
+  "cost_words_1": 25,
+  "cost_keyed_end": 25
 }

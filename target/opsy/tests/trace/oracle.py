@@ -91,15 +91,17 @@ def elements(decoded: str) -> tuple[int, list[dict]]:
     """The first index recorded, and the elements in order."""
     first, out = 0, []
     for line in decoded.splitlines():
-        words = line.split(" ", 5)
+        words = line.split(" ", 4)
         if words[0] == "record":
             first = int(words[1])
         elif words[0] == "event":
-            fields = re.split(r" (?=\w+=)", words[5]) if len(words) > 5 else []
+            # A name or a value may hold a space: a field starts where a word
+            # is followed by "=".
+            name, *fields = re.split(r" (?=\w+=)", words[4])
             # One index, or the range of the event's slots: "11439-11440".
             out.append({"kind": "event", "index": int(words[1].split("-")[0]), "cycles": int(words[2]),
                         "seconds": None if words[3] == "-" else float(words[3]),
-                        "name": words[4].removeprefix(PREFIX),
+                        "name": name.removeprefix(PREFIX),
                         "values": dict(field.split("=", 1) for field in fields)})
         elif words[0] == "lost":
             out.append({"kind": "lost"})

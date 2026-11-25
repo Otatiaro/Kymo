@@ -96,6 +96,12 @@ trace::end<batch>(buffer);        // in the consumer's handler
 nothing open, a key opened twice or closed while not open is counted as a
 contradiction; a duration still open when the recording ends is cut.
 
+Neither costs more than `emit`: a begin is the emit of the event's fields, a
+keyed begin of the key and the fields, an end of nothing, a keyed end of the
+key, to the instruction and the byte (`target/tests/cost`, in CI). A text is
+never in what the target loads (`target/tests/no_text.py`), as long as the
+program does not use it.
+
 The program enables the DWT cycle counter, which timestamps the events. An
 RTOS adapter emits the kernel's events through the same tracer:
 `target/opsy/include/kymo/opsy/hooks.hpp` for OpSy,
