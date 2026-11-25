@@ -113,7 +113,12 @@ says how to install it.
 The OpSy adapter records a hardware fault as a `kymo::fault`
 (`target/include/kymo/fault.hpp`): the fault status registers, the frame the
 core stacked and `EXC_RETURN`, before the application's fault handler runs.
-It does not freeze the trace: an interrupt of higher priority than the fault
+With them, the frame's address, the bounds of the stack it should be on (the
+faulting task's, from `stack_base()` and `stack_size()`, or the main stack's,
+from the vector table) and up to eight words above the frame that may be
+return addresses, read from at most 64 words of that stack: the host makes the
+first call levels from them. A frame outside its stack is recorded, its stack
+not read. It does not freeze the trace: an interrupt of higher priority than the fault
 still writes, and overwrites what came before. A handler that keeps the board
 for the host to read calls `kymo::freeze()` first.
 

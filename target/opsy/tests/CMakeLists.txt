@@ -48,6 +48,23 @@ target_compile_options(opsy_untraced PRIVATE -g ${OPSY_OPTIMISATION})
 target_link_options(opsy_untraced PRIVATE -Wl,--undefined=start_application)
 target_include_directories(opsy_untraced PRIVATE ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
 
+# The call levels a fault carries (levels/levels.cpp): faults three calls
+# deep, in a task, an interrupt handler, a floating-point frame and on a stack
+# not the task's, each event read back from the ring and its words checked.
+add_executable(kymo_opsy_levels
+	${KYMO_OPSY_DIR}/scheduler.cpp
+	${KYMO_OPSY_DIR}/tests/qemu/startup.cpp
+	${KYMO_OPSY_DIR}/tests/qemu/qemu_irq.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/levels/levels.cpp)
+opsy_qemu_image(kymo_opsy_levels)
+target_compile_options(kymo_opsy_levels PRIVATE -g ${OPSY_OPTIMISATION})
+target_include_directories(kymo_opsy_levels BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/levels ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+get_directory_property(levels_machine DIRECTORY ${KYMO_OPSY_DIR}/tests/qemu DEFINITION OPSY_QEMU_MACHINE)
+add_test(NAME kymo_opsy_levels_${OPSY_TARGET}
+	COMMAND ${CMAKE_COMMAND} -DQEMU_MACHINE=${levels_machine} -DIMAGE=$<TARGET_FILE:kymo_opsy_levels>
+		-P ${KYMO_OPSY_DIR}/tests/qemu/run_qemu.cmake)
+set_tests_properties(kymo_opsy_levels_${OPSY_TARGET} PROPERTIES TIMEOUT 120)
+
 # The adapter's events read back from the ring, as a case of OpSy's suite.
 target_sources(opsy_qemu_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ring_check.cpp)
 # The application's durations across OpSy's contexts, as a case of the suite.
