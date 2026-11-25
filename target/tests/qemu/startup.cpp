@@ -17,12 +17,20 @@ void Fault_Handler();
 void SysTick_Handler();
 }
 
-/// GCC calls memcpy, memmove, memset and memcmp whenever it likes, and a freestanding program
-/// has to provide them; these images link no C library. Built without loop
-/// pattern recognition, so they do not turn into calls to themselves; kept
-/// whether referenced or not, since with -flto the calls appear only after
-/// the link has dropped what nothing referenced.
-extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+/// The compiler calls memcpy, memmove, memset and memcmp whenever it likes, and a freestanding
+/// program has to provide them; these images link no C library. Built without
+/// loop pattern recognition (GCC) or builtins (Clang), so they do not turn into
+/// calls to themselves; kept whether referenced or not, since with -flto the
+/// calls appear only after the link has dropped what nothing referenced.
+#if __has_cpp_attribute(gnu::optimize)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): an attribute, which no constant can hold
+#define NO_LOOP_PATTERNS gnu::optimize("no-tree-loop-distribute-patterns")
+#else
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage): an attribute, which no constant can hold
+#define NO_LOOP_PATTERNS clang::no_builtin
+#endif
+
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
 void* memcpy(void* destination, void const* source, std::size_t size)
 {
 	// NOLINTNEXTLINE(misc-const-correctness): written through *out++, which clang-tidy 23 takes for a read
@@ -33,7 +41,7 @@ void* memcpy(void* destination, void const* source, std::size_t size)
 	return destination;
 }
 
-extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
 void* memmove(void* destination, void const* source, std::size_t size)
 {
 	// NOLINTNEXTLINE(misc-const-correctness): written through *out, which clang-tidy 23 takes for a read
@@ -46,7 +54,7 @@ void* memmove(void* destination, void const* source, std::size_t size)
 	return destination;
 }
 
-extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
 void* memset(void* destination, int value, std::size_t size)
 {
 	// NOLINTNEXTLINE(misc-const-correctness): written through *out++, which clang-tidy 23 takes for a read
@@ -56,7 +64,7 @@ void* memset(void* destination, int value, std::size_t size)
 	return destination;
 }
 
-extern "C" [[gnu::used, gnu::optimize("no-tree-loop-distribute-patterns")]]
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
 int memcmp(void const* left, void const* right, std::size_t size)
 {
 	auto const* one = static_cast<unsigned char const*>(left);
