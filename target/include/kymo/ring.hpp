@@ -90,6 +90,30 @@ constexpr unsigned log2_of(std::size_t n)
 	return bits;
 }
 
+/**
+ * @brief Copies @p Size bytes from @p bytes to @p words, one copy per word.
+ *
+ * The first slot's payload is copied so: a single copy of its 8 bytes spans
+ * the key and the event of a keyed begin, which keeps Clang from holding them
+ * in registers, and lets GCC build an event before testing its family. The
+ * slots after it take a single copy each, which GCC does in fewer instructions.
+ */
+template<std::size_t Size, std::size_t... Words>
+[[gnu::always_inline]] inline void copy_words(std::uint32_t* words, unsigned char const* bytes,
+                                              std::index_sequence<Words...> /*words*/)
+{
+	constexpr std::size_t word = sizeof(std::uint32_t);
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic): word Words of the destination and of the source
+	(std::memcpy(words + Words, bytes + (Words * word), std::min(Size - (Words * word), word)), ...);
+}
+
+/** @brief Copies @p Size bytes from @p bytes to @p words, one copy per word. */
+template<std::size_t Size>
+[[gnu::always_inline]] inline void copy_words(std::uint32_t* words, unsigned char const* bytes)
+{
+	copy_words<Size>(words, bytes, std::make_index_sequence<(Size + sizeof(std::uint32_t) - 1) / sizeof(std::uint32_t)>{});
+}
+
 /** @brief The slots an event of @p Event takes. */
 template<typename Event>
 constexpr std::size_t slots_for = sizeof(Event) <= head_payload
@@ -136,7 +160,7 @@ struct ring
 		auto const* const bytes = reinterpret_cast<unsigned char const*>(&event);
 
 		first.words[0] = timestamp;
-		std::memcpy(&first.words[1], bytes, std::min(sizeof(Event), head_payload));
+		copy_words<std::min(sizeof(Event), head_payload)>(&first.words[1], bytes);
 		write_tails<Event>(type, index, bytes, std::make_index_sequence<count - 1>{});
 		first.header.store(header(type, index, true), std::memory_order_release);
 		// Keeps the read below after the store above: a writer lapped before
