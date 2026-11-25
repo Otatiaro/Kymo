@@ -83,7 +83,7 @@ pub struct Tool {
     run: fn(&mut Captures, &Arguments) -> Result<String, String>,
 }
 
-const TOOLS: [Tool; 8] = [
+const TOOLS: [Tool; 9] = [
     Tool {
         name: "summary",
         description: "What a capture holds: its events, slots and losses, its span and frequency, how \
@@ -220,6 +220,40 @@ capture of a few dozen tasks it runs to a hundred kilobytes: name the subjects s
             ),
         ],
         run: stats,
+    },
+    Tool {
+        name: "compare",
+        description: "The statistics of two captures face to face, as JSON: for each group of kymo stats \
+(subject, metric, detail), its count, exclusions, min, p50, p90, p99, max, mean, jitter and share in \
+each capture, and the difference, other minus capture. A group only one capture has is given with \
+null for the other. It does not judge: whether a difference is beyond the noise depends on the \
+counts behind it. Times are in cycles; each side gives its frequency. from and to apply to both.",
+        arguments: &[
+            Argument {
+                name: "other",
+                kind: Kind::Text,
+                required: true,
+                description: "The path of the capture to compare with.",
+            },
+            argument(
+                "other_elf",
+                Kind::Text,
+                "The ELF to decode the other capture with, instead of the one it holds or names.",
+            ),
+            argument(
+                "other_clock",
+                Kind::Count,
+                "The other capture's cycle counter frequency in hertz, instead of the one recorded.",
+            ),
+            FROM,
+            TO,
+            argument(
+                "subjects",
+                Kind::Texts,
+                "Only the groups of these subjects: tasks, handlers, mutexes, durations or values.",
+            ),
+        ],
+        run: compare,
     },
     Tool {
         name: "check",
@@ -1023,6 +1057,144 @@ fn stats(captures: &mut Captures, arguments: &Arguments) -> Result<String, Strin
         report.groups.retain(|group| subjects.contains(&group.subject.as_str()));
     }
     Ok(stats::json(&report))
+}
+
+/// The fields of a group `compare` gives for each capture and their
+/// difference; `min` and `max` also give the index of their instance.
+const COMPARED: [&str; 11] = [
+    "count",
+    "excluded_loss",
+    "excluded_suspect",
+    "cut",
+    "min",
+    "p50",
+    "p90",
+    "p99",
+    "max",
+    "mean",
+    "jitter",
+];
+
+fn compare(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {
+    let mine = load(captures, arguments)?;
+    let other = captures.get(&Options {
+        path: arguments.text("other")?.expect("a required argument"),
+        elf: arguments.text("other_elf")?,
+        svd: arguments.text("svd")?.map(Path::new),
+        clock: arguments.count("other_clock")?,
+    })?;
+    let side = |loaded: &Loaded| -> Result<Value, String> {
+        let range = range(loaded, arguments)?;
+        let report = stats::of_trace(loaded.catalogue, &loaded.trace, range, 0).map_err(|error| error.to_string())?;
+        Ok(serde_json::from_str(&stats::json(&report)).expect("the JSON stats writes"))
+    };
+    let (mine, other) = (side(&mine)?, side(&other)?);
+    let key = |group: &Value| ["kind", "subject", "metric", "detail"].map(|field| group[field].to_string());
+    let groups = |report: &Value| report["groups"].as_array().cloned().unwrap_or_default();
+    let (my_groups, other_groups) = (groups(&mine), groups(&other));
+    let subjects = arguments.texts("subjects")?;
+    if let Some(subjects) = &subjects {
+        let named = |subject: &&str| {
+            my_groups
+                .iter()
+                .chain(&other_groups)
+                .any(|group| group["subject"] == **subject)
+        };
+        let unknown: Vec<&str> = subjects.iter().filter(|subject| !named(subject)).copied().collect();
+        if !unknown.is_empty() {
+            return Err(format!("no group of {} in either capture", unknown.join(", ")));
+        }
+    }
+    let wanted = |group: &Value| {
+        subjects
+            .as_ref()
+            .is_none_or(|subjects| subjects.iter().any(|subject| group["subject"] == *subject))
+    };
+    let mut pairs: Vec<(&Value, Option<&Value>, Option<&Value>)> = Vec::new();
+    for group in my_groups.iter().filter(|group| wanted(group)) {
+        let twin = other_groups.iter().find(|candidate| key(candidate) == key(group));
+        pairs.push((group, Some(group), twin));
+    }
+    for group in other_groups.iter().filter(|group| wanted(group)) {
+        if !my_groups.iter().any(|candidate| key(candidate) == key(group)) {
+            pairs.push((group, None, Some(group)));
+        }
+    }
+    let compared: Vec<Value> = pairs
+        .into_iter()
+        .map(|(group, mine, other)| {
+            let (mine, other) = (mine.map(compared_side), other.map(compared_side));
+            let difference = mine.as_ref().zip(other.as_ref()).map(|(mine, other)| {
+                let fields: Map<String, Value> = COMPARED
+                    .iter()
+                    .chain(&["share"])
+                    .map(|&field| (field.to_owned(), minus(&other[field], &mine[field])))
+                    .collect();
+                Value::Object(fields)
+            });
+            json!({
+                "kind": group["kind"],
+                "subject": group["subject"],
+                "metric": group["metric"],
+                "detail": group["detail"],
+                "capture": mine,
+                "other": other,
+                "difference": difference,
+            })
+        })
+        .collect();
+    let bounds = |report: &Value| {
+        let fields: Map<String, Value> = [
+            "frequency",
+            "from",
+            "to",
+            "losses",
+            "suspects",
+            "contradictions",
+            "faults",
+        ]
+        .iter()
+        .map(|&field| (field.to_owned(), report[field].clone()))
+        .collect();
+        Value::Object(fields)
+    };
+    Ok(json!({
+        "schema": "kymo-compare",
+        "capture": bounds(&mine),
+        "other": bounds(&other),
+        "groups": compared,
+    })
+    .to_string())
+}
+
+/// A group of the stats JSON as `compare` gives it for one capture.
+fn compared_side(group: &Value) -> Value {
+    let distribution = &group["distribution"];
+    let mut side = Map::new();
+    for field in COMPARED {
+        let value = match field {
+            "count" | "excluded_loss" | "excluded_suspect" | "cut" | "jitter" => group[field].clone(),
+            "min" | "max" => {
+                side.insert(format!("{field}_at"), distribution[field]["index"].clone());
+                distribution[field]["value"].clone()
+            }
+            _ => distribution[field].clone(),
+        };
+        side.insert(field.to_owned(), value);
+    }
+    side.insert("share".to_owned(), group["share"].clone());
+    Value::Object(side)
+}
+
+/// `a - b`, an integer when both are; null when either is not a number.
+fn minus(a: &Value, b: &Value) -> Value {
+    match (a.as_i64(), b.as_i64()) {
+        (Some(a), Some(b)) => json!(a.saturating_sub(b)),
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => json!(a - b),
+            _ => Value::Null,
+        },
+    }
 }
 
 fn check(captures: &mut Captures, arguments: &Arguments) -> Result<String, String> {

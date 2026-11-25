@@ -259,6 +259,7 @@ fn the_protocol_answers_requests_and_drops_notifications() {
             "subject",
             "intervals",
             "stats",
+            "compare",
             "check"
         ]
     );
@@ -613,6 +614,74 @@ fn intervals_measures_from_an_event_to_the_next_of_another() {
     );
     assert!(failed);
     assert_eq!(error, "a and b each need a word");
+}
+
+/// `compare` sets each group of one capture's stats against the same group of
+/// the other's, and gives other minus capture; a group one lacks has null.
+#[test]
+fn compare_gives_each_group_of_two_captures_and_their_difference() {
+    let file = File::new();
+    let fewer = File(path());
+    write(&fewer.0, &(0..12).map(Item::Event).collect::<Vec<_>>(), 12);
+    let statuses = File(path());
+    write(&statuses.0, &[Item::Event(1), Item::Event(4), Item::Event(7)], 8);
+    let mut server = server();
+    let mut compare = |other: &File, subjects: Option<&[&str]>| -> Value {
+        let mut arguments = json!({ "capture": file.name(), "other": other.name() });
+        if let Some(subjects) = subjects {
+            arguments["subjects"] = json!(subjects);
+        }
+        serde_json::from_str(&text(&mut server, "compare", arguments)).unwrap()
+    };
+
+    let same = compare(&file, None);
+    assert_eq!(same["capture"], same["other"]);
+    let groups = same["groups"].as_array().unwrap();
+    assert!(!groups.is_empty());
+    for group in groups {
+        assert_eq!(group["capture"], group["other"], "{group}");
+        for (field, difference) in group["difference"].as_object().unwrap() {
+            assert!(
+                difference.is_null() || difference.as_f64() == Some(0.0),
+                "{field}: {group}"
+            );
+        }
+    }
+
+    let whole = &groups.iter().find(|group| group["subject"] == "app::work").unwrap()["capture"];
+    let compared = compare(&fewer, Some(&["app::work"]));
+    let groups = compared["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{compared}");
+    let other = &groups[0]["other"];
+    assert_eq!((other["count"].as_i64(), other["p50"].as_i64()), (Some(4), Some(200)));
+    assert_eq!((other["min_at"].as_i64(), other["max_at"].as_i64()), (Some(0), Some(0)));
+    let difference = &groups[0]["difference"];
+    assert_eq!(difference["count"].as_i64(), Some(4 - whole["count"].as_i64().unwrap()));
+    assert_eq!(difference["p50"].as_i64(), Some(200 - whole["p50"].as_i64().unwrap()));
+    assert_eq!(compared["other"]["losses"], 0);
+    assert_eq!(compared["capture"]["losses"], 1);
+
+    let lacking = compare(&statuses, Some(&["app::work"]));
+    let group = &lacking["groups"][0];
+    assert_eq!(group["capture"]["count"], whole["count"]);
+    assert!(group["other"].is_null() && group["difference"].is_null(), "{group}");
+    let arguments = json!({
+        "capture": statuses.name(), "other": file.name(), "other_clock": 2_000_000, "subjects": ["app::work"]
+    });
+    let lacked: Value = serde_json::from_str(&text(&mut server, "compare", arguments)).unwrap();
+    let group = &lacked["groups"][0];
+    assert_eq!(group["other"]["count"], whole["count"]);
+    assert!(group["capture"].is_null() && group["difference"].is_null(), "{group}");
+    assert_eq!(lacked["other"]["frequency"], 2_000_000.0);
+    assert_ne!(lacked["capture"]["frequency"], 2_000_000.0);
+
+    let (error, failed) = call(
+        &mut server,
+        "compare",
+        json!({ "capture": file.name(), "other": statuses.name(), "subjects": ["app::rest"] }),
+    );
+    assert!(failed);
+    assert_eq!(error, "no group of app::rest in either capture");
 }
 
 /// The adapter's catalogue of OpSy's tests, with the ring of the test
