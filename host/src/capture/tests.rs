@@ -171,17 +171,45 @@ fn the_elf_comes_from_the_capture_unless_given() {
     std::fs::remove_file(&named).unwrap();
     let missing = super::elf("run.kcap", &referenced, None).unwrap_err().to_string();
     assert!(missing.contains(&named) && missing.contains("--elf"), "{missing}");
-    let remote = capture("remote", Elf::Reference("https://example.com/board.elf".into())).0;
-    let remote = super::elf("run.kcap", &remote, None).unwrap_err().to_string();
-    assert!(
-        remote.contains("https://example.com/board.elf") && remote.contains("--elf"),
-        "{remote}"
-    );
 
     let ring = super::elf("ring.bin", &[0; 64], None).unwrap_err().to_string();
     assert!(ring.contains("--elf"), "{ring}");
     assert_eq!(super::elf("ring.bin", &[0; 64], Some(&given)).unwrap().0, b"given");
     std::fs::remove_file(&given).unwrap();
+}
+
+#[test]
+fn an_elf_at_an_url_is_fetched() {
+    let server = crate::served::serve(vec![("/board.elf".into(), b"served".to_vec())]);
+    let at = format!("{server}/board.elf");
+    let gone = format!("{server}/gone.elf");
+    let embedded = capture("fetched", Elf::Embedded(b"embedded".to_vec())).0;
+    assert_eq!(
+        super::elf("run.kcap", &embedded, Some(&at)).unwrap(),
+        (b"served".to_vec(), at.clone())
+    );
+
+    let referenced = capture("remote", Elf::Reference(at.clone())).0;
+    assert_eq!(
+        super::elf("run.kcap", &referenced, None).unwrap(),
+        (b"served".to_vec(), at.clone())
+    );
+
+    let missing = capture("missing", Elf::Reference(gone.clone())).0;
+    let missing = super::elf("run.kcap", &missing, None).unwrap_err().to_string();
+    assert!(
+        missing.contains(&gone) && missing.contains("404") && missing.contains("--elf"),
+        "{missing}"
+    );
+    let given = super::elf("run.kcap", &embedded, Some(&gone)).unwrap_err().to_string();
+    assert!(given.contains(&gone) && given.contains("404"), "{given}");
+}
+
+#[test]
+fn a_file_at_an_url_is_fetched_whole_however_large() {
+    let large: Vec<u8> = (0..12 << 20).map(|n: u32| n as u8).collect();
+    let server = crate::served::serve(vec![("/large.elf".into(), large.clone())]);
+    assert!(fetch(&format!("{server}/large.elf")).unwrap() == large);
 }
 
 #[test]
