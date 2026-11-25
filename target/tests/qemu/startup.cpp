@@ -75,6 +75,44 @@ int memcmp(void const* left, void const* right, std::size_t size)
 	return 0;
 }
 
+/// Clang calls the run-time ABI's own forms (__aeabi_memcpy, __aeabi_memclr...);
+/// the aligned forms (4, 8) are the plain ones. Without builtins under Clang,
+/// the calls they make stay calls.
+// NOLINTBEGIN(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming): names the ABI fixes
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
+void __aeabi_memcpy(void* destination, void const* source, std::size_t size) noexcept
+{
+	memcpy(destination, source, size);
+}
+extern "C" [[gnu::used, gnu::alias("__aeabi_memcpy")]] void __aeabi_memcpy4(void*, void const*, std::size_t) noexcept;
+extern "C" [[gnu::used, gnu::alias("__aeabi_memcpy")]] void __aeabi_memcpy8(void*, void const*, std::size_t) noexcept;
+
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
+void __aeabi_memmove(void* destination, void const* source, std::size_t size) noexcept
+{
+	memmove(destination, source, size);
+}
+extern "C" [[gnu::used, gnu::alias("__aeabi_memmove")]] void __aeabi_memmove4(void*, void const*, std::size_t) noexcept;
+extern "C" [[gnu::used, gnu::alias("__aeabi_memmove")]] void __aeabi_memmove8(void*, void const*, std::size_t) noexcept;
+
+/// The ABI's memset takes the size before the value.
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
+void __aeabi_memset(void* destination, std::size_t size, int value) noexcept
+{
+	memset(destination, value, size);
+}
+extern "C" [[gnu::used, gnu::alias("__aeabi_memset")]] void __aeabi_memset4(void*, std::size_t, int) noexcept;
+extern "C" [[gnu::used, gnu::alias("__aeabi_memset")]] void __aeabi_memset8(void*, std::size_t, int) noexcept;
+
+extern "C" [[gnu::used, NO_LOOP_PATTERNS]]
+void __aeabi_memclr(void* destination, std::size_t size) noexcept
+{
+	memset(destination, 0, size);
+}
+extern "C" [[gnu::used, gnu::alias("__aeabi_memclr")]] void __aeabi_memclr4(void*, std::size_t) noexcept;
+extern "C" [[gnu::used, gnu::alias("__aeabi_memclr")]] void __aeabi_memclr8(void*, std::size_t) noexcept;
+// NOLINTEND(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,readability-identifier-naming)
+
 extern "C" void Fault_Handler()
 {
 	qemu::write("unexpected exception\n");
