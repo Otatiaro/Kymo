@@ -280,7 +280,7 @@ impl Timeline {
         ui.strong(self.range_title(from, to));
         let typed = ui.add(
             egui::TextEdit::singleline(&mut self.words.text)
-                .hint_text("types: words, -word to leave out")
+                .hint_text("types: a word, +required, -left out")
                 .desired_width(WORDS),
         );
         if typed.changed() {
