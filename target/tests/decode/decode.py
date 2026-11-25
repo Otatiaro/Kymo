@@ -115,7 +115,7 @@ def main() -> int:
             dump = os.path.join(directory, f"{name}.bin")
             with open(dump, "wb") as file:
                 file.write(copy.bytes)
-            host = subprocess.run([args.host, "decode", args.image, dump], stdout=subprocess.PIPE,
+            host = subprocess.run([args.host, "decode", dump, "--elf", args.image], stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, timeout=TIMEOUT_SECONDS)
         found = host.stdout.splitlines()
         if host.returncode == 0 and expected == found:

@@ -1,5 +1,5 @@
-//! Capture files: what `kymo record --out` keeps of a recording, for
-//! `kymo decode` to read back with the image's ELF.
+//! Capture files: what `kymo record --out` keeps of a recording, with the
+//! image's ELF or where it is, for `kymo decode` to read back.
 //!
 //! Little-endian throughout. A header, then records, each led by a tag byte:
 //!
@@ -7,7 +7,10 @@
 //! header  "KYMOCAP\0", u32 version (1), u32 first index recorded,
 //!         u64 cycle counter frequency in hertz given to the recording (0: none),
 //!         u16 length and UTF-8 bytes of the channel: the qualified name of
-//!         the ring recorded
+//!         the ring recorded, then the image's ELF:
+//!         u8 1, u32 length and bytes of the ELF itself, or
+//!         u8 2, u16 length and UTF-8 bytes of where it is: an absolute
+//!         path or an http(s) URL
 //! 1 pass  u64 host time (ns since the Unix epoch), u32 write index read
 //! 2 event u32 index, u8 slot count, the event's slots as read (16 bytes each)
 //! 3 lost  u32 first index lost, u32 index after the last one
@@ -36,6 +39,16 @@ pub struct Header {
     pub first: u32,
     pub clock: Option<u64>,
     pub channel: String,
+    pub elf: Elf,
+}
+
+/// The image's ELF, as a capture holds it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Elf {
+    /// The bytes of the file.
+    Embedded(Vec<u8>),
+    /// An absolute path or an http(s) URL.
+    Reference(String),
 }
 
 /// Where a capture without an end record stops: the byte its whole records
@@ -79,6 +92,20 @@ impl Writer {
         let length = u16::try_from(header.channel.len()).map_err(|_| "channel name of more than 65535 bytes")?;
         writer.file.write_all(&length.to_le_bytes())?;
         writer.file.write_all(header.channel.as_bytes())?;
+        match &header.elf {
+            Elf::Embedded(bytes) => {
+                let length = u32::try_from(bytes.len()).map_err(|_| "ELF of more than 4 GiB")?;
+                writer.file.write_all(&[1])?;
+                writer.file.write_all(&length.to_le_bytes())?;
+                writer.file.write_all(bytes)?;
+            }
+            Elf::Reference(place) => {
+                let length = u16::try_from(place.len()).map_err(|_| "ELF reference of more than 65535 bytes")?;
+                writer.file.write_all(&[2])?;
+                writer.file.write_all(&length.to_le_bytes())?;
+                writer.file.write_all(place.as_bytes())?;
+            }
+        }
         Ok(writer)
     }
 
@@ -133,10 +160,52 @@ pub fn is_capture(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// The header of a capture and its whole records in order, up to its end
-/// record or to where it was cut.
-pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
-    let mut cursor = Cursor { bytes };
+/// The image's ELF to read `bytes`, a capture or a copy of the ring called
+/// `name`, with, and what errors call it: `given`, a file, when there is
+/// one, else the ELF the capture holds or names.
+pub fn elf(name: &str, bytes: &[u8], given: Option<&str>) -> Result<(Vec<u8>, String)> {
+    if let Some(given) = given {
+        return Ok((read_file(given)?, given.to_owned()));
+    }
+    if !is_capture(bytes) {
+        return Err(format!("{name} is a copy of a ring: give the image's ELF with --elf").into());
+    }
+    match header(bytes)?.elf {
+        Elf::Embedded(elf) => Ok((elf, format!("the ELF in {name}"))),
+        Elf::Reference(place) if is_url(&place) => {
+            Err(format!("{name}: its ELF is at {place}, which this kymo does not fetch: give it with --elf").into())
+        }
+        Elf::Reference(place) => match read_file(&place) {
+            Ok(elf) => Ok((elf, place)),
+            Err(error) => Err(format!("{name}: its ELF: {error}; give it with --elf").into()),
+        },
+    }
+}
+
+/// How a capture names the ELF given as `place`: an http(s) URL as it is, a
+/// file by its absolute path.
+pub fn reference(place: &str) -> Result<String> {
+    if is_url(place) {
+        return Ok(place.to_owned());
+    }
+    let path = std::path::absolute(place).map_err(|error| format!("{place}: {error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn is_url(place: &str) -> bool {
+    place.starts_with("http://") || place.starts_with("https://")
+}
+
+fn read_file(path: &str) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|error| format!("{path}: {error}").into())
+}
+
+/// The header of the capture `bytes`.
+pub fn header(bytes: &[u8]) -> Result<Header> {
+    read_header(&mut Cursor { bytes })
+}
+
+fn read_header(cursor: &mut Cursor) -> Result<Header> {
     let short = "the capture is cut short in its header";
     if cursor.take(8).ok_or(short)? != MAGIC {
         return Err("not a Kymo capture".into());
@@ -150,13 +219,34 @@ pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
     let length = usize::from(cursor.u16().ok_or(short)?);
     let channel = std::str::from_utf8(cursor.take(length).ok_or(short)?)
         .map_err(|_| "the capture's channel name is not UTF-8")?;
-    let header = Header {
+    let elf = match cursor.take(1).ok_or(short)?[0] {
+        1 => {
+            let length = cursor.u32().ok_or(short)? as usize;
+            Elf::Embedded(cursor.take(length).ok_or(short)?.to_vec())
+        }
+        2 => {
+            let length = usize::from(cursor.u16().ok_or(short)?);
+            let place = std::str::from_utf8(cursor.take(length).ok_or(short)?)
+                .map_err(|_| "the capture's ELF reference is not UTF-8")?;
+            Elf::Reference(place.to_owned())
+        }
+        form => return Err(format!("unknown form {form} of the capture's ELF").into()),
+    };
+    Ok(Header {
         first,
         clock: (clock != 0).then_some(clock),
         channel: channel.to_owned(),
-    };
+        elf,
+    })
+}
+
+/// The header of a capture and its whole records in order, up to its end
+/// record or to where it was cut.
+pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
+    let mut cursor = Cursor { bytes };
+    let header = read_header(&mut cursor)?;
     let mut records = Vec::new();
-    let mut next = first;
+    let mut next = header.first;
     loop {
         let at = bytes.len() - cursor.bytes.len();
         let Some(tag) = cursor.take(1) else {

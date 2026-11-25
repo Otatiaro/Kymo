@@ -31,10 +31,13 @@ RINGS = {"os::ring": 16, "app::ring": 32}
 SLOT_BYTES = 16
 
 
-def capture(channel: str, index: int, slots: bytes, write_index: int) -> bytes:
-    """A capture of one event, in the format of host/src/capture.rs."""
+def capture(image: str, channel: str, index: int, slots: bytes, write_index: int) -> bytes:
+    """A capture of one event, in the format of host/src/capture.rs, naming
+    the ELF `image` by its absolute path."""
     name = channel.encode()
-    header = b"KYMOCAP\0" + struct.pack("<IIQH", 1, index, 0, len(name)) + name
+    elf = os.path.abspath(image).encode()
+    header = (b"KYMOCAP\0" + struct.pack("<IIQH", 1, index, 0, len(name)) + name
+              + b"\x02" + struct.pack("<H", len(elf)) + elf)
     passed = b"\x01" + struct.pack("<QI", 0, write_index)
     event = b"\x02" + struct.pack("<IB", index, len(slots) // SLOT_BYTES) + slots
     end = b"\x04" + struct.pack("<I", write_index)
@@ -98,16 +101,16 @@ def main() -> int:
         for ring, dump in dumps.items():
             write_index = struct.unpack_from("<I", copies[ring])[0]
             expected = [f"write_index {write_index}"] + [line for _, line in lines[ring]]
-            found = host("decode", args.image, dump, "--channel", ring)
+            found = host("decode", dump, "--elf", args.image, "--channel", ring)
             if found.returncode != 0 or found.stdout.splitlines() != expected:
                 errors.append(f"{ring}: expected\n" + "\n".join(expected) + "\nkymo decode says\n"
                               + (found.stdout + found.stderr).strip())
             else:
                 print(f"{ring}: {len(expected) - 1} events, decoded as routed")
 
-        fails_with("decode without --channel", host("decode", args.image, dumps["os::ring"]),
+        fails_with("decode without --channel", host("decode", dumps["os::ring"], "--elf", args.image),
                    "several rings", *RINGS)
-        fails_with("decode of an absent ring", host("decode", args.image, dumps["os::ring"], "--channel", "nowhere::ring"),
+        fails_with("decode of an absent ring", host("decode", dumps["os::ring"], "--elf", args.image, "--channel", "nowhere::ring"),
                    "no ring nowhere::ring")
         # The ring is chosen before the probe is opened: no target is needed.
         fails_with("record without --channel",
@@ -122,20 +125,20 @@ def main() -> int:
             errors.append(f"the last mark is at index {index}: change the sequence in channels.cpp")
         start = slots_offset + (index % RINGS["app::ring"]) * SLOT_BYTES
         slots = app[start:start + SLOT_BYTES]
-        replay = host("decode", args.image, file("app.kcap", capture("app::ring", index, slots, write_index)))
+        replay = host("decode", file("app.kcap", capture(args.image, "app::ring", index, slots, write_index)))
         if replay.returncode != 0 or line not in replay.stdout.splitlines():
             errors.append(f"capture of app::ring: expected {line}; kymo decode says "
                           + (replay.stdout + replay.stderr).strip())
         else:
             print(f"capture of app::ring, decoded without --channel: {line}")
         fails_with("a capture of app::ring's slots naming os::ring",
-                   host("decode", args.image, file("os.kcap", capture("os::ring", index, slots, write_index))),
+                   host("decode", file("os.kcap", capture(args.image, "os::ring", index, slots, write_index))),
                    "do not hold it whole")
         fails_with("a capture naming an absent ring",
-                   host("decode", args.image, file("absent.kcap", capture("nowhere::ring", index, slots, write_index))),
+                   host("decode", file("absent.kcap", capture(args.image, "nowhere::ring", index, slots, write_index))),
                    "no ring nowhere::ring")
         fails_with("--channel on a capture",
-                   host("decode", args.image, file("app2.kcap", capture("app::ring", index, slots, write_index)),
+                   host("decode", file("app2.kcap", capture(args.image, "app::ring", index, slots, write_index)),
                         "--channel", "app::ring"),
                    "--channel names the ring of a copy")
 

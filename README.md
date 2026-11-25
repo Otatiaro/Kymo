@@ -108,12 +108,16 @@ On the host, build with `cargo build --release --manifest-path host/Cargo.toml`
 ```sh
 kymo events app.elf                     # the event types the ELF declares
 kymo record --probe probe-rs --chip STM32H563ZITx --elf app.elf --out run.kymo
-kymo decode app.elf run.kymo            # the events, one line each
-kymo decode app.elf run.kymo --meaning  # the kernel's spans and wakes
-kymo stats app.elf run.kymo [--json]    # latencies, durations, periods, shares
-kymo check app.elf run.kymo rules.json  # rules on those statistics, an exit code for CI
-kymo-ui app.elf run.kymo                # the timeline
+kymo decode run.kymo                    # the events, one line each
+kymo decode run.kymo --meaning          # the kernel's spans and wakes
+kymo stats run.kymo [--json]            # latencies, durations, periods, shares
+kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
+kymo-ui run.kymo                        # the timeline
 ```
+
+The capture holds the ELF given to `record`, so it reads back on its own.
+`record --elf-ref <file or URL>` names the ELF instead of holding it, and
+`--elf` on the other commands reads a capture with another ELF.
 
 `kymo` with no argument prints every command and option. The JSON of
 `stats --json` and the rules of `check` are described by

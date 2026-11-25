@@ -14,17 +14,18 @@ mod spans;
 mod timeline;
 
 use eframe::egui;
-use kymo::events;
 use kymo::model::Trace;
 use kymo::target::Result;
+use kymo::{capture, events};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 const USAGE: &str = "\
-usage: kymo-ui <elf> <capture> [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
+usage: kymo-ui <capture> [--elf <file>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
 
-Shows a capture made by kymo record --out: one row per event type of the
+Shows a capture made by kymo record --out, read with the ELF it holds or
+names, or the one --elf gives: one row per event type of the
 image, the gaps (slots lost) marked across the rows in grey edged in red, a
 red line where narrower than a pixel, and the overrun writes (a write
 interrupted for a full ring lap: events recorded near it may be wrong) in
@@ -110,6 +111,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let mut paths = Vec::new();
+    let mut elf = None;
     let mut clock = None;
     let mut measure = false;
     let mut theme = None;
@@ -118,6 +120,7 @@ fn run() -> Result<()> {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--clock" => clock = Some(arguments.next().ok_or("--clock needs a value")?.parse()?),
+            "--elf" => elf = Some(arguments.next().ok_or("--elf needs a file")?),
             "--svd" => svd = Some(PathBuf::from(arguments.next().ok_or("--svd needs a file")?)),
             "--measure" => measure = true,
             "--theme" => {
@@ -132,12 +135,14 @@ fn run() -> Result<()> {
             _ => return Err(format!("unknown option {argument}\n\n{USAGE}").into()),
         }
     }
-    let [elf, capture] = paths.as_slice() else {
+    let [capture] = paths.as_slice() else {
         return Err(USAGE.into());
     };
-    // The trace borrows the catalogue, which lives as long as the window.
-    let catalogue: &'static events::Catalogue = Box::leak(Box::new(events::read_with_svd(elf, svd.as_deref())?));
     let bytes = std::fs::read(capture).map_err(|error| format!("{}: {error}", capture.display()))?;
+    let (image, image_name) = capture::elf(&capture.display().to_string(), &bytes, elf.as_deref())?;
+    // The trace borrows the catalogue, which lives as long as the window.
+    let catalogue: &'static events::Catalogue =
+        Box::leak(Box::new(events::parse_with_svd(&image, &image_name, svd.as_deref())?));
     let began = Instant::now();
     let trace = Trace::read(catalogue, &bytes, clock)?;
     let read = began.elapsed();

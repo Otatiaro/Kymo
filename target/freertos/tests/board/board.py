@@ -89,9 +89,9 @@ def main() -> int:
             errors.append(f"{VERDICT} is {words[-1]}: the application "
                           + ("did not end" if int(words[-1], 16) == 0 else "failed"))
 
-        decoded = run([args.host, "decode", args.image, capture])
-        meaning = run([args.host, "decode", args.image, capture, "--meaning"])
-        checked = run([args.host, "check", args.image, capture, RULES])
+        decoded = run([args.host, "decode", capture])
+        meaning = run([args.host, "decode", capture, "--meaning"])
+        checked = run([args.host, "check", capture, RULES])
         if decoded.returncode != 0 or meaning.returncode != 0:
             print(decoded.stderr + meaning.stderr)
             print("kymo decode failed")

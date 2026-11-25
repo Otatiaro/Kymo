@@ -152,7 +152,7 @@ def main() -> int:
         if record.returncode != 0:
             print("kymo record failed")
             return 1
-        decode = subprocess.run([args.host, "decode", args.image, capture], capture_output=True, text=True, encoding="utf-8")
+        decode = subprocess.run([args.host, "decode", capture], capture_output=True, text=True, encoding="utf-8")
         if decode.returncode != 0:
             print(decode.stderr)
             print("kymo decode failed")

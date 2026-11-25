@@ -96,7 +96,7 @@ def compare_check(host: str, image: str, capture: str, durations: dict, contradi
             path = os.path.join(folder, "rules.json")
             with open(path, "w", encoding="utf-8") as file:
                 json.dump({"rules": rules}, file)
-            done = run([host, "check", image, capture, path])
+            done = run([host, "check", capture, path])
         if done.returncode != code:
             errors.append(f"check {label}: exit {done.returncode}, not {code}\n{done.stdout}{done.stderr}")
 
@@ -137,12 +137,12 @@ def main() -> int:
             print(recording.stderr)
             print("the recording did not reach the image's end")
             return 1
-        decode = run([args.host, "decode", args.image, capture])
+        decode = run([args.host, "decode", capture])
         found = decoded_lines(decode.stdout)
         if decode.returncode != 0 or found != lines:
             errors.append("the image says:\n" + "\n".join(lines) + "\nkymo decode says:\n" + "\n".join(found)
                           + decode.stderr)
-        stats = run([args.host, "stats", args.image, capture, "--json", "--worst", str(WORST)])
+        stats = run([args.host, "stats", capture, "--json", "--worst", str(WORST)])
         if stats.returncode != 0:
             errors.append(f"kymo stats failed: {stats.stderr.strip()}")
         else:

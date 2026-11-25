@@ -164,7 +164,14 @@ fn runs_opsy(file: &object::File) -> bool {
 /// The catalogue of the image at `path`, the interrupts its DWARF does not
 /// name named by the SVD file `svd`.
 pub fn read_with_svd(path: &Path, svd: Option<&Path>) -> Result<Catalogue> {
-    let mut catalogue = read(path)?;
+    let data = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    parse_with_svd(&data, &path.display().to_string(), svd)
+}
+
+/// The catalogue of the image `data`, called `name` in errors, the
+/// interrupts its DWARF does not name named by the SVD file `svd`.
+pub fn parse_with_svd(data: &[u8], name: &str, svd: Option<&Path>) -> Result<Catalogue> {
+    let mut catalogue = parse(data, name)?;
     if let Some(svd) = svd {
         catalogue.interrupts = catalogue.interrupts.or(&Interrupts::from_svd(svd)?);
     }
@@ -174,7 +181,12 @@ pub fn read_with_svd(path: &Path, svd: Option<&Path>) -> Result<Catalogue> {
 /// The catalogue of the image at `path`.
 pub fn read(path: &Path) -> Result<Catalogue> {
     let data = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let file = object::File::parse(&*data)?;
+    parse(&data, &path.display().to_string())
+}
+
+/// The catalogue of the image `data`, called `image` in errors.
+pub fn parse(data: &[u8], image: &str) -> Result<Catalogue> {
+    let file = object::File::parse(data).map_err(|error| format!("{image}: {error}"))?;
     let ids = type_ids(&file)?;
     let mut warnings = Vec::new();
     if runs_opsy(&file) && !ids.values().any(|name| name.starts_with(OPSY_ADAPTER)) {
@@ -185,7 +197,7 @@ pub fn read(path: &Path) -> Result<Catalogue> {
             .iter()
             .map(|warning| format!("; {warning}"))
             .collect::<String>();
-        return Err(format!("{}: no event type ids (.kymo.ids){hints}", path.display()).into());
+        return Err(format!("{image}: no event type ids (.kymo.ids){hints}").into());
     }
     let durations: Vec<Duration> = ids.values().filter_map(|name| Duration::of(name)).collect();
     let wanted = ids

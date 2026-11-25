@@ -365,7 +365,7 @@ def main() -> int:
         recording = record_to_exit(args.qemu, args.machine, args.image, args.host, capture, END)
         decoded = None
         if recording.returncode == 0 and recording.exit_status is not None:
-            decoded = subprocess.run([args.host, "decode", args.image, capture, "--meaning"],
+            decoded = subprocess.run([args.host, "decode", capture, "--meaning"],
                                      capture_output=True, text=True, check=False)
     print(recording.stderr.strip())
     if decoded is None:

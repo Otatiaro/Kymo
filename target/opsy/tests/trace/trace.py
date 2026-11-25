@@ -432,8 +432,8 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
     try:
         names = oracle.interrupt_names(run("events", image))
         # The whole capture without a frequency: no seconds.
-        decoded = run("decode", image, capture)
-        whole = json.loads(run("stats", image, capture, "--json", "--worst", str(WORST)))
+        decoded = run("decode", capture)
+        whole = json.loads(run("stats", capture, "--json", "--worst", str(WORST)))
         # The middle half, in seconds at the frequency measured, or else at
         # the core clock the suite starts with; its bounds in cycles as kymo
         # stats computes them, rounded half away from zero.
@@ -441,12 +441,12 @@ def check_stats(host: str, image: str, capture: str) -> list[str]:
         if hz is None:
             hz = int(re.search(r" kymo::opsy::starting core_clock=(\d+)", decoded)[1])
             clock = ["--clock", str(hz)]
-            clocked = run("decode", image, capture, *clock)
+            clocked = run("decode", capture, *clock)
         origin = whole["origin"]
         bounds = [whole["from"] + (whole["to"] - whole["from"]) * quarter // 4 for quarter in (1, 3)]
         seconds = [(bound - origin) / hz for bound in bounds]
         low, high = (origin + math.floor(second * hz + 0.5) for second in seconds)
-        middle = json.loads(run("stats", image, capture, "--json", "--worst", str(WORST), *clock,
+        middle = json.loads(run("stats", capture, "--json", "--worst", str(WORST), *clock,
                                 "--from", repr(seconds[0]), "--to", repr(seconds[1])))
     except (RuntimeError, ValueError, KeyError, TypeError) as error:
         return [str(error)]
@@ -484,7 +484,7 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
         path = os.path.join(folder, "rules.json")
         with open(path, "w", encoding="utf-8") as file:
             json.dump({"baseline": "baseline.json", "rules": rules}, file)
-        done = subprocess.run([host, "check", image, capture, path], capture_output=True, text=True, encoding="utf-8",
+        done = subprocess.run([host, "check", capture, path], capture_output=True, text=True, encoding="utf-8",
                               timeout=TIMEOUT_SECONDS)
         if done.returncode not in (0, 3, 4):
             raise RuntimeError(f"kymo check failed ({done.returncode}): {done.stderr.strip()}")
@@ -506,9 +506,9 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
         return errors
 
     try:
-        baseline = subprocess.run([host, "stats", image, capture, "--json"], capture_output=True, text=True,
+        baseline = subprocess.run([host, "stats", capture, "--json"], capture_output=True, text=True,
                                   encoding="utf-8", timeout=TIMEOUT_SECONDS, check=True).stdout
-        decoded = subprocess.run([host, "decode", image, capture], capture_output=True, text=True, encoding="utf-8",
+        decoded = subprocess.run([host, "decode", capture], capture_output=True, text=True, encoding="utf-8",
                                  timeout=TIMEOUT_SECONDS, check=True).stdout
         names = interrupt_names(host, image)
     except subprocess.CalledProcessError as error:
@@ -568,7 +568,7 @@ def main() -> int:
         print("kymo record failed" if recording.returncode != 0 else f"stopped short of {EXIT}")
         return 1
     errors = check(stdout)
-    decoded = subprocess.run([args.host, "decode", args.image, capture, "--meaning"],
+    decoded = subprocess.run([args.host, "decode", capture, "--meaning"],
                              capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS)
     if decoded.returncode != 0:
         errors.append(f"kymo decode --meaning failed: {decoded.stderr.strip()}")
