@@ -117,6 +117,16 @@ impl App {
         }
     }
 
+    /// Shows the curves `names` on the timeline shown; an error names the
+    /// first its image does not declare.
+    pub fn choose(&mut self, names: &[String]) -> Result<()> {
+        match &mut self.shown {
+            Shown::Timeline(timeline) => timeline.choose(names),
+            _ if names.is_empty() => Ok(()),
+            _ => Err("--value needs a capture read with its ELF".into()),
+        }
+    }
+
     /// Opens the capture at `place`, a file or an URL, read with the ELF at
     /// `elf`, else the one it holds or names; one whose ELF is not found
     /// waits for it. The timeline shown is saved to and the new one restored

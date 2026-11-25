@@ -109,6 +109,15 @@ mean; `kymo check` bounds them with plain numbers:
 { "subject": "moved", "metric": "value", "detail": "load", "stat": "max", "max": 95.0 }
 ```
 
+`kymo-ui` shows none at first: its Values menu ticks the curves to show, and
+`--value <event.field>` one at launch. Each is a line under the durations, a
+step from each sample to the next, cut by a loss, none where a sample is NaN,
+its axis from the lowest to the highest value in the view. Zoomed out, each
+pixel column spans the step entering it and its samples, so a peak of one
+sample stays visible; zoomed in, each sample is a dot. Hovering shows the
+value held, when it was sampled and, with an RTOS adapter, by which task or
+handler.
+
 Neither costs more than `emit`: a begin is the emit of the event's fields, a
 keyed begin of the key and the fields, an end of nothing, a keyed end of the
 key, to the instruction and the byte (`target/tests/cost`, in CI). A text is
@@ -150,6 +159,7 @@ kymo decode run.kymo --meaning          # the kernel's spans and wakes
 kymo stats run.kymo [--json]            # latencies, durations, periods, shares, values
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI
 kymo-ui [run.kymo]                      # the timeline; open, drop or paste the URL of a capture
+kymo-ui run.kymo --value moved.load     # with that curve shown
 ```
 
 The capture holds the ELF given to `record`, so it reads back on its own.

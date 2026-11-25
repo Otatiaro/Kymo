@@ -2,6 +2,7 @@
 
 use super::Timeline;
 use super::load::{Mode, Statistic};
+use crate::values::Values;
 use eframe::egui;
 
 impl Timeline {
@@ -40,6 +41,13 @@ impl Timeline {
                     true => "Show or hide the namespace filter; some namespaces are unticked",
                     false => "Show or hide the namespace filter",
                 });
+            if let Some(values) = &mut self.values {
+                ui.separator();
+                let title = format!("Values ({}/{})", values.chosen.len(), values.curves.len());
+                ui.menu_button(title, |ui| curves_choice(ui, values))
+                    .response
+                    .on_hover_text("The numeric fields of the application's events to show as curves");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme_menu(ui);
                 if self.meaning.is_some() {
@@ -69,6 +77,22 @@ fn range(selection: Option<(f64, f64)>, view: (f64, f64), time: impl Fn(f64) -> 
         None => ("View", view),
     };
     format!("{name} {} to {}", time(from), time(to))
+}
+
+/// A box per curve the image declares, ticked when shown, in a list that
+/// scrolls past the window's height.
+fn curves_choice(ui: &mut egui::Ui, values: &mut Values) {
+    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+        for (n, curve) in values.curves.iter().enumerate() {
+            let mut shown = values.chosen.contains(&n);
+            if ui.checkbox(&mut shown, curve.to_string()).changed() {
+                match shown {
+                    true => values.chosen.insert(n),
+                    false => values.chosen.remove(&n),
+                };
+            }
+        }
+    });
 }
 
 /// The theme's choices, in a menu named after the one chosen.

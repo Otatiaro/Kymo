@@ -169,24 +169,34 @@ pub struct Values {
     pub samples: Vec<Sampled>,
 }
 
-/// The samples of every curve in `trace`.
-pub fn sample(catalogue: &Catalogue, trace: &Trace) -> Values {
-    let mut samples = Vec::new();
-    for (element, item) in trace.elements.iter().enumerate() {
-        let Element::Event { event, cycles, .. } = item else {
-            continue;
-        };
+/// The samples `item`, element `element` of a trace, carries: none unless it
+/// is an application event, one per numeric field otherwise.
+pub fn samples_of<'a>(element: usize, item: &'a Element) -> impl Iterator<Item = Sampled> + 'a {
+    let event = match item {
+        Element::Event { event, cycles, .. } => Some((event, *cycles)),
+        _ => None,
+    };
+    event.into_iter().flat_map(move |(event, cycles)| {
         let at = Edge {
             element,
-            cycles: *cycles,
+            cycles,
             lost: false,
         };
-        for (curve, offset, reading) in fields(event.event) {
-            if let Some(value) = event.payload.get(offset..).and_then(|bytes| reading.read(bytes)) {
-                samples.push(Sampled { curve, value, at });
-            }
-        }
-    }
+        fields(event.event).filter_map(move |(curve, offset, reading)| {
+            let value = event.payload.get(offset..).and_then(|bytes| reading.read(bytes))?;
+            Some(Sampled { curve, value, at })
+        })
+    })
+}
+
+/// The samples of every curve in `trace`.
+pub fn sample(catalogue: &Catalogue, trace: &Trace) -> Values {
+    let samples = trace
+        .elements
+        .iter()
+        .enumerate()
+        .flat_map(|(element, item)| samples_of(element, item))
+        .collect();
     Values {
         curves: curves(catalogue),
         samples,

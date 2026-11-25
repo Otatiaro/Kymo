@@ -13,6 +13,7 @@ kymo = { path = ".." }
 rfd = "0.18"
 
 [dev-dependencies]
+gimli = { version = "0.34", default-features = false }
 kymo = { path = "..", features = ["served"] }
 
 [target.'cfg(windows)'.dependencies]

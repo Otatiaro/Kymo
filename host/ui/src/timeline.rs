@@ -32,6 +32,7 @@ use crate::listing::{Entry, Events};
 use crate::meaning::Meaning;
 use crate::names;
 use crate::panel::{Found, Panel};
+use crate::values::Values;
 use eframe::egui;
 use kymo::events::{Catalogue, Kind};
 use kymo::model::Trace;
@@ -52,6 +53,8 @@ const RULER: f32 = 22.0;
 const ROW: f32 = 22.0;
 const TASK: f32 = 30.0;
 const CPU: f32 = 60.0;
+/// The height of a curve's line, room for its steps between its bounds.
+const VALUE: f32 = 56.0;
 /// The height a line of durations takes for each lane past its first: a
 /// lane's bar and the gap above it.
 const LANE: f32 = 16.0;
@@ -81,6 +84,8 @@ pub struct Timeline {
     meaning: Option<Meaning>,
     /// The application's durations, when the image has a begin.
     durations: Option<Durations>,
+    /// The application's values, when the image declares a curve.
+    values: Option<Values>,
     /// The losses and suspect lines between two events.
     marks: Vec<Mark>,
     /// The losses and suspect lines after the last event, which the next
@@ -150,6 +155,8 @@ struct Spaces {
     pointers: Vec<Vec<(usize, usize)>>,
     /// Each type of duration's, by its line.
     durations: Vec<String>,
+    /// Each curve's event's, by its place in `Values::curves`.
+    values: Vec<String>,
 }
 
 /// The event list's lines the filters keep, of a range, at a generation of
@@ -168,6 +175,7 @@ impl Timeline {
             capture,
             meaning,
             durations: Durations::new(catalogue, trace.first),
+            values: Values::new(catalogue),
             catalogue,
             trace,
             ids: catalogue.events.keys().copied().collect(),
@@ -223,6 +231,13 @@ impl Timeline {
             Panel::named(instances, full)
         });
         timeline.spaces = Spaces::of(catalogue, timeline.meaning.as_ref(), timeline.durations.as_ref());
+        if let Some(values) = &timeline.values {
+            timeline.spaces.values = values
+                .curves
+                .iter()
+                .map(|curve| names::namespace(&curve.subject))
+                .collect();
+        }
         let spaces = &timeline.spaces;
         timeline.filter = Filter::new(
             spaces
@@ -230,14 +245,16 @@ impl Timeline {
                 .iter()
                 .chain(spaces.subjects.iter().flatten())
                 .chain(&spaces.durations)
+                .chain(&spaces.values)
                 .map(String::as_str),
         );
         timeline.whole();
         Ok(timeline)
     }
 
-    /// Restores the namespaces unticked, those this image has, and the
-    /// headings folded, from what saved gives by key.
+    /// Restores the namespaces unticked, those this image has, the headings
+    /// folded and the curves chosen, those this image has, from what saved
+    /// gives by key.
     pub fn restore(&mut self, saved: impl Fn(&str) -> Option<String>) {
         if let Some(filter) = saved(FILTER) {
             self.filter.restore(&filter);
@@ -245,6 +262,25 @@ impl Timeline {
         if let Some(folded) = saved(FOLDED) {
             self.folded = folded.lines().map(str::to_owned).collect();
         }
+        if let (Some(chosen), Some(values)) = (saved(CHOSEN), &mut self.values) {
+            values.restore(&chosen);
+        }
+    }
+
+    /// Shows the curves `names`, as `event.field`; an error names the first
+    /// the image does not declare.
+    pub fn choose(&mut self, names: &[String]) -> Result<()> {
+        for name in names {
+            let curve = self.values.as_ref().and_then(|values| values.named(name));
+            let (Some(curve), Some(values)) = (curve, &mut self.values) else {
+                return Err(format!(
+                    "the image declares no curve {name}: a numeric field of an application event, as event.field"
+                )
+                .into());
+            };
+            values.chosen.insert(curve);
+        }
+        Ok(())
     }
 
     fn origin(&self) -> i64 {
@@ -316,6 +352,8 @@ impl Spaces {
 const FILTER: &str = "namespaces unticked";
 /// The key the headings folded are saved under.
 const FOLDED: &str = "namespaces folded";
+/// The key the curves chosen are saved under.
+const CHOSEN: &str = "values chosen";
 
 impl Timeline {
     /// The capture's file name.
@@ -323,10 +361,14 @@ impl Timeline {
         &self.capture
     }
 
-    /// Saves the namespaces unticked and the headings folded.
+    /// Saves the namespaces unticked, the headings folded and, with an image
+    /// that declares curves, the curves chosen.
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
         storage.set_string(FILTER, self.filter.saved());
         storage.set_string(FOLDED, self.folded.iter().cloned().collect::<Vec<_>>().join("\n"));
+        if let Some(values) = &self.values {
+            storage.set_string(CHOSEN, values.saved());
+        }
     }
 
     /// The timeline in `ui`, the window's controls `files` draws first in

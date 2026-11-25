@@ -8,6 +8,7 @@ use super::{LABELS, RULER, Timeline};
 use crate::durations::Durations;
 use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
+use crate::values;
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke};
 use kymo::load::Covered;
 use kymo::meaning::Span;
@@ -163,6 +164,10 @@ impl Timeline {
             .as_ref()
             .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu.known));
         let open_durations = self.durations.as_ref().map(Durations::open).unwrap_or_default();
+        // The curves' samples, zoomed in, and the bounds of each curve's line:
+        // its top and height, its highest and lowest value.
+        let mut marks: Vec<egui::Pos2> = Vec::new();
+        let mut edges: Vec<(f32, f32, String, String)> = Vec::new();
         for (n, &line) in lines.iter().enumerate() {
             let (top, height) = (area.top() + tops[n], tops[n + 1] - tops[n]);
             if top > area.bottom() {
@@ -259,6 +264,33 @@ impl Timeline {
                         bars.paint(durations.lanes[row].get(which), open, high, low, palette.event);
                     }
                 }
+                Line::Value(curve) => {
+                    let drawn = values::drawn(&self.values().samples[curve], self.values().end, &view);
+                    if drawn.bars.is_empty() {
+                        continue;
+                    }
+                    // From the lowest value at the foot of the line to the
+                    // highest at its head; a flat curve in its middle.
+                    let range = drawn.high - drawn.low;
+                    let y = |value: f64| match range > 0.0 {
+                        true => low - ((value - drawn.low) / range) as f32 * (low - high),
+                        false => middle,
+                    };
+                    for bar in &drawn.bars {
+                        let (head, foot) = (y(bar.high), y(bar.low));
+                        let grow = (1.0 - (foot - head)).max(0.0) / 2.0;
+                        bars.mesh.add_colored_rect(
+                            Rect::from_min_max(
+                                egui::pos2(bar.from.max(area.left()), (head - grow).max(high - 1.0)),
+                                egui::pos2(bar.to.min(area.right()), (foot + grow).min(low + 1.0)),
+                            ),
+                            palette.event,
+                        );
+                    }
+                    let dots = drawn.dots.iter().map(|&(x, value)| egui::pos2(x + 0.5, y(value)));
+                    marks.extend(dots);
+                    edges.push((top, height, values::edge(drawn.high), values::edge(drawn.low)));
+                }
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
                         bars.mesh.add_colored_rect(
@@ -337,6 +369,26 @@ impl Timeline {
             }
         }
         painter.add(egui::Shape::mesh(mesh));
+        for mark in marks {
+            painter.circle_filled(mark, DOT, palette.event);
+        }
+        // A curve's bounds at the left edge of its line, the highest at its
+        // head, the lowest at its foot.
+        let bound = FontId::proportional(10.0);
+        for (top, height, highest, lowest) in edges {
+            for (text, y, align) in [
+                (highest, top + 1.0, Align2::LEFT_TOP),
+                (lowest, top + height - 1.0, Align2::LEFT_BOTTOM),
+            ] {
+                painter.text(
+                    egui::pos2(area.left() + 3.0, y),
+                    align,
+                    text,
+                    bound.clone(),
+                    visuals.weak_text_color(),
+                );
+            }
+        }
         if let Some(meaning) = &self.meaning {
             // Small enough that the descenders stay inside the bar's 14 pixels.
             let small = FontId::proportional(11.0);
@@ -547,6 +599,9 @@ fn guides(painter: &egui::Painter, name: &rows::Name, left: f32, (top, bottom): 
 
 /// Half the width, and the height, of a loss's mark in the ruler, in pixels.
 const FLAG: f32 = 4.0;
+
+/// The radius of a curve's sample, zoomed in, in pixels.
+const DOT: f32 = 2.5;
 
 /// The height of the bar of a task's time ready, in pixels.
 const READY: f32 = 3.0;
