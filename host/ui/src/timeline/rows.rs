@@ -1,26 +1,47 @@
 //! The lines of the timeline, and the rows of event types they show.
 
+use super::tree::{self, Guide, Kind};
 use super::{CPU, ROW, TASK, Timeline};
 use crate::levels::Levels;
 use crate::meaning::Meaning;
 use crate::names;
 use kymo::model::Element;
 
-/// The tasks other than idle in the order of their lines: highest priority
-/// first, as the kernel ranks them, those without one last, then by name.
+/// The tasks other than idle in the order of their lines: by namespace, then
+/// highest priority first, as the kernel ranks them, those without one last,
+/// then by name.
 pub(super) fn tasks(meaning: &Meaning) -> Vec<usize> {
     let list = &meaning.kernel.tasks.list;
     let precedence = meaning.kernel.precedence;
-    let mut tasks: Vec<usize> = (0..list.len()).collect();
-    tasks.sort_by_key(|&task| {
+    let names: Vec<&str> = list.iter().map(|task| task.name.as_str()).collect();
+    by_namespace_then(&names, |task| {
         let task = &list[task];
         (
             task.priority.is_none(),
             task.priority.map(|priority| precedence.rank(priority)),
-            &task.name,
         )
+    })
+}
+
+/// The indices of `names` by namespace, a namespace's own before its nested
+/// ones' (names.rs); within one, by `key`, then by name.
+pub(super) fn by_namespace_then<K: Ord>(names: &[&str], key: impl Fn(usize) -> K) -> Vec<usize> {
+    let spaces: Vec<Vec<&str>> = names
+        .iter()
+        .map(|name| {
+            let mut scopes = names::scopes(name);
+            scopes.pop();
+            scopes
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_by(|&a, &b| {
+        spaces[a]
+            .cmp(&spaces[b])
+            .then_with(|| key(a).cmp(&key(b)))
+            .then_with(|| names[a].cmp(names[b]))
     });
-    tasks
+    order
 }
 
 /// The events of one type, by cycles, and their elements in the trace; its
@@ -52,6 +73,8 @@ pub(super) enum Line {
     Mutex(usize),
     /// The row of an event type.
     Event(usize),
+    /// The heading of a namespace, the `n`th of the column (tree.rs).
+    Group(usize),
 }
 
 impl Line {
@@ -64,6 +87,33 @@ impl Line {
             _ => ROW,
         }
     }
+
+    /// Whether it keeps its height when the lines stretch: a section's
+    /// title and a namespace's heading, which show no data.
+    fn fixed(self) -> bool {
+        matches!(self, Line::Section(_) | Line::Group(_))
+    }
+
+    /// Whether it is a subject's or an event type's, which the tree arranges.
+    fn arranged(self) -> bool {
+        matches!(
+            self,
+            Line::Task(Some(_)) | Line::Handler(_) | Line::Mutex(_) | Line::Event(_)
+        )
+    }
+}
+
+/// A line's entry in the column of names.
+pub(super) struct Name {
+    pub(super) text: String,
+    /// Its name in full, for the hover.
+    pub(super) full: String,
+    /// How far it is indented, in pixels, before its guides.
+    pub(super) indent: f32,
+    pub(super) depth: usize,
+    pub(super) guide: Guide,
+    /// A heading's key in the headings folded, and whether it is.
+    pub(super) heading: Option<(String, bool)>,
 }
 
 /// The lines of an image with a kernel adapter, of the `tasks`, `handlers`
@@ -112,11 +162,7 @@ pub(super) fn wake_rows(lines: &[Line], from: Line, to: Line) -> Option<(usize, 
 /// sections stretched alike to fill the room they leave.
 pub(super) fn tops(lines: &[Line], room: f32) -> Vec<f32> {
     let height = |line: &Line| line.height();
-    let fixed: f32 = lines
-        .iter()
-        .filter(|line| matches!(line, Line::Section(_)))
-        .map(height)
-        .sum();
+    let fixed: f32 = lines.iter().filter(|line| line.fixed()).map(height).sum();
     let stretched: f32 = lines.iter().map(height).sum::<f32>() - fixed;
     let scale = if stretched > 0.0 {
         ((room - fixed) / stretched).max(1.0)
@@ -125,9 +171,10 @@ pub(super) fn tops(lines: &[Line], room: f32) -> Vec<f32> {
     };
     std::iter::once(0.0)
         .chain(lines.iter().scan(0.0, |top, line| {
-            *top += match line {
-                Line::Section(_) => line.height(),
-                _ => line.height() * scale,
+            *top += if line.fixed() {
+                line.height()
+            } else {
+                line.height() * scale
             };
             Some(*top)
         }))
@@ -199,7 +246,13 @@ impl Timeline {
     pub(super) fn lines(&self) -> Vec<Line> {
         let shown = |line: Line| self.line_shown(line);
         let Some(meaning) = &self.meaning else {
-            return (0..self.rows.len())
+            let types: Vec<&str> = self
+                .ids
+                .iter()
+                .map(|id| self.catalogue.events[id].name.as_str())
+                .collect();
+            return by_namespace_then(&types, |_| ())
+                .into_iter()
                 .map(Line::Event)
                 .filter(|&line| shown(line))
                 .collect();
@@ -222,9 +275,78 @@ impl Timeline {
             Line::Handler(n) => spaces.subjects[1].get(n),
             Line::Mutex(n) => spaces.subjects[2].get(n),
             Line::Event(row) => spaces.types.get(row),
-            Line::Section(_) | Line::Cpu | Line::Task(None) => None,
+            Line::Section(_) | Line::Cpu | Line::Task(None) | Line::Group(_) => None,
         };
         space.is_none_or(|space| self.filter.shown(space))
+    }
+
+    /// The lines the filter shows, the tree's headings among them, those
+    /// under a heading folded left out; and their names in the column.
+    pub(super) fn layout(&self) -> (Vec<Line>, Vec<Name>) {
+        let lines = self.lines();
+        let mut laid = Vec::with_capacity(lines.len());
+        let mut shown = Vec::with_capacity(lines.len());
+        let mut section = "";
+        let mut headings = 0;
+        let mut n = 0;
+        while n < lines.len() {
+            let line = lines[n];
+            if !line.arranged() {
+                if let Line::Section(name) = line {
+                    section = name;
+                }
+                laid.push(line);
+                shown.push(Name {
+                    text: self.label(line),
+                    full: self.full_label(line),
+                    indent: Self::indent(line),
+                    depth: 0,
+                    guide: Guide::default(),
+                    heading: None,
+                });
+                n += 1;
+                continue;
+            }
+            let end = n + lines[n..].iter().take_while(|line| line.arranged()).count();
+            let run = &lines[n..end];
+            let fulls: Vec<String> = run.iter().map(|&line| self.full_label(line)).collect();
+            let scopes: Vec<Vec<&str>> = fulls.iter().map(|full| names::scopes(full)).collect();
+            let key = |path: &str| format!("{section}/{path}");
+            let nodes = tree::tree(&scopes, |path| self.folded.contains(&key(path)));
+            let depths: Vec<usize> = nodes.iter().map(|node| node.depth).collect();
+            for (node, guide) in nodes.into_iter().zip(tree::guides(&depths)) {
+                let (line, text, full, heading) = match node.kind {
+                    Kind::Heading { path, folded, count } => {
+                        headings += 1;
+                        let text = match folded {
+                            true => format!("{} ({count})", node.text),
+                            false => node.text,
+                        };
+                        let heading = Some((key(&path), folded));
+                        (Line::Group(headings - 1), text, path, heading)
+                    }
+                    Kind::Line(m) => {
+                        // Names alike take their address (names.rs).
+                        let text = match self.label(run[m]).rsplit_once(" @0x") {
+                            Some((_, address)) => format!("{} @0x{address}", node.text),
+                            None => node.text,
+                        };
+                        (run[m], text, fulls[m].clone(), None)
+                    }
+                };
+                laid.push(line);
+                shown.push(Name {
+                    text,
+                    full,
+                    indent: Self::indent(run[0]),
+                    depth: node.depth,
+                    guide,
+                    heading,
+                });
+            }
+            n = end;
+        }
+        (laid, shown)
     }
 
     pub(super) fn label(&self, line: Line) -> String {
@@ -237,6 +359,7 @@ impl Timeline {
         };
         match line {
             Line::Section(name) => name.to_owned(),
+            Line::Group(_) => String::new(),
             Line::Cpu => "CPU".to_owned(),
             Line::Task(None) => "idle".to_owned(),
             // No priority: it changes over the capture, with inheritance.
@@ -268,7 +391,7 @@ impl Timeline {
     pub(super) fn indent(line: Line) -> f32 {
         match line {
             Line::Section(_) | Line::Cpu | Line::Event(_) => 0.0,
-            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) => 12.0,
+            Line::Task(_) | Line::Handler(_) | Line::Mutex(_) | Line::Group(_) => 12.0,
         }
     }
 

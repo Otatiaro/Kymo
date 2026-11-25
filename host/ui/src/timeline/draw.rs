@@ -60,7 +60,7 @@ impl Timeline {
             self.start -= f64::from(scroll.x) * self.span / width;
         }
         self.clamp();
-        let lines = self.lines();
+        let (lines, names) = self.layout();
         let tops = rows::tops(&lines, area.height());
         let line_at = |y: f32| rows::at(&tops, y - area.top());
         let open = self
@@ -168,11 +168,40 @@ impl Timeline {
             }
             let (font, color) = match line {
                 Line::Section(_) => (heading.clone(), strong),
+                Line::Group(_) => (font.clone(), strong),
                 _ => (font.clone(), text),
             };
+            let name = &names[n];
+            let left = rect.left() + 8.0 + name.indent;
+            let guide = Stroke::new(1.0, visuals.weak_text_color());
+            guides(&labels, name, left, (top, top + height), guide);
+            let mut x = left + GUIDE * name.depth as f32;
+            if let Some((_, folded)) = name.heading {
+                // Pointing down when open, right when folded.
+                let (centre, half) = (egui::pos2(x + 4.0, top + height / 2.0), 4.0);
+                let points = match folded {
+                    true => vec![
+                        centre + egui::vec2(-half / 2.0, -half),
+                        centre + egui::vec2(half, 0.0),
+                        centre + egui::vec2(-half / 2.0, half),
+                    ],
+                    false => vec![
+                        centre + egui::vec2(-half, -half / 2.0),
+                        centre + egui::vec2(half, -half / 2.0),
+                        centre + egui::vec2(0.0, half),
+                    ],
+                };
+                labels.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+                if !folded {
+                    // On to the guides of what is under it.
+                    let x = (x + 4.0).round() + 0.5;
+                    let from = egui::pos2(x, centre.y + half + 2.0);
+                    labels.line_segment([from, egui::pos2(x, top + height)], guide);
+                }
+                x += MARK;
+            }
             // Cut with an ellipsis at the column's edge.
-            let x = rect.left() + 8.0 + Self::indent(line);
-            let mut job = egui::text::LayoutJob::simple_singleline(self.label(line), font, color);
+            let mut job = egui::text::LayoutJob::simple_singleline(name.text.clone(), font, color);
             job.wrap = egui::text::TextWrapping::truncate_at_width(area.left() - 8.0 - x);
             let galley = labels.layout_job(job);
             elided.push(galley.elided);
@@ -209,7 +238,7 @@ impl Timeline {
                 }
             }
             match line {
-                Line::Section(_) | Line::Cpu => {}
+                Line::Section(_) | Line::Cpu | Line::Group(_) => {}
                 Line::Event(row) => {
                     for (from, to) in self.rows[row].levels.columns(&view) {
                         bars.mesh.add_colored_rect(
@@ -389,17 +418,28 @@ impl Timeline {
             painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
         }
         self.painted = began.elapsed().as_secs_f64() * 1e3;
-        // A label cut or shortened, in full.
+        // A label cut or shortened, in full; a heading folded or unfolded
+        // by a click.
         if !response.dragged()
             && let Some(pointer) = response.hover_pos()
             && pointer.x < area.left()
             && pointer.y >= area.top()
             && let Some(n) = line_at(pointer.y)
         {
-            let line = lines[n];
-            let full = self.full_label(line);
-            if elided.get(n).copied().unwrap_or_default() || full != self.label(line) {
-                response.clone().on_hover_text_at_pointer(full);
+            let name = &names[n];
+            if let Some((key, folded)) = &name.heading {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if response.clicked() {
+                    if *folded {
+                        self.folded.remove(key);
+                    } else {
+                        self.folded.insert(key.clone());
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
+            if elided.get(n).copied().unwrap_or_default() || name.full != name.text {
+                response.clone().on_hover_text_at_pointer(&name.full);
             }
         }
         if !response.dragged()
@@ -425,6 +465,40 @@ impl Timeline {
             response.on_hover_ui_at_pointer(|ui| hovered.show(ui));
         }
     }
+}
+
+/// How far each heading indents the names under it, in pixels.
+const GUIDE: f32 = 16.0;
+
+/// The width of a heading's mark and the gap after it, in pixels.
+const MARK: f32 = 13.0;
+
+/// Draws the guides of `name`, its column of names starting at `left`, in
+/// the line from `top` to `bottom`: down past each heading above its own
+/// that has more under it, and down to it from its own heading, then
+/// across.
+fn guides(painter: &egui::Painter, name: &rows::Name, left: f32, (top, bottom): (f32, f32), stroke: Stroke) {
+    if name.depth == 0 {
+        return;
+    }
+    // Under the middle of its heading's mark.
+    let x = |depth: usize| (left + GUIDE * depth as f32 + 4.0).round() + 0.5;
+    for (depth, &through) in name.guide.through.iter().enumerate() {
+        if through {
+            painter.line_segment([egui::pos2(x(depth), top), egui::pos2(x(depth), bottom)], stroke);
+        }
+    }
+    let own = x(name.depth - 1);
+    let middle = ((top + bottom) / 2.0).round() + 0.5;
+    let end = if name.guide.last { middle } else { bottom };
+    painter.line_segment([egui::pos2(own, top), egui::pos2(own, end)], stroke);
+    painter.line_segment(
+        [
+            egui::pos2(own, middle),
+            egui::pos2(left + GUIDE * name.depth as f32 - 3.0, middle),
+        ],
+        stroke,
+    );
 }
 
 /// Half the width, and the height, of a loss's mark in the ruler, in pixels.
