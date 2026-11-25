@@ -12,6 +12,13 @@
  * kernel, which Kymo leaves off by default; the application's decorated
  * handlers are family interrupts.
  *
+ * A fault that reaches opsy::fault_isrs is recorded as a kymo::fault
+ * (kymo/fault.hpp), before the application's handler runs. The adapter does
+ * not freeze the trace: an interrupt of higher priority than a MemManage,
+ * BusFault or UsageFault still writes, and overwrites the events before the
+ * fault while the handler holds the board. A handler that waits for the host
+ * calls kymo::freeze() first.
+ *
  * Not recorded: task_stopped (the next task_started or enter_idle says the
  * same), the lock hooks (masked sections come later), mutex_stored_for_task
  * and mutex_restored_for_task, condition_variable_start_waiting (task_wait
@@ -43,6 +50,7 @@
  */
 #pragma once
 
+#include <kymo/fault.hpp>
 #include <kymo/kymo.hpp>
 
 #include <config.hpp>
@@ -255,8 +263,9 @@ struct mutex_blocked
  * @brief The hooks OpSy calls, each emitting the event of its name through
  *        @p Trace, the application's tracer.
  *
- * The hooks that read a task's priority are templates: OpSy declares
- * task_control_block, without defining it, where it includes them.
+ * The hooks that read a task's priority or a fault's frame are templates:
+ * OpSy declares task_control_block and exception_frame, without defining
+ * them, where it includes them.
  */
 template<typename Trace>
 struct hooks
@@ -329,6 +338,26 @@ struct hooks
 	static void mutex_blocked(::opsy::mutex& blocking, ::opsy::task_control_block& waiter)
 	{
 		Trace::emit(kymo::opsy::mutex_blocked{.mutex = &blocking, .waiter = &waiter});
+	}
+
+	/** @brief A fault, as opsy::fault_isrs gives it to the application's handler. */
+	static void fault(auto const& status, auto const& frame, std::uint32_t exc_return)
+	{
+		Trace::emit(kymo::fault{
+			.cfsr = status.cfsr,
+			.hfsr = status.hfsr,
+			.mmfar = status.mmfar,
+			.bfar = status.bfar,
+			.r0 = frame.r0,
+			.r1 = frame.r1,
+			.r2 = frame.r2,
+			.r3 = frame.r3,
+			.r12 = frame.r12,
+			.lr = frame.lr,
+			.pc = frame.pc,
+			.xpsr = frame.xpsr,
+			.exc_return = exc_return,
+		});
 	}
 };
 
