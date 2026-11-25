@@ -55,6 +55,25 @@ struct sample { std::uint16_t channel; std::int32_t value; };
 trace::emit(sample{3, -42});
 ```
 
+An event type may declare a text, which the host writes in place of its
+fields. It names each field, with `std::format`'s specifications; it is read
+from the DWARF and costs the target nothing:
+
+```cpp
+struct moved
+{
+    mode from;
+    mode to;
+    float load;
+    static constexpr char kymo_text[] = "{from} -> {to} at {load:.1f}%";
+};
+```
+
+A field is an integer, a `bool`, a `char`, a floating-point number, an
+enumeration (written by name) or a `char` array (written up to its first NUL);
+`{{` and `}}` write a brace. `kymo events` refuses an image whose text names a
+field the event lacks, or gives a field a specification its type does not take.
+
 The program enables the DWT cycle counter, which timestamps the events. An
 RTOS adapter emits the kernel's events through the same tracer:
 `target/opsy/include/kymo/opsy/hooks.hpp` for OpSy,

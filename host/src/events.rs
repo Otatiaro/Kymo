@@ -11,6 +11,7 @@
 use crate::interrupts::Interrupts;
 use crate::symbols::Symbols;
 use crate::target::Result;
+use crate::text::{self, Text};
 use gimli::{AttributeValue, DebugInfoOffset, DwAte, EndianSlice, Operation, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
 use std::borrow::Cow;
@@ -72,6 +73,8 @@ pub struct Event {
     pub name: String,
     pub size: u64,
     pub fields: Vec<Field>,
+    /// The text the type declares, `kymo_text` (text.rs).
+    pub text: Option<Text>,
 }
 
 /// A static object of type `kymo::ring<Slots>`.
@@ -151,14 +154,27 @@ pub fn read(path: &Path) -> Result<Catalogue> {
     let events = ids
         .into_iter()
         .map(|(id, name)| {
-            let (size, fields) = debug.layouts.get(&name).cloned().ok_or_else(|| {
+            let (size, fields, template) = debug.layouts.get(&name).cloned().ok_or_else(|| {
                 format!(
                     "{name} (id {id}): no structure of that name in the DWARF \
                      (an image built without -g, or a class template, whose arguments \
                      the DWARF spells its own way)"
                 )
             })?;
-            Ok((id, Event { id, name, size, fields }))
+            let text = template
+                .map(|template| Text::parse(&template, &fields))
+                .transpose()
+                .map_err(|error| format!("{name}: {}: {error}", text::MEMBER))?;
+            Ok((
+                id,
+                Event {
+                    id,
+                    name,
+                    size,
+                    fields,
+                    text,
+                },
+            ))
         })
         .collect::<Result<_>>()?;
     let interrupts = match debug.irq_enumerations.as_slice() {
@@ -234,7 +250,8 @@ fn type_ids(file: &object::File) -> Result<BTreeMap<u16, String>> {
 }
 
 type Slice<'a> = EndianSlice<'a, RunTimeEndian>;
-type Layout = (u64, Vec<Field>);
+/// A structure's size, its data members, and the text it declares.
+type Layout = (u64, Vec<Field>, Option<String>);
 
 type Unit<'a> = gimli::Unit<Slice<'a>>;
 type Names = HashMap<DebugInfoOffset, String>;
@@ -615,7 +632,7 @@ fn ring_layout(
     Ok(ring)
 }
 
-/// The size and the data members of the structure at `offset`.
+/// The size, the data members and the text of the structure at `offset`.
 fn record(dwarf: &gimli::Dwarf<Slice>, unit: &Unit, names: &Names, offset: UnitOffset) -> Result<Layout> {
     let entry = unit.entry(offset)?;
     let size = entry
@@ -623,17 +640,26 @@ fn record(dwarf: &gimli::Dwarf<Slice>, unit: &Unit, names: &Names, offset: UnitO
         .and_then(|value| value.udata_value())
         .ok_or("a structure without a size")?;
     let mut fields = Vec::new();
+    let mut template = None;
     let mut tree = unit.entries_tree(Some(offset))?;
     let mut children = tree.root()?.children();
     while let Some(child) = children.next()? {
         let member = child.entry();
-        if member.tag() != gimli::DW_TAG_member || member.attr(gimli::DW_AT_declaration).is_some() {
-            continue; // static members: DW_TAG_variable in DWARF 5, declared members before
+        let is_member = member.tag() == gimli::DW_TAG_member;
+        if !is_member && member.tag() != gimli::DW_TAG_variable {
+            continue;
         }
         let name = match member.attr_value(gimli::DW_AT_name) {
             Some(value) => dwarf.attr_string(unit, value)?.to_string_lossy().into_owned(),
             None => String::new(),
         };
+        // Static members: DW_TAG_variable in DWARF 5, declared members before.
+        if !is_member || member.attr(gimli::DW_AT_declaration).is_some() {
+            if name == text::MEMBER {
+                template = Some(constant_text(member)?);
+            }
+            continue;
+        }
         if member.attr(gimli::DW_AT_bit_size).is_some() {
             return Err(format!("{name}: bit-fields are not supported").into());
         }
@@ -650,7 +676,20 @@ fn record(dwarf: &gimli::Dwarf<Slice>, unit: &Unit, names: &Names, offset: UnitO
         }
         fields.push(Field { name, offset, ty });
     }
-    Ok((size, fields))
+    Ok((size, fields, template))
+}
+
+/// The value of a `static constexpr char` array member, up to its NUL.
+fn constant_text(member: &gimli::DebuggingInformationEntry<Slice>) -> Result<String> {
+    let bytes = match member.attr_value(gimli::DW_AT_const_value) {
+        Some(AttributeValue::Block(block)) => block.slice(),
+        Some(AttributeValue::String(string)) => string.slice(),
+        _ => return Err(format!("{}: no value in the DWARF: declare it static constexpr", text::MEMBER).into()),
+    };
+    let bytes = bytes.split(|&byte| byte == 0).next().unwrap_or_default();
+    Ok(std::str::from_utf8(bytes)
+        .map_err(|_| format!("{}: not UTF-8", text::MEMBER))?
+        .to_owned())
 }
 
 fn type_of(entry: &gimli::DebuggingInformationEntry<Slice>) -> Result<Option<UnitOffset>> {
@@ -825,7 +864,7 @@ fn describe(
                     kind: Kind::Opaque,
                 }
             } else {
-                let (size, fields) = record(dwarf, unit, names, offset)?;
+                let (size, fields, _) = record(dwarf, unit, names, offset)?;
                 let qualified = names.get(&global(unit, offset)?);
                 match standard_array(qualified, size, &fields).or_else(|| standard_chrono(qualified, size, &fields)) {
                     Some(kind) => Type {
@@ -948,6 +987,9 @@ pub fn print(catalogue: &Catalogue) {
         for field in &event.fields {
             let size = field.ty.size.unwrap_or_default();
             println!("  field {} {} {} {}", field.name, field.offset, size, field.ty.name);
+        }
+        if let Some(text) = &event.text {
+            println!("  text {}", text.template);
         }
     }
     for (exception, name) in catalogue.interrupts.iter() {

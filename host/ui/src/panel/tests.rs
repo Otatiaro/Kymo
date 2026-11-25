@@ -16,6 +16,7 @@ fn event() -> Event {
         name: "app::tick".to_owned(),
         size: 0,
         fields: Vec::new(),
+        text: None,
     }
 }
 

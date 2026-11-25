@@ -136,6 +136,22 @@ jobs:
           cargo test --release --workspace --manifest-path host/Cargo.toml
           cargo clippy --all-targets --workspace --manifest-path host/Cargo.toml -- -D warnings
 
+  # The table the host's std::format specifications are tested against
+  # (host/src/format/reference.txt), produced again by libstdc++: it must not
+  # change. The committed table comes from MSVC's standard library.
+  format:
+    name: std::format reference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compare with libstdc++
+        run: |
+          g++ --version | head -1
+          g++ -std=c++20 -O1 host/src/format/reference.cpp -o reference
+          ./reference > reference.txt
+          diff -u host/src/format/reference.txt reference.txt
+
   # The host's dependencies against the RustSec advisory database.
   audit:
     name: Dependency advisories

@@ -8,6 +8,7 @@ fn event(id: u16, size: u64) -> Event {
         name: format!("app::e{size}"),
         size,
         fields: Vec::new(),
+        text: None,
     }
 }
 
