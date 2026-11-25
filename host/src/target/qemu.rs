@@ -84,8 +84,4 @@ impl Target for QemuTarget {
         }
         Ok(())
     }
-
-    fn write_word(&mut self, _address: u32, _value: u32) -> Result<()> {
-        Err("the qemu backend cannot write target memory".into())
-    }
 }

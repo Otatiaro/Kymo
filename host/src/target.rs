@@ -11,7 +11,6 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// 32-bit access, so a word the target writes atomically is read atomically.
 pub trait Target {
     fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()>;
-    fn write_word(&mut self, address: u32, value: u32) -> Result<()>;
 
     /// The debug clock the probe runs at, in kHz: the one asked for, or the
     /// closest the probe supports. None where there is no debug clock.

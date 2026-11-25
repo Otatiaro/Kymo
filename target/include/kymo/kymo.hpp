@@ -30,8 +30,8 @@
  * A family with no overload does not compile once one of its events is
  * emitted; the generic overload routes every family not named.
  *
- * Timestamps come from the DWT cycle counter, which the program or the host
- * enables (DEMCR.TRCENA, DWT_CTRL.CYCCNTENA).
+ * Timestamps come from the DWT cycle counter, which the program enables
+ * (DEMCR.TRCENA, DWT_CTRL.CYCCNTENA).
  */
 #pragma once
 
