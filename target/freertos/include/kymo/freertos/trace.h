@@ -35,6 +35,26 @@
  * the pending ready list, which no macro reports: its
  * moved_task_to_ready_state comes at xTaskResumeAll, and its wake latency
  * reads that much shorter.
+ *
+ * Faults: FreeRTOS has no fault hook. The application's fault handler calls
+ * kymo_freertos_fault() with the frame the core stacked and the EXC_RETURN
+ * it was entered with, before anything else; it records a kymo::fault
+ * (kymo/fault.hpp) and returns. What comes next, kymo::freeze(), a reset,
+ * is the handler's. A handler in assembly passes the stack EXC_RETURN names:
+ *
+ *     tst   lr, #4
+ *     ite   eq
+ *     mrseq r0, msp
+ *     mrsne r0, psp
+ *     mov   r1, lr
+ *     b     application_fault   @ which calls kymo_freertos_fault(r0, r1)
+ *
+ * The event's call levels come from up to 64 words read above the frame. On
+ * the main stack they stop at its start, from the vector table. A task's
+ * stack is the kernel's, its bounds not known here: the 64 words are read
+ * whatever they are. The application keeps readable the 256 bytes above the
+ * start (highest address) of every task stack: no task stack starts less than
+ * 256 bytes before the end of its RAM.
  */
 #ifndef KYMO_FREERTOS_TRACE_H
 #define KYMO_FREERTOS_TRACE_H
@@ -76,6 +96,8 @@ void kymo_freertos_mutex_blocked(void const* mutex);
 
 void kymo_freertos_isr_enter(void);
 void kymo_freertos_isr_exit(void);
+
+void kymo_freertos_fault(uint32_t const* frame, uint32_t exc_return);
 
 #ifdef __cplusplus
 }

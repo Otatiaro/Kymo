@@ -218,7 +218,7 @@ jobs:
             --headers target/opsy/include target/opsy/tests/ring_check.cpp
           python3 target/tidy.py --clang-tidy clang-tidy --build build/freertos \
             --headers target/freertos/include target/freertos/kymo_freertos.cpp target/freertos/tests/application.cpp \
-            target/freertos/tests/bench/bench.cpp
+            target/freertos/tests/bench/bench.cpp target/freertos/tests/fault/fault.cpp
 
   # OpSy's on-target suite with the adapter's hooks, the adapter's events
   # read back from the ring, the call levels a fault carries, and the suite
