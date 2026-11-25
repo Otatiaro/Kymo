@@ -90,6 +90,17 @@ fn the_filter_keeps_the_cpu_and_idle() {
     assert_eq!(lines(&|_| false), [Line::Cpu, Line::Section("TASKS"), Line::Task(None)]);
 }
 
+/// Tasks group by namespace, a namespace's own before its nested ones', and
+/// keep the order of their priority within each.
+#[test]
+fn tasks_are_by_namespace_then_by_priority() {
+    let names = ["app::g_b", "drv::g_c", "app::imu::g_d", "app::g_a", "g_e"];
+    let priority = [1, 0, 0, 2, 5];
+    let order = by_namespace_then(&names, |n| priority[n]);
+    let order: Vec<&str> = order.iter().map(|&n| names[n]).collect();
+    assert_eq!(order, ["g_e", "app::g_b", "app::g_a", "app::imu::g_d", "drv::g_c"]);
+}
+
 /// A wake's arrow joins two lines shown, never one hidden.
 #[test]
 fn no_arrow_to_a_line_hidden() {

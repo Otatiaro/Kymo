@@ -17,6 +17,7 @@ mod measure;
 mod rows;
 mod status;
 mod toolbar;
+mod tree;
 mod view;
 
 pub use status::counted;
@@ -37,7 +38,7 @@ use list::Tab;
 use load::{Binning, Mode};
 use measure::Measure;
 use rows::{Mark, Row};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use view::{clamped, whole, widest};
 
 /// The width of the column of row names.
@@ -119,6 +120,8 @@ pub struct Timeline {
     filtering: bool,
     spaces: Spaces,
     kept: Option<Kept>,
+    /// The headings of the column of names folded, by section and path.
+    folded: BTreeSet<String>,
 }
 
 /// The namespaces the filter reads (names.rs).
@@ -194,6 +197,7 @@ impl Timeline {
             filtering: false,
             spaces: Spaces::default(),
             kept: None,
+            folded: BTreeSet::new(),
         };
         timeline.add(0);
         timeline.panel = timeline.meaning.as_ref().map(|meaning| {
@@ -213,9 +217,15 @@ impl Timeline {
         Ok(timeline)
     }
 
-    /// Unticks the namespaces of a filter saved, those this image has.
-    pub fn restore(&mut self, saved: &str) {
-        self.filter.restore(saved);
+    /// Restores the namespaces unticked, those this image has, and the
+    /// headings folded, from what saved gives by key.
+    pub fn restore(&mut self, saved: impl Fn(&str) -> Option<String>) {
+        if let Some(filter) = saved(FILTER) {
+            self.filter.restore(&filter);
+        }
+        if let Some(folded) = saved(FOLDED) {
+            self.folded = folded.lines().map(str::to_owned).collect();
+        }
     }
 
     fn origin(&self) -> i64 {
@@ -281,11 +291,14 @@ impl Spaces {
 }
 
 /// The key the namespaces unticked are saved under.
-pub const FILTER: &str = "namespaces unticked";
+const FILTER: &str = "namespaces unticked";
+/// The key the headings folded are saved under.
+const FOLDED: &str = "namespaces folded";
 
 impl eframe::App for Timeline {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(FILTER, self.filter.saved());
+        storage.set_string(FOLDED, self.folded.iter().cloned().collect::<Vec<_>>().join("\n"));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

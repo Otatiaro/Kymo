@@ -356,7 +356,7 @@ impl Timeline {
                     cards.push(card);
                 }
             }
-            Line::Section(_) | Line::Cpu | Line::Event(_) => {}
+            Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Group(_) => {}
         }
         (cards, arrow)
     }
@@ -403,7 +403,7 @@ impl Timeline {
             Line::Task(task) => ("load", Some(Swatch::task(meaning, task))),
             Line::Handler(_) => ("load", Some(Swatch::Interrupt)),
             Line::Mutex(_) => ("held, load", Some(Swatch::Hold)),
-            Line::Section(_) | Line::Event(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Group(_) => return None,
         };
         // The CPU's line has a colour per layer, and so no swatch.
         let mut card = match swatch {
@@ -510,7 +510,7 @@ impl Timeline {
                         .chain(still.map(|hold| (hold.span, true, Who::Holder(hold.task)))),
                 )
             }
-            Line::Section(_) | Line::Event(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Group(_) => return None,
         };
         let (span, still, who) = candidates.max_by_key(|(span, ..)| span.to.cycles - span.from.cycles)?;
         let who = match who {

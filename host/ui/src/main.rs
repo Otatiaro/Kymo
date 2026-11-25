@@ -187,10 +187,10 @@ fn run() -> Result<()> {
             #[cfg(windows)]
             background::set(context, ctx.global_style().visuals.panel_fill);
             // The frames measured are those of the whole trace.
-            if let Some(saved) = context.storage.and_then(|storage| storage.get_string(timeline::FILTER))
+            if let Some(storage) = context.storage
                 && !measure
             {
-                timeline.restore(&saved);
+                timeline.restore(|key| storage.get_string(key));
             }
             Ok(Box::new(timeline))
         }),
