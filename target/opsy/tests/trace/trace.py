@@ -101,6 +101,7 @@ APPLICATION = {
     "kymo::end_of<job>": [],
     f"kymo::begin_of<{SAMPLING}>": ["tick"],
     f"kymo::end_of<{SAMPLING}>": [],
+    "app::(anonymous namespace)::setpoint": ["position"],
 }
 # The suite's durations: how many of each, none cut.
 DURATIONS = {"handover": 1, "job": 2}

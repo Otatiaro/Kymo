@@ -14,6 +14,7 @@ mod palette;
 mod panel;
 mod spans;
 mod timeline;
+mod values;
 
 use app::{App, Options};
 use eframe::egui;
@@ -23,7 +24,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: kymo-ui [<capture>] [--elf <file or URL>] [--clock <Hz>] [--svd <file>] [--theme <theme>] [--measure]
+usage: kymo-ui [<capture>] [--elf <file or URL>] [--clock <Hz>] [--svd <file>] [--theme <theme>]
+               [--value <event.field>]... [--measure]
 
 Shows a capture made by kymo record --out, read with the ELF it holds or
 names, or the one --elf gives; an http(s) URL is fetched. Without a
@@ -60,6 +62,17 @@ Durations of a type open at once each take a lane, the lowest free at
 their begin; a line shows up to 4 lanes, the last holding those past it.
 Hovering a duration shows its start, end and duration, and the fields of
 its begin.
+
+Each numeric field of an application event (outside kymo::) is a curve,
+event.field: an integer or a floating-point number, sampled at each event.
+None shows at first: the toolbar's Values menu ticks those shown, kept for
+the next runs, and --value shows one at launch. Each takes a line, last,
+by namespace: a step from each sample to the next, cut by a loss, none
+where a sample is NaN; its axis runs from the lowest to the highest value
+in the view, both written at its edge. Zoomed out, each pixel column spans
+the step entering it and its samples, a peak of one sample included;
+zoomed in, each sample is a dot. Hovering a line shows the time, the value
+held, when it was sampled and, with a kernel adapter, where.
 
 Under a task's runs, a thin grey bar marks its time ready: woken, waiting
 for the core. Hovering a run or the bar shows what woke the task, why, when,
@@ -110,6 +123,9 @@ choice is kept for the next runs.
                 kymo decode
   --theme <theme>
                 system, light or dark, as chosen in the toolbar
+  --value <event.field>
+                shows that curve, as ticked in the Values menu; repeated,
+                each one named
   --measure     prints the time to read the capture and build the timeline,
                 shows the whole capture then the narrowest view, 300 frames
                 each without vsync, prints the frame times and quits
@@ -132,6 +148,7 @@ fn run() -> Result<()> {
     let mut measure = false;
     let mut theme = None;
     let mut svd = None;
+    let mut values = Vec::new();
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -139,6 +156,7 @@ fn run() -> Result<()> {
             "--elf" => elf = Some(arguments.next().ok_or("--elf needs a file or an URL")?),
             "--svd" => svd = Some(PathBuf::from(arguments.next().ok_or("--svd needs a file")?)),
             "--measure" => measure = true,
+            "--value" => values.push(arguments.next().ok_or("--value needs a curve, as event.field")?),
             "--theme" => {
                 theme = Some(match arguments.next().as_deref() {
                     Some("system") => egui::ThemePreference::System,
@@ -156,10 +174,14 @@ fn run() -> Result<()> {
         [capture] => Some(capture.clone()),
         _ => return Err(USAGE.into()),
     };
+    if capture.is_none() && !values.is_empty() {
+        return Err("--value needs a capture".into());
+    }
     let mut app = App::new(Options { clock, svd, measure }, events::parse_with_svd);
     // Measured, the capture opens before the window, which an error does not open.
     if measure && let Some(capture) = &capture {
         app.open(capture, elf.as_deref(), None)?;
+        app.choose(&values)?;
     }
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -201,6 +223,11 @@ fn run() -> Result<()> {
                 }
                 if let Some(storage) = context.storage {
                     app.restore(|key| storage.get_string(key));
+                }
+                // The curves named show with those kept from the last runs.
+                if capture.is_some() {
+                    let result = app.choose(&values);
+                    app.attempt(result);
                 }
             }
             Ok(Box::new(app))

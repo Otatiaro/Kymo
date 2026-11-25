@@ -26,10 +26,14 @@ instances, the application's `sampling` durations among them, bounded by
   up with the ring: at the default 24 MHz of SWD it repeats within 1e-7; at
   4 MHz, where the ring overtakes the probe, it strays by up to 2.4e-4;
 - that no slot is lost: at 24 MHz the probe reads several times what the
-  board writes, so a loss is the host falling behind.
+  board writes, so a loss is the host falling behind;
+- that the setpoints' half sine runs from 0 to its peak, and that `kymo check`
+  bounds its excursion: a rule at the lowest and the highest position decoded
+  passes, one a micrometre inside either fails.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -44,6 +48,8 @@ PERIOD = 1e-3  # seconds
 PERIOD_CYCLES = 8000  # of the core's 8 MHz
 TIMER = "app::(anonymous namespace)::timer_isr"
 NESTED = "app::(anonymous namespace)::nested_isr"
+SETPOINT = "app::(anonymous namespace)::setpoint"
+PEAK = 10000  # micrometres
 
 
 def check_board(output: str) -> list[str]:
@@ -118,6 +124,32 @@ def check_board(output: str) -> list[str]:
     return errors
 
 
+def check_setpoints(host: str, capture: str, output: str) -> list[str]:
+    """The half sine's excursion, decoded and bounded by kymo check."""
+    positions = [int(dict(fields)["position"]) for _, name, fields in parse(output) if name == SETPOINT]
+    if not positions:
+        return ["no setpoint recorded"]
+    low, high = min(positions), max(positions)
+    print(f"{len(positions)} setpoints, from {low} to {high}")
+    errors = [] if (low, high) == (0, PEAK) else [f"the setpoints run from {low} to {high}, not 0 to {PEAK}"]
+
+    def rule(stat: str, **bounds) -> dict:
+        return {"subject": SETPOINT, "metric": "value", "detail": "position", "stat": stat, **bounds}
+
+    for rules, code, label in (([rule("min", min=low), rule("max", max=high),
+                                 rule("count", min=len(positions), max=len(positions))], 0, "at the excursion"),
+                               ([rule("min", min=low + 1)], 3, "min one above"),
+                               ([rule("max", max=high - 1)], 3, "max one below")):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "rules.json")
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump({"rules": rules}, file)
+            done = subprocess.run([host, "check", capture, path], capture_output=True, text=True, encoding="utf-8")
+        if done.returncode != code:
+            errors.append(f"check {label}: exit {done.returncode}, not {code}\n{done.stdout}{done.stderr}")
+    return errors
+
+
 def slope(x: list[int], y: list[float]) -> float:
     """The least-squares slope of y against x."""
     mean_x, mean_y = sum(x) / len(x), sum(y) / len(y)
@@ -159,6 +191,7 @@ def main() -> int:
             print("kymo decode failed")
             return 1
         errors = (check(decode.stdout) + check_board(decode.stdout)
+                  + check_setpoints(args.host, capture, decode.stdout)
                   + check_stats(args.host, args.image, capture, {SAMPLING: None})
                   + check_rules(args.host, args.image, capture))
         lost = re.search(r"(\d+) slots lost", record.stderr)

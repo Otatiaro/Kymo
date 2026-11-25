@@ -15,6 +15,10 @@
  * its priority, and the mutex is handed over on release. Each period
  * `sampler` takes is a duration, `sampling`, the wait for the mutex included.
  *
+ * Each period, `sampler` emits a `setpoint`, as an axis drive takes one per
+ * cycle of its bus: a half sine of 200 periods, from 0 to 10000 and back,
+ * repeated. Its `position` is a curve the host reads.
+ *
  * Built without NDEBUG: the idle task spins on NOP, and the probe can read
  * the ring while nothing runs.
  */
@@ -24,6 +28,7 @@
 #include <opsy.hpp>
 #include <opsy_trace.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -121,6 +126,41 @@ struct sampling
 	std::uint32_t tick;
 };
 
+/// The position an axis is to reach, in micrometres.
+struct setpoint
+{
+	std::int32_t position;
+};
+
+constexpr std::size_t half_wave = 200; ///< periods
+constexpr std::int32_t peak = 10000;   ///< micrometres, reached at the middle period
+
+/// The cosine of @p x, |x| at most π/2, by its Taylor series.
+constexpr double cosine(double x)
+{
+	double term = 1.0, sum = 1.0;
+	for (int n = 1; n < 16; ++n)
+	{
+		term *= -x * x / ((2 * n - 1) * (2 * n));
+		sum += term;
+	}
+	return sum;
+}
+
+/// The half sine, computed by the compiler: the image links no floating-point arithmetic.
+constexpr auto setpoints = [] {
+	constexpr double pi = 3.14159265358979323846;
+	std::array<std::int32_t, half_wave> positions{};
+	for (std::size_t n = 0; n < half_wave; ++n)
+	{
+		double const x = pi * static_cast<double>(n) / half_wave - pi / 2;
+		positions[n] = static_cast<std::int32_t>(peak * cosine(x) + 0.5);
+	}
+	return positions;
+}();
+
+static_assert(setpoints[0] == 0 && setpoints[half_wave / 2] == peak);
+
 void sampler()
 {
 	// From a running task: a priority change before scheduler::start asks
@@ -138,6 +178,7 @@ void sampler()
 		}
 		auto const sampled = trace::scope(sampling{g_shared});
 		std::lock_guard guard{g_mutex};
+		trace::emit(setpoint{setpoints[g_shared % half_wave]});
 		++g_shared;
 	}
 }

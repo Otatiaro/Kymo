@@ -440,12 +440,14 @@ def close(a, b) -> bool:
 
 
 def compare(expected: dict, got: dict) -> list[str]:
-    """kymo stats --json against the oracle, value by value."""
+    """kymo stats --json against the oracle, value by value; the curves'
+    groups aside, which values.py checks against its own."""
     errors = []
     for key in ("from", "to", "origin", "known", "joined", "losses", "suspects", "contradictions"):
         if got[key] != expected[key]:
             errors.append(f"{key}: kymo stats says {got[key]}, the oracle {expected[key]}")
-    printed = {(group["kind"], group["subject"], group["metric"], group["detail"]): group for group in got["groups"]}
+    printed = {(group["kind"], group["subject"], group["metric"], group["detail"]): group for group in got["groups"]
+               if group["kind"] != "value"}
     for key in sorted(set(expected["groups"]) | set(printed), key=str):
         if key not in printed:
             errors.append(f"{key}: not printed")

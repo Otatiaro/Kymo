@@ -1544,6 +1544,7 @@ version = "0.0.0"
 dependencies = [
  "eframe",
  "egui_extras",
+ "gimli",
  "kymo",
  "raw-window-handle",
  "rfd",

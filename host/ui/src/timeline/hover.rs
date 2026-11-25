@@ -186,6 +186,9 @@ impl Timeline {
                 cards.push(card);
             }
         }
+        if let Some(Line::Value(curve)) = line {
+            cards.push(self.value_card(curve, view.cycles(pointer.x)));
+        }
         if let (Some(n), Some(Line::Duration(row, shown))) = (n, line) {
             let tops = super::rows::tops(lines, area.height());
             let bars = (area.top() + tops[n] + 4.0, area.top() + tops[n + 1] - 4.0);
@@ -225,6 +228,34 @@ impl Timeline {
         );
         (!cards.is_empty()).then_some((Hover { cards }, arrow))
     }
+}
+
+/// Where the core was at `cycles`: in the deepest handler entered, else in
+/// the task on it or idle; unknown when nothing known covers them.
+fn context(meaning: &Meaning, cycles: i64) -> kymo::meaning::Context {
+    use kymo::meaning::Context;
+    let handler = meaning
+        .interrupts
+        .iter()
+        .enumerate()
+        .flat_map(|(handler, depths)| {
+            depths
+                .iter()
+                .enumerate()
+                .filter(move |(_, spans)| spans.at(cycles, cycles).is_some())
+                .map(move |(depth, _)| (depth, handler))
+        })
+        .max();
+    if let Some((_, handler)) = handler {
+        return Context::Handler(handler);
+    }
+    if let Some(task) = meaning.runs.iter().position(|runs| runs.at(cycles, cycles).is_some()) {
+        return Context::Task(Some(task));
+    }
+    if meaning.idle.at(cycles, cycles).is_some() {
+        return Context::Task(None);
+    }
+    Context::Unknown
 }
 
 /// A loss or a suspect line, described; none for an event.
@@ -312,6 +343,39 @@ impl Timeline {
                 card
             })
             .collect()
+    }
+
+    /// The value `curve` holds at `cycles`: the time, the sample held, when
+    /// and, with a kernel adapter, where it was emitted; unknown from a loss
+    /// to the next sample.
+    fn value_card(&self, curve: usize, cycles: i64) -> Card {
+        let mut card = self.card(Line::Value(curve), "value", Swatch::Event);
+        card.facts.push(("time", self.time((cycles - self.origin()) as f64)));
+        let Some(sample) = self.values().held(curve, cycles) else {
+            card.notes.push("No sample yet.".to_owned());
+            return card;
+        };
+        if cycles > self.values().end {
+            card.notes.push("Past the capture's last event.".to_owned());
+            return card;
+        }
+        if !sample.holds_at(cycles) {
+            card.notes
+                .push("Unknown: a loss came after the last sample.".to_owned());
+            return card;
+        }
+        let value = match sample.value.is_nan() {
+            true => "NaN, a gap".to_owned(),
+            false => sample.value.to_string(),
+        };
+        card.facts.push(("value", value));
+        card.facts
+            .push(("sampled", self.time((sample.cycles - self.origin()) as f64)));
+        if let Some(meaning) = &self.meaning {
+            let (kind, name) = meaning.kernel.place(context(meaning, sample.cycles));
+            card.facts.push((kind, name));
+        }
+        card
     }
 
     /// A card titled with `line`'s label, its name in full among its facts
@@ -432,7 +496,7 @@ impl Timeline {
                     cards.push(card);
                 }
             }
-            Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Duration(..) | Line::Group(_) => {}
+            Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Duration(..) | Line::Value(_) | Line::Group(_) => {}
         }
         (cards, arrow)
     }
@@ -479,7 +543,7 @@ impl Timeline {
             Line::Task(task) => ("load", Some(Swatch::task(meaning, task))),
             Line::Handler(_) => ("load", Some(Swatch::Interrupt)),
             Line::Mutex(_) => ("held, load", Some(Swatch::Hold)),
-            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Group(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Value(_) | Line::Group(_) => return None,
         };
         // The CPU's line has a colour per layer, and so no swatch.
         let mut card = match swatch {
@@ -586,7 +650,7 @@ impl Timeline {
                         .chain(still.map(|hold| (hold.span, true, Who::Holder(hold.task)))),
                 )
             }
-            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Group(_) => return None,
+            Line::Section(_) | Line::Event(_) | Line::Duration(..) | Line::Value(_) | Line::Group(_) => return None,
         };
         let (span, still, who) = candidates.max_by_key(|(span, ..)| span.to.cycles - span.from.cycles)?;
         let who = match who {
