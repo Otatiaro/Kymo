@@ -191,6 +191,42 @@ http(s) URL is fetched, and `kymo-ui` opens a capture from its URL too.
 `stats --json` and the rules of `check` are described by
 `host/schema/stats.schema.json` and `host/schema/check.schema.json`.
 
+## Variables on SWO
+
+> [!IMPORTANT]
+> `kymo::dwt::start()` puts a DWT comparator on the ring: the **anchor** that
+> dates SWO against the ring. **Leave it as `start()` configured it for as long
+> as the trace runs.** A debugger or a program that takes it over cuts the
+> synchronisation, and no sample on SWO can be dated any more. It is the least
+> capable comparator able to send data values, so that those which match a
+> value or the cycle counter stay free for you.
+
+On ARMv7-M and ARMv8-M Mainline (Cortex-M3, M4, M7, M33), `kymo/dwt.hpp` sends
+each write to a watched variable on SWO, its value and a local timestamp, with
+no code where it is written: the DWT watches the address. The program
+configures the chip's SWO pin and trace clock, then:
+
+```cpp
+#include <kymo/dwt.hpp>
+
+std::int32_t position;   // a global of 1, 2 or 4 bytes, aligned on its size
+
+kymo::dwt::start(trace_ring, {8'000'000, 2'000'000});   // trace clock, baud rate
+kymo::dwt::watch(position);
+```
+
+`start()` configures the ITM and the TPIU (asynchronous NRZ, formatter off) and
+the anchor on the ring's slot 0; `watch()` takes one more comparator each, and
+returns false when none is left. A comparator keeps its function across a
+system reset: `start()` frees those that send trace packets, left by the
+program before the reset, and leaves a debugger's watchpoints and triggers. On
+ARMv8-M only the first four comparators send data values; on ARMv7-M the
+anchor takes the last one. Neither is in the path of an emit: in -Os, `start()`
+and `watch()` take 312 bytes of flash on a Cortex-M33 and 272 on a Cortex-M4,
+and 56 and 52 bytes of stack at most.
+
+`kymo record` does not read SWO yet.
+
 ## Layout
 
 | Path | Content |

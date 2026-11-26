@@ -17,7 +17,9 @@
  *
  * Each period, `sampler` emits a `setpoint`, as an axis drive takes one per
  * cycle of its bus: a half sine of 200 periods, from 0 to 10000 and back,
- * repeated. Its `position` is a curve the host reads.
+ * repeated. Its `position` is a curve the host reads. `sampler` also writes
+ * it to `g_position`, which the DWT watches: each write goes out on SWO (PB3,
+ * 2 MBd), dated by the anchor on the ring's slot 0.
  *
  * Built without NDEBUG: the idle task spins on NOP, and the probe can read
  * the ring while nothing runs.
@@ -25,6 +27,7 @@
 
 #include "qemu_test.hpp"
 
+#include <kymo/dwt.hpp>
 #include <opsy.hpp>
 #include <opsy_trace.hpp>
 
@@ -74,6 +77,7 @@ opsy::condition_variable g_tick{timer_priority};
 std::uint32_t g_ticks = 0;  ///< periods sampler has not taken yet, under g_lock
 std::uint32_t g_nested = 0; ///< nested interrupts taken
 std::uint32_t g_shared = 0; ///< under g_mutex
+std::int32_t g_position = 0; ///< the last setpoint, watched by the DWT
 
 void timer_isr()
 {
@@ -185,7 +189,9 @@ void sampler()
 		}
 		auto const sampled = trace::scope(sampling{g_shared});
 		std::lock_guard guard{g_mutex};
-		trace::emit(setpoint{setpoints[g_shared % half_wave]});
+		std::int32_t const position = setpoints[g_shared % half_wave];
+		trace::emit(setpoint{position});
+		g_position = position;
 		++g_shared;
 	}
 }
@@ -280,6 +286,17 @@ void start_cycle_counter()
 	reg(dwt_ctrl) |= 1u;     // CYCCNTENA
 }
 
+constexpr std::uint32_t dbgmcu_cr = 0x44024004;
+std::uint32_t volatile g_dwt_started = 0; ///< 1 once the DWT sends g_position, for board.py
+
+/** @brief SWO on PB3, which is TRACESWO (AF0) from reset, and g_position watched */
+void start_swo()
+{
+	reg(dbgmcu_cr) |= (1u << 5) | (1u << 4); // TRACE_EN, TRACE_IOEN; TRACE_MODE 0: asynchronous
+	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 2'000'000}) && kymo::dwt::watch(g_position))
+		g_dwt_started = 1;
+}
+
 } // namespace
 } // namespace app
 
@@ -287,6 +304,7 @@ int opsy_test_main()
 {
 	app::board_clock();
 	app::start_cycle_counter();
+	app::start_swo();
 	app::reg(app::vtor) = reinterpret_cast<std::uint32_t>(&app::g_table);
 	opsy::cortex_m::set_priority(app::timer_irq, app::timer_priority);
 	opsy::cortex_m::set_priority(app::nested_irq, opsy::scheduler::os_callable_priority);

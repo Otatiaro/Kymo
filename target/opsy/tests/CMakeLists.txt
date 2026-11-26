@@ -150,7 +150,7 @@ if(KYMO_OPSY_BOARD)
 	add_test(NAME opsy_board_h563
 		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/board.py
 			--image $<TARGET_FILE:opsy_board> --host ${KYMO_HOST}
-			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
+			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD} --nm ${CMAKE_NM})
 	# The adapter keeps the idle awake: the host never reads the target as zeros.
 	set_tests_properties(opsy_board_h563 PROPERTIES TIMEOUT 300 FAIL_REGULAR_EXPRESSION "read as zeros")
 

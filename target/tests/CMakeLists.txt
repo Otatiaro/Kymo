@@ -138,6 +138,10 @@ foreach(cpu cortex-m33 cortex-m4)
 		# enable() and disable() interrupted at every instruction.
 		kymo_qemu_test(control-${cpu}-${level} ${cpu} ${level} ICOUNT
 			SOURCES control/control.cpp qemu/preempt.cpp)
+		# The DWT data trace: the comparator chosen against real chips' registers
+		# (at compile time), and start() and watch() refusing under QEMU, which
+		# models no comparator.
+		kymo_qemu_test(dwt-${cpu}-${level} ${cpu} ${level} SOURCES dwt/dwt.cpp)
 	endforeach()
 endforeach()
 
