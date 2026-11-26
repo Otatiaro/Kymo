@@ -1462,9 +1462,16 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
         .collect();
     let task_runs = task_runs(meaning);
 
-    // Sorted by kind, subject, metric, detail and start before being handed out.
-    type Order = (u8, usize, usize, Option<(u8, String)>, usize);
-    let mut out: Vec<(Order, Instance)> = Vec::new();
+    let still_open = meaning.open_activations();
+    // Sorted by kind, subject, metric, detail and start before being handed
+    // out; the detail's rank is here, its text in the instance.
+    type Order = (u8, usize, usize, Option<u8>);
+    // At most 8 instances per activation, 3 per handler run, 2 per hold
+    // and 1 per wake: reserved at once, the vector is never copied to grow.
+    let holds = meaning.closed.holds.len() + open.holds.len();
+    let most =
+        8 * (meaning.activations.len() + still_open.len()) + 3 * interrupts.len() + 2 * holds + meaning.wakes.len();
+    let mut out: Vec<(Order, Instance)> = Vec::with_capacity(most);
     let mut push = |kind: (u8, &'static str),
                     subject: usize,
                     metrics: &[Metric],
@@ -1480,7 +1487,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
         };
         let rank = metrics.iter().position(|m| *m == metric).expect("a metric of the kind");
         out.push((
-            (kind.0, subject, rank, detail.clone(), span.from.element),
+            (kind.0, subject, rank, detail.as_ref().map(|(rank, _)| *rank)),
             Instance {
                 kind: kind.1,
                 subject: name.clone(),
@@ -1500,7 +1507,6 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
     const REASON: u8 = 0;
     const CAUSE: u8 = 1;
 
-    let still_open = meaning.open_activations();
     let activations = meaning
         .activations
         .iter()
@@ -1626,7 +1632,11 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
             open,
         );
     }
-    out.sort_by(|(a, _), (b, _)| a.cmp(b));
+    out.sort_by(|(a, x), (b, y)| {
+        a.cmp(b)
+            .then_with(|| x.detail.cmp(&y.detail))
+            .then(x.from.element.cmp(&y.from.element))
+    });
     out.into_iter().map(|(_, instance)| instance).collect()
 }
 

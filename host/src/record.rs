@@ -739,44 +739,30 @@ pub fn run(
 }
 
 /// Keeps the drain's pace on Windows, for the calling thread, the drain: the
-/// process out of power throttling, which Windows applies to a process without
-/// a window in the foreground and which stalls the probe's reads by tens of
-/// milliseconds even on an idle machine; the process above the programs of
-/// normal priority, and the drain above the process's other threads, so that a
-/// loaded machine delays the reads less. The drain waits on the probe most of
-/// the time. What fails is warned of: the recording goes on, and may lose
-/// events.
+/// process out of power throttling (power.rs), which stalls the probe's reads
+/// by tens of milliseconds even on an idle machine; the process above the
+/// programs of normal priority, and the drain above the process's other
+/// threads, so that a loaded machine delays the reads less. The drain waits on
+/// the probe most of the time. What fails is warned of: the recording goes on,
+/// and may lose events.
 #[cfg(windows)]
 fn raise_priority() {
     use windows_sys::Win32::System::Threading::{
-        ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetCurrentThread, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
-        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
-        SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+        ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetThreadPriority,
+        THREAD_PRIORITY_HIGHEST,
     };
-    // Every mechanism named in the control mask, none in the state mask: off.
-    let unthrottled = PROCESS_POWER_THROTTLING_STATE {
-        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
-        StateMask: 0,
-    };
+    if let Err(error) = crate::power::unthrottle() {
+        eprintln!("warning: could not leave power throttling: {error}");
+    }
     // SAFETY: the pseudo handles of the current process and thread are always
-    // valid; the state passed is the structure ProcessPowerThrottling takes,
-    // with its size.
-    let (throttling, class, thread) = unsafe {
+    // valid.
+    let (class, thread) = unsafe {
         (
-            SetProcessInformation(
-                GetCurrentProcess(),
-                ProcessPowerThrottling,
-                (&raw const unthrottled).cast(),
-                size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-            ),
             SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS),
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST),
         )
     };
     for (done, what) in [
-        (throttling, "leave power throttling"),
         (class, "raise the process's priority"),
         (thread, "raise the probe thread's priority"),
     ] {

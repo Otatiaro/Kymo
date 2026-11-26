@@ -892,6 +892,58 @@ fn the_wake_latency_splits_by_reason_then_by_cause() {
     assert_eq!(details("0x20000200"), [None, Some("timed_out"), Some("elapsed")]);
 }
 
+/// Within a metric, the details in order of their text, and each one's
+/// instances in order of their start, whatever order they end in.
+#[test]
+fn instances_come_by_detail_then_by_start() {
+    let catalogue = catalogue();
+    let trace = trace(
+        &catalogue,
+        0,
+        &[
+            ("task_ready", &[A, TIMED_OUT]),
+            ("task_started", &[A]),
+            ("mutex_taken", &[M, A]),
+            ("mutex_blocked", &[M, B]),
+            ("mutex_blocked", &[M, C]),
+            ("mutex_released", &[M, A]),
+            ("mutex_taken", &[M, C]),
+            ("mutex_released", &[M, C]),
+            ("mutex_taken", &[M, B]),
+            ("task_wait", &[A]),
+            ("task_ready", &[A, NOTIFIED]),
+            ("task_started", &[A]),
+            ("task_wait", &[A]),
+        ],
+    );
+    let mut opsy = Meaning::new(&catalogue, 0).unwrap();
+    opsy.add(&trace.elements, 0);
+    let instances = instances(&opsy);
+    let listed = |kind: &str, metric: &str| -> Vec<(Option<&str>, usize)> {
+        instances
+            .iter()
+            .filter(|instance| instance.kind == kind && instance.metric.name == metric)
+            .map(|instance| (instance.detail.as_deref(), instance.from.element))
+            .collect()
+    };
+    assert_eq!(
+        listed("task", "wake_latency"),
+        [
+            (None, 0),
+            (None, 10),
+            (Some("notified"), 10),
+            (Some("timed_out"), 0),
+            (Some("elapsed"), 0),
+            (Some("task:0x20000100"), 10),
+        ]
+    );
+    // C, blocked after B, is granted the mutex first.
+    assert_eq!(
+        listed("mutex", "wait"),
+        [(None, 3), (None, 4), (Some("0x20000200"), 3), (Some("0x20000400"), 4)]
+    );
+}
+
 #[test]
 fn an_activation_splits_into_what_preempts_it() {
     let report = report(&PREEMPTED, stats::Range::default());

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod meaning;
 pub mod model;
 mod opsy;
+pub mod power;
 pub mod record;
 #[cfg(any(test, feature = "served"))]
 pub mod served;
