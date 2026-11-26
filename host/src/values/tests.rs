@@ -207,7 +207,10 @@ fn stats_count_the_samples_nan_apart_and_exclude_a_suspect() {
     let trace = trace(&catalogue, &steps);
     let values = sample(&catalogue, &trace);
     let report = stats::sampled(&trace, &values, Range::default());
-    let x = report.iter().find(|sampled| sampled.curve.field.as_deref() == Some("x")).expect("x");
+    let x = report
+        .iter()
+        .find(|sampled| sampled.curve.field.as_deref() == Some("x"))
+        .expect("x");
     assert_eq!((x.count, x.excluded_suspect, x.nan), (4, 1, 0));
     let spread = x.spread.as_ref().expect("a spread");
     assert_eq!(spread.min.value, Number::Integer(-3));
@@ -216,7 +219,10 @@ fn stats_count_the_samples_nan_apart_and_exclude_a_suspect() {
     assert_eq!((spread.p50, spread.p90), (Number::Integer(-3), Number::Integer(9)));
     assert_eq!(spread.mean, (5.0 - 3.0 - 3.0 + 9.0) / 4.0);
 
-    let f = report.iter().find(|sampled| sampled.curve.field.as_deref() == Some("f")).expect("f");
+    let f = report
+        .iter()
+        .find(|sampled| sampled.curve.field.as_deref() == Some("f"))
+        .expect("f");
     assert_eq!((f.count, f.nan), (3, 1));
     let spread = f.spread.as_ref().expect("a spread");
     assert_eq!(
@@ -238,7 +244,10 @@ fn stats_keep_the_samples_in_the_range() {
         to: Some(40),
     };
     let report = stats::sampled(&trace, &values, range);
-    let x = report.iter().find(|sampled| sampled.curve.field.as_deref() == Some("x")).expect("x");
+    let x = report
+        .iter()
+        .find(|sampled| sampled.curve.field.as_deref() == Some("x"))
+        .expect("x");
     let spread = x.spread.as_ref().expect("a spread");
     assert_eq!(x.count, 3);
     assert_eq!(

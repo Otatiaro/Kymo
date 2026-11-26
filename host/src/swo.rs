@@ -144,7 +144,11 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
                 ..
             } => {
                 waiting.push(stream.len());
-                stream.push(Item::Value { comparator, value, itm: None });
+                stream.push(Item::Value {
+                    comparator,
+                    value,
+                    itm: None,
+                });
             }
             Packet::Timestamp { delta, .. } => {
                 clock += u64::from(delta) + 1;
@@ -182,10 +186,7 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     let matched: Vec<Option<usize>> = expected
         .iter()
         .map(|expected| {
-            let at = *received
-                .get(&expected.timestamp)?
-                .iter()
-                .find(|&&at| at >= after)?;
+            let at = *received.get(&expected.timestamp)?.iter().find(|&&at| at >= after)?;
             after = at + 1;
             Some(at)
         })
@@ -230,7 +231,9 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
         }
         for (watch, value, itm) in between.iter().filter_map(sample) {
             match itm {
-                Some(itm) if sound => dated.samples.push((watch, value, from.cycles + itm as i64 - itm_of(start))),
+                Some(itm) if sound => dated
+                    .samples
+                    .push((watch, value, from.cycles + itm as i64 - itm_of(start))),
                 _ => dated.dropped.push((watch, from.cycles)),
             }
         }
@@ -247,7 +250,11 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
 #[derive(Clone, Copy, Debug)]
 enum Item {
     /// A data value written, and the ITM's clock at the timestamp after it.
-    Value { comparator: u8, value: u32, itm: Option<u64> },
+    Value {
+        comparator: u8,
+        value: u32,
+        itm: Option<u64>,
+    },
     /// An overflow or a malformed packet: packets may be missing.
     Broken,
 }
@@ -283,7 +290,11 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
             ..Watched::default()
         };
     };
-    let variables: Vec<Watch> = all.iter().filter(|watch| watch.comparator != anchor.comparator).copied().collect();
+    let variables: Vec<Watch> = all
+        .iter()
+        .filter(|watch| watch.comparator != anchor.comparator)
+        .copied()
+        .collect();
     let readings: Vec<(Curve, Reading)> = variables
         .iter()
         .map(|watch| {
@@ -356,6 +367,32 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
             .collect(),
         undated: dated.undated,
     }
+}
+
+/// What came of the SWO stream, for a summary: a warning when its samples
+/// could not be dated, else their counts and what was lost of them.
+pub fn summary(watched: &Watched) -> String {
+    if let Some(refused) = &watched.refused {
+        return format!("warning: the DWT's samples are not dated: {refused}");
+    }
+    let mut line = format!(
+        "{} samples of {} watched variables, {} anchors",
+        watched.samples.len(),
+        watched.curves.len(),
+        watched.anchors
+    );
+    if !watched.gaps.is_empty() {
+        line += &format!(
+            ", {} gaps dropping {} samples ({} overflows)",
+            watched.gaps.len(),
+            watched.dropped.len(),
+            watched.overflows
+        );
+    }
+    if watched.undated > 0 {
+        line += &format!(", {} undated outside the anchors", watched.undated);
+    }
+    line
 }
 
 #[cfg(test)]

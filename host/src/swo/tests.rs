@@ -48,6 +48,12 @@ impl Stream {
         self.0.push(0x70);
         self
     }
+
+    /// A zero that starts no synchronisation packet.
+    fn malformed(mut self) -> Self {
+        self.0.push(0x00);
+        self
+    }
 }
 
 const LEVEL: Watch = Watch {
@@ -140,6 +146,45 @@ fn an_overflow_between_anchors_is_a_gap() {
     assert_eq!(dated.overflows, 1);
     assert_eq!(dated.gaps, [(1_000, 2_000)]);
     assert_eq!(dated.dropped, [(0, 1_000)]);
+}
+
+#[test]
+fn a_malformed_packet_between_anchors_is_a_gap_but_no_overflow() {
+    let stream = Stream::default()
+        .anchor(0x100)
+        .stamp(10)
+        .value(1, 42, 2)
+        .malformed()
+        .stamp(300)
+        .anchor(0x200)
+        .stamp(700);
+    let dated = date(&stream.0, 0, &[LEVEL], &expected(&[(1_000, 0x100), (2_000, 0x200)]));
+    assert_eq!(dated.overflows, 0);
+    assert_eq!(dated.gaps, [(1_000, 2_000)]);
+    assert_eq!(dated.dropped, [(0, 1_000)]);
+}
+
+#[test]
+fn an_anchor_timestamp_seen_again_matches_the_later_write() {
+    // The ring's 32-bit timestamp comes back to a value it carried before: the
+    // third anchor matches its own write, not the first one.
+    let stream = Stream::default()
+        .anchor(0x100)
+        .stamp(10)
+        .anchor(0x200)
+        .stamp(1_000)
+        .value(1, 42, 2)
+        .stamp(300)
+        .anchor(0x100)
+        .stamp(700);
+    let dated = date(
+        &stream.0,
+        0,
+        &[LEVEL],
+        &expected(&[(1_000, 0x100), (2_000, 0x200), (3_000, 0x100)]),
+    );
+    assert_eq!(dated.gaps, []);
+    assert_eq!(dated.samples, [(0, 42, 2_300)]);
 }
 
 #[test]
@@ -241,7 +286,11 @@ fn watches_read_both_architectures() {
     };
     assert_eq!(
         watches(&armv8m),
-        [watch(0, 0x2000_0014, 4), watch(1, 0x2000_0100, 2), watch(2, 0x2000_0200, 1)]
+        [
+            watch(0, 0x2000_0014, 4),
+            watch(1, 0x2000_0100, 2),
+            watch(2, 0x2000_0200, 1)
+        ]
     );
 
     let armv7m = dwt(
@@ -379,4 +428,31 @@ fn without_the_anchor_nothing_is_dated() {
         assert!(refused.contains("0x20001014"), "{refused}");
         assert_eq!(watched.curves, []);
     }
+}
+
+#[test]
+fn the_summary_tells_what_was_lost() {
+    let catalogue = catalogue();
+    let anchor = (RING + SLOTS_OFFSET + 4) as u32;
+    let dwt = dwt(0x4770_1a02, &[(0x2000_0100, 0, v8(1)), (anchor, 0, v8(2))]);
+    let stream = Stream::default()
+        .value(0, 1, 2)
+        .stamp(10)
+        .value(1, 0x100, 4)
+        .stamp(10)
+        .value(0, 2, 2)
+        .stamp(10)
+        .value(0, 3, 2)
+        .overflow()
+        .stamp(290)
+        .value(1, 0x200, 4)
+        .stamp(700);
+    let elements = events(&catalogue, &[(0, 0x100, 1_000), (4, 0x200, 2_000)]);
+    let watched = watched(&catalogue, &ring(), &dwt, &stream.0, &elements);
+    assert_eq!(
+        summary(&watched),
+        "0 samples of 1 watched variables, 2 anchors, 1 gaps dropping 2 samples (1 overflows), 1 undated outside the anchors"
+    );
+    let refused = super::watched(&catalogue, &ring(), &self::dwt(0x4770_1a02, &[]), &[], &[]);
+    assert!(summary(&refused).starts_with("warning: the DWT's samples are not dated: "));
 }

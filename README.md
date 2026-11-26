@@ -225,7 +225,19 @@ anchor takes the last one. Neither is in the path of an emit: in -Os, `start()`
 and `watch()` take 312 bytes of flash on a Cortex-M33 and 272 on a Cortex-M4,
 and 56 and 52 bytes of stack at most.
 
-`kymo record` does not read SWO yet.
+With the probe-rs backend, `kymo record` reads the DWT's configuration once
+`start()` has run, receives SWO beside the ring and keeps both in the capture;
+it writes nothing to the target. Each watched variable is a curve named after
+its symbol and read as its type says: a `value` group of `kymo stats`, which
+a rule of `kymo check` bounds with no `detail`. A sample is dated from the anchor before it; a
+stretch between two anchors whose SWO cycles disagree with the ring's, that
+holds an overflow, or that misses an anchor is a gap: its samples are dropped,
+and counted as excluded for loss.
+
+SWO is read on every pass, between two reads of the ring, so the ring is
+drained less often: on an ST-Link V3 at 24 MHz SWD, a read takes about 160 µs
+and the passes drop by about 15 %. A ring that loses slots at the limit loses
+more with SWO.
 
 ## Layout
 

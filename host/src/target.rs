@@ -18,6 +18,18 @@ pub trait Target {
         None
     }
 
+    /// Starts receiving SWO at `baud`, the rate the target sends at. The
+    /// probe alone is set: the target's trace configuration is its own.
+    fn start_swo(&mut self, baud: u32) -> Result<()> {
+        let _ = baud;
+        Err("this backend does not read SWO: use probe-rs".into())
+    }
+
+    /// The SWO bytes received since the last call.
+    fn read_swo(&mut self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
     fn read_word(&mut self, address: u32) -> Result<u32> {
         let mut word = [0u32];
         self.read_words(address, &mut word)?;

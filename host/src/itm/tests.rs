@@ -60,7 +60,10 @@ fn reads_sync_and_overflow() {
     let bytes = [0, 0, 0, 0, 0, 0x80, 0x70, 0, 0, 0x80];
     assert_eq!(
         packets(&bytes),
-        (vec![Packet::Sync, Packet::Overflow, Packet::Malformed, Packet::Malformed], false)
+        (
+            vec![Packet::Sync, Packet::Overflow, Packet::Malformed, Packet::Malformed],
+            false
+        )
     );
 }
 
