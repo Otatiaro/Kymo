@@ -26,7 +26,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage: kymo-ui [<capture>] [--elf <file or URL>] [--clock <Hz>] [--svd <file>] [--theme <theme>]
-               [--value <event.field>]... [--measure]
+               [--value <event.field|variable>]... [--measure]
 
 Shows a capture made by kymo record --out, read with the ELF it holds or
 names, or the one --elf gives; an http(s) URL is fetched. Without a
@@ -70,8 +70,10 @@ its begin.
 
 Each numeric field of an application event (outside kymo::) is a curve,
 event.field: an integer or a floating-point number, sampled at each event.
-None shows at first: the toolbar's Values menu ticks those shown, kept for
-the next runs, and --value shows one at launch. Each takes a line, last,
+So is each variable the DWT watched, named after it, sampled at each write
+the SWO stream dates; a gap in that stream cuts its step. None shows at
+first: the toolbar's Values menu ticks those shown, kept for the next
+runs, and --value shows one at launch. Each takes a line, last,
 by namespace: a step from each sample to the next, cut by a loss, none
 where a sample is NaN; its axis runs from the lowest to the highest value
 in the view, both written at its edge. Zoomed out, each pixel column spans
@@ -128,7 +130,7 @@ choice is kept for the next runs.
                 kymo decode
   --theme <theme>
                 system, light or dark, as chosen in the toolbar
-  --value <event.field>
+  --value <event.field|variable>
                 shows that curve, as ticked in the Values menu; repeated,
                 each one named
   --measure     prints the time to read the capture and build the timeline,
@@ -161,7 +163,11 @@ fn run() -> Result<()> {
             "--elf" => elf = Some(arguments.next().ok_or("--elf needs a file or an URL")?),
             "--svd" => svd = Some(PathBuf::from(arguments.next().ok_or("--svd needs a file")?)),
             "--measure" => measure = true,
-            "--value" => values.push(arguments.next().ok_or("--value needs a curve, as event.field")?),
+            "--value" => values.push(
+                arguments
+                    .next()
+                    .ok_or("--value needs a curve, as event.field or a variable")?,
+            ),
             "--theme" => {
                 theme = Some(match arguments.next().as_deref() {
                     Some("system") => egui::ThemePreference::System,

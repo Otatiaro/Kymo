@@ -1,6 +1,8 @@
 use super::*;
 use kymo::decode::Decoded;
 use kymo::events::{Event, Field, Kind, Type};
+use kymo::model::Edge;
+use kymo::values::Sampled;
 use std::collections::BTreeMap;
 
 /// `app::setpoint {int32_t x; float f;}`, `app::tick` with no field, and
@@ -113,7 +115,7 @@ fn bar(from: f32, to: f32, low: f64, high: f64) -> Bar {
 #[test]
 fn the_curves_are_the_numeric_fields_of_application_events() {
     let catalogue = catalogue();
-    let values = Values::new(&catalogue).unwrap();
+    let values = Values::new(&catalogue, None).unwrap();
     let names: Vec<String> = values.curves.iter().map(Curve::to_string).collect();
     assert_eq!(names, ["app::setpoint.f", "app::setpoint.x"]);
     assert_eq!(values.named("app::setpoint.x"), Some(1));
@@ -135,7 +137,7 @@ fn a_loss_cuts_the_last_step_of_every_curve() {
         Step::Setpoint(100, 3, 0.5),
     ];
     let elements = elements(&catalogue, &steps);
-    let mut values = Values::new(&catalogue).unwrap();
+    let mut values = Values::new(&catalogue, None).unwrap();
     values.add(&elements[..4], 0);
     values.add(&elements, 4);
     let x = values.named("app::setpoint.x").unwrap();
@@ -277,10 +279,97 @@ fn a_nan_is_a_gap_and_zoomed_in_samples_are_dots() {
     assert_eq!(drawn.dots, [(0.0, 5.0), (200.0, 7.0)]);
 }
 
+/// `app::g_position` and `app::g_speed` watched from 100 to 1200 cycles,
+/// with gaps from 400 to 500 and from 950 to 1000. The position is written
+/// at 150, 300, 600 and 900, the speed at 1100.
+fn watched() -> Watched {
+    let variable = |name: &str| Curve {
+        subject: name.to_owned(),
+        field: None,
+    };
+    let (position, speed) = (variable("app::g_position"), variable("app::g_speed"));
+    let sampled = |curve: &Curve, cycles, value| Sampled {
+        curve: curve.clone(),
+        value: Number::Integer(value),
+        at: Edge {
+            element: 0,
+            cycles,
+            lost: false,
+        },
+    };
+    Watched {
+        curves: vec![position.clone(), speed.clone()],
+        // In the order of the stream, which a curve's own order need not be.
+        samples: vec![
+            sampled(&position, 300, 2),
+            sampled(&position, 150, 1),
+            sampled(&position, 600, 3),
+            sampled(&position, 900, 4),
+            sampled(&speed, 1100, 7),
+        ],
+        span: Some((100, 1200)),
+        gaps: vec![(400, 500), (950, 1000)],
+        anchors: 10,
+        ..Watched::default()
+    }
+}
+
+/// A watched variable is a curve named after it, beside the events' own; a
+/// gap cuts the step before it, the last step ends with the last anchor, and
+/// a loss of the ring cuts no step of it.
+#[test]
+fn a_watched_variable_is_a_curve_cut_by_its_gaps() {
+    let catalogue = catalogue();
+    let watched = watched();
+    let mut values = Values::new(&catalogue, Some(&watched)).unwrap();
+    let names: Vec<String> = values.curves.iter().map(Curve::to_string).collect();
+    assert_eq!(
+        names,
+        ["app::g_position", "app::g_speed", "app::setpoint.f", "app::setpoint.x"]
+    );
+    let steps = [Step::Setpoint(0, 1, 0.5), Step::Lost, Step::Tick(2000)];
+    values.add(&elements(&catalogue, &steps), 0);
+    let cuts = |name| -> Vec<(i64, Option<i64>)> {
+        values.samples[values.named(name).unwrap()]
+            .iter()
+            .map(|sample| (sample.cycles, sample.cut))
+            .collect()
+    };
+    assert_eq!(
+        cuts("app::g_position"),
+        [(150, None), (300, Some(400)), (600, None), (900, Some(950))]
+    );
+    assert_eq!(cuts("app::g_speed"), [(1100, Some(1200))]);
+    assert_eq!(cuts("app::setpoint.x"), [(0, Some(0))]);
+    // Unknown in a gap and past the last anchor.
+    let position = values.named("app::g_position").unwrap();
+    assert!(values.held(position, 350).unwrap().holds_at(350));
+    assert!(!values.held(position, 450).unwrap().holds_at(450));
+    let speed = values.named("app::g_speed").unwrap();
+    assert!(values.held(speed, 1150).unwrap().holds_at(1150));
+    assert!(!values.held(speed, 1500).unwrap().holds_at(1500));
+}
+
+/// A refused SWO stream adds no curve; an image without event curves still
+/// has its watched variables.
+#[test]
+fn watched_variables_alone_are_values_unless_refused() {
+    let mut catalogue = catalogue();
+    let refused = Watched {
+        refused: Some("no anchor".to_owned()),
+        ..watched()
+    };
+    assert_eq!(Values::new(&catalogue, Some(&refused)).unwrap().curves.len(), 2);
+    catalogue.events.clear();
+    assert!(Values::new(&catalogue, Some(&refused)).is_none());
+    let values = Values::new(&catalogue, Some(&watched())).unwrap();
+    assert_eq!(values.samples.iter().map(Vec::len).collect::<Vec<_>>(), [4, 1]);
+}
+
 #[test]
 fn the_curves_chosen_restore_by_name_those_the_image_has() {
     let catalogue = catalogue();
-    let mut values = Values::new(&catalogue).unwrap();
+    let mut values = Values::new(&catalogue, None).unwrap();
     values.restore("app::setpoint.x\nold::curve.y\n");
     assert_eq!(values.saved(), "app::setpoint.x");
     values.restore("app::setpoint.f");

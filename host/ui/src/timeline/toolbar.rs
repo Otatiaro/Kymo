@@ -46,7 +46,7 @@ impl Timeline {
                 let title = format!("Values ({}/{})", values.chosen.len(), values.curves.len());
                 ui.menu_button(title, |ui| curves_choice(ui, values))
                     .response
-                    .on_hover_text("The numeric fields of the application's events to show as curves");
+                    .on_hover_text("The numeric fields of the application's events, and the variables the DWT watched, to show as curves");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 theme_menu(ui);

@@ -141,6 +141,7 @@ pub(in crate::timeline) fn timeline(cycles: &[Option<i64>]) -> Timeline {
         elements,
         end: None,
         cut: None,
+        watched: None,
         frequency: None,
         measured: None,
     };

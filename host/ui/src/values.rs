@@ -1,5 +1,6 @@
 //! The application's values on the timeline (ADR-096): a line per curve
-//! chosen, its samples as `kymo::values` reads them. A sample holds until the
+//! chosen, its samples as `kymo::values` reads them, the events' and the
+//! variables' the DWT watched (ADR-098). A sample holds until the
 //! next one, in steps; a loss cuts the step, and its value is unknown until
 //! the next sample; a NaN is a gap. They grow with the trace.
 //!
@@ -10,6 +11,7 @@
 use crate::timeline::View;
 use kymo::events::Catalogue;
 use kymo::model::Element;
+use kymo::swo::Watched;
 use kymo::values::{Curve, Number, curves, samples_of};
 use std::collections::BTreeSet;
 
@@ -49,16 +51,55 @@ pub struct Values {
 }
 
 impl Values {
-    /// None when the image declares no curve.
-    pub fn new(catalogue: &Catalogue) -> Option<Self> {
-        let curves = curves(catalogue);
-        (!curves.is_empty()).then(|| Self {
+    /// None when the image declares no curve and the DWT watched no
+    /// variable. A watched variable's samples are all in `watched`: a gap
+    /// cuts the step before it, and the last step ends with the anchors.
+    pub fn new(catalogue: &Catalogue, watched: Option<&Watched>) -> Option<Self> {
+        let watched = watched.filter(|watched| watched.refused.is_none());
+        let mut curves = curves(catalogue);
+        curves.extend(watched.iter().flat_map(|watched| watched.curves.iter().cloned()));
+        curves.sort();
+        curves.dedup();
+        let mut values = (!curves.is_empty()).then(|| Self {
             samples: vec![Vec::new(); curves.len()],
             curves,
             chosen: BTreeSet::new(),
             last: None,
             end: i64::MIN,
-        })
+        })?;
+        if let Some(watched) = watched {
+            values.watch(watched);
+        }
+        Some(values)
+    }
+
+    /// Takes in the samples of the variables `watched`.
+    fn watch(&mut self, watched: &Watched) {
+        for sampled in &watched.samples {
+            let curve = self.place(&sampled.curve).expect("a curve watched");
+            self.samples[curve].push(Sample {
+                cycles: sampled.at.cycles,
+                element: sampled.at.element,
+                value: sampled.value,
+                cut: None,
+            });
+        }
+        let last = watched.span.map(|(_, last)| last);
+        for curve in &watched.curves {
+            let samples = &mut self.samples[self.curves.binary_search(curve).expect("a curve watched")];
+            samples.sort_by_key(|sample| sample.cycles);
+            for n in 0..samples.len() {
+                let next = samples.get(n + 1).map(|sample| sample.cycles);
+                let at = samples[n].cycles;
+                let gap = watched.gaps.iter().map(|&(start, _)| start).find(|&start| start >= at);
+                samples[n].cut = match (gap, next) {
+                    (Some(start), Some(next)) if start < next => Some(start),
+                    (Some(start), None) => Some(start),
+                    (_, Some(_)) => None,
+                    (None, None) => last,
+                };
+            }
+        }
     }
 
     /// Takes in `elements` from `from` on. A loss cuts the step of each
@@ -83,6 +124,8 @@ impl Values {
                     let Some(last) = self.last else {
                         continue;
                     };
+                    // A watched variable's last step is cut already: at the
+                    // gap after it, or at the last anchor.
                     for sample in self.samples.iter_mut().filter_map(|samples| samples.last_mut()) {
                         sample.cut.get_or_insert(last.max(sample.cycles));
                     }

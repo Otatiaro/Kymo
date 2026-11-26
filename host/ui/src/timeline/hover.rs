@@ -408,8 +408,11 @@ impl Timeline {
             return card;
         }
         if !sample.holds_at(cycles) {
-            card.notes
-                .push("Unknown: a loss came after the last sample.".to_owned());
+            let note = match self.values().curves[curve].field {
+                Some(_) => "Unknown: a loss came after the last sample.",
+                None => "Unknown: a gap in SWO, or the last anchor, came after the last sample.",
+            };
+            card.notes.push(note.to_owned());
             return card;
         }
         let value = match sample.value.is_nan() {
