@@ -14,6 +14,7 @@ use crate::lines::Lines;
 use crate::symbols::Symbols;
 use crate::target::Result;
 use crate::text::{self, Text};
+use crate::values::Reading;
 use gimli::{AttributeValue, DebugInfoOffset, DwAte, EndianSlice, Operation, RunTimeEndian, UnitOffset};
 use object::{Object, ObjectSection, ObjectSymbol};
 use std::borrow::Cow;
@@ -273,7 +274,7 @@ pub fn parse(data: &[u8], image: &str) -> Result<Catalogue> {
     Ok(Catalogue {
         events,
         rings: debug.rings,
-        symbols: Symbols::read(&file, &debug.bases),
+        symbols: Symbols::read(&file, &debug.bases, debug.numbers),
         interrupts,
         lines: debug.lines,
         code: Code::read(&file),
@@ -348,6 +349,8 @@ struct DebugInfo {
     rings: Vec<Ring>,
     /// The base class subobjects of each static object, by address.
     bases: BTreeMap<u64, Vec<(u64, String)>>,
+    /// How each static variable of a numeric type reads, by address.
+    numbers: BTreeMap<u64, Reading>,
     /// The enumerators of each different `IRQn_Type`.
     irq_enumerations: Vec<Vec<(i64, String)>>,
     lines: Lines,
@@ -472,12 +475,20 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
     }
 
     let mut bases = BTreeMap::new();
+    let mut numbers = BTreeMap::new();
     let mut rings: Vec<Ring> = Vec::new();
     for (address, variable) in variables {
         let Some(ty) = variable_type(&units, variable)? else {
             continue;
         };
         let ty = strip(&units, ty)?;
+        let (unit, offset) = locate(&units, ty)?;
+        if unit.entry(offset)?.tag() == gimli::DW_TAG_base_type {
+            if let Some(reading) = Reading::of(&describe(&dwarf, unit, &names, offset, true)?) {
+                numbers.entry(address).or_insert(reading);
+            }
+            continue;
+        }
         let Some(name) = names.get(&ty) else {
             continue;
         };
@@ -498,6 +509,7 @@ fn debug_info(file: &object::File, wanted: Vec<&str>) -> Result<DebugInfo> {
         layouts,
         rings,
         bases,
+        numbers,
         irq_enumerations,
         lines: Lines::read(&dwarf, &units)?,
     })

@@ -7,6 +7,7 @@
 use crate::capture::{self, Record};
 use crate::decode::{self, Decoded};
 use crate::events::Catalogue;
+use crate::swo::{self, Watched};
 use crate::target::Result;
 use crate::time::Timeline;
 
@@ -33,6 +34,9 @@ pub struct Trace<'a> {
     pub frequency: Option<f64>,
     /// The frequency measured over the capture, and the seconds it spans.
     pub measured: Option<(f64, f64)>,
+    /// The variables the DWT watched and their samples; none without the
+    /// DWT's configuration in the capture.
+    pub watched: Option<Watched>,
 }
 
 pub enum Element<'a> {
@@ -60,8 +64,12 @@ impl<'a> Trace<'a> {
         let mut timeline = Timeline::new(clock.or(header.clock));
         let mut elements = Vec::new();
         let mut end = None;
+        let mut dwt = None;
+        let mut swo = Vec::new();
         for record in &records {
             match *record {
+                Record::Dwt(ref config) => dwt = Some(config),
+                Record::Swo(bytes) => swo.extend_from_slice(bytes),
                 Record::Pass { host_ns, write_index } => timeline.pass(host_ns, write_index),
                 Record::Event { index, slots } => {
                     let event = decode::event(catalogue, ring, index, slots)?
@@ -85,6 +93,7 @@ impl<'a> Trace<'a> {
                 *seconds = timeline.seconds(*cycles, frequency);
             }
         }
+        let watched = dwt.map(|dwt| swo::watched(catalogue, ring, dwt, &swo, &elements));
         Ok(Self {
             first: header.first,
             elements,
@@ -92,6 +101,7 @@ impl<'a> Trace<'a> {
             cut,
             frequency,
             measured: timeline.measured(),
+            watched,
         })
     }
 

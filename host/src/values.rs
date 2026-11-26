@@ -82,7 +82,7 @@ impl Reading {
         }
     }
 
-    fn size(self) -> usize {
+    pub fn size(self) -> usize {
         match self {
             Reading::Signed(size) | Reading::Unsigned(size) | Reading::Float(size) => size,
         }
@@ -106,17 +106,22 @@ impl Reading {
     }
 }
 
-/// A curve: a numeric field of an application event.
+/// A curve: a numeric field of an application event, or a variable the DWT
+/// watches (swo.rs).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Curve {
-    /// The event's qualified name.
+    /// The event's qualified name, or the variable's.
     pub subject: String,
-    pub field: String,
+    /// The event's field; none for a variable.
+    pub field: Option<String>,
 }
 
 impl fmt::Display for Curve {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "{}.{}", self.subject, self.field)
+        match &self.field {
+            Some(field) => write!(formatter, "{}.{field}", self.subject),
+            None => write!(formatter, "{}", self.subject),
+        }
     }
 }
 
@@ -136,7 +141,7 @@ fn fields(event: &Event) -> impl Iterator<Item = (Curve, usize, Reading)> + '_ {
             let offset = usize::try_from(field.offset).ok()?;
             let curve = Curve {
                 subject: event.name.clone(),
-                field: field.name.clone(),
+                field: Some(field.name.clone()),
             };
             Some((curve, offset, reading))
         })
@@ -189,18 +194,23 @@ pub fn samples_of<'a>(element: usize, item: &'a Element) -> impl Iterator<Item =
     })
 }
 
-/// The samples of every curve in `trace`.
+/// The samples of every curve in `trace`: the events', then the variables'
+/// the DWT watched.
 pub fn sample(catalogue: &Catalogue, trace: &Trace) -> Values {
-    let samples = trace
-        .elements
-        .iter()
-        .enumerate()
-        .flat_map(|(element, item)| samples_of(element, item))
-        .collect();
-    Values {
+    let mut values = Values {
         curves: curves(catalogue),
-        samples,
+        samples: trace
+            .elements
+            .iter()
+            .enumerate()
+            .flat_map(|(element, item)| samples_of(element, item))
+            .collect(),
+    };
+    if let Some(watched) = &trace.watched {
+        values.curves.extend(watched.curves.iter().cloned());
+        values.samples.extend(watched.samples.iter().cloned());
     }
+    values
 }
 
 #[cfg(test)]

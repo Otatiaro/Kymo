@@ -412,9 +412,10 @@ fn curve(subject: &str, field: &str, values: &[Number], suspect: usize) -> Sampl
     Sampled {
         curve: Curve {
             subject: subject.to_owned(),
-            field: field.to_owned(),
+            field: (!field.is_empty()).then(|| field.to_owned()),
         },
         count: values.len(),
+        excluded_loss: 0,
         excluded_suspect: suspect,
         nan: 0,
         spread: stats::spread(&points),
@@ -426,7 +427,7 @@ fn sampled(sampled: Vec<Sampled>, declared: &[(&str, &str)]) -> Report {
     let mut curves: Vec<Curve> = sampled.iter().map(|sampled| sampled.curve.clone()).collect();
     curves.extend(declared.iter().map(|&(subject, field)| Curve {
         subject: subject.to_owned(),
-        field: field.to_owned(),
+        field: (!field.is_empty()).then(|| field.to_owned()),
     }));
     Report {
         curves,
@@ -491,7 +492,35 @@ fn a_value_rule_bounds_a_curve_with_plain_numbers() {
     // A field that is no curve of the image is an error, not a verdict.
     let absent = r#"[{"subject":"app::setpoint","metric":"value","detail":"z","stat":"max","max":1}]"#;
     let error = judged(&report, absent, None).unwrap_err();
-    assert!(error.contains("not a numeric field"), "{error}");
+    assert!(error.contains("app::setpoint.z is not a curve"), "{error}");
+}
+
+#[test]
+fn a_value_rule_without_a_detail_bounds_a_watched_variable() {
+    let level = curve("app::level", "", &integers(&[-2, 9]), 0);
+    let field = curve("app::setpoint", "x", &integers(&[1]), 0);
+    let report = sampled(vec![level, field], &[]);
+    let json = stats::json(&report);
+    crate::stats::tests::check_schema(&json);
+    assert!(json.contains(r#""subject":"app::level","metric":"value","detail":null"#), "{json}");
+    let rules = r#"[
+        {"subject":"app::level","metric":"value","stat":"max","max":9},
+        {"subject":"app::level","metric":"value","stat":"min","min":0}
+    ]"#;
+    let outcomes: Vec<Outcome> = judged(&report, rules, None)
+        .unwrap()
+        .iter()
+        .map(|verdict| verdict.outcome)
+        .collect();
+    assert_eq!(outcomes, [Outcome::Pass, Outcome::Fail]);
+    // A rule's detail names a field: an event's curve, not a variable's.
+    let wrong = r#"[{"subject":"app::level","metric":"value","detail":"x","stat":"max","max":9}]"#;
+    let error = judged(&report, wrong, None).unwrap_err();
+    assert!(error.contains("app::level.x is not a curve"), "{error}");
+    // A field rule without its detail names no curve.
+    let bare = r#"[{"subject":"app::setpoint","metric":"value","stat":"max","max":1}]"#;
+    let error = judged(&report, bare, None).unwrap_err();
+    assert!(error.contains("app::setpoint is not a curve"), "{error}");
 }
 
 #[test]
@@ -519,7 +548,6 @@ fn a_suspect_sample_widens_a_value_rule_into_an_interval() {
 #[test]
 fn a_value_rule_written_wrong_is_refused() {
     for wrong in [
-        r#"{"rules":[{"subject":"e","metric":"value","stat":"max","max":1}]}"#,
         r#"{"rules":[{"kind":"task","subject":"e","metric":"value","detail":"x","stat":"max","max":1}]}"#,
         r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"jitter","max":1}]}"#,
         r#"{"rules":[{"subject":"e","metric":"value","detail":"x","stat":"share","max":1}]}"#,

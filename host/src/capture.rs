@@ -17,10 +17,16 @@
 //! 4 end   u32 index recording stopped at
 //! 5 suspect u32 write index of the pass before, u32 of the pass that found
 //!         them, u32 writers lapped meanwhile that no danger accounts for
+//! 6 dwt   u32 DWT_DEVARCH, u32 DWT_CTRL, u32 SWO baud rate, u8 comparator
+//!         count, then for each u32 DWT_COMPn, u32 DWT_MASKn, u32 DWT_FUNCTIONn
+//! 7 swo   u32 length and the bytes read from SWO
 //! ```
 //!
 //! A pass record comes before the events and losses that pass settled.
 //! Events keep their raw slots: decoding is the reader's, with the catalogue.
+//! A capture of variables watched by the DWT (swo.rs) holds one dwt record,
+//! read at the start, and swo records whose bytes, put end to end, are the
+//! stream as SWO carried it.
 //!
 //! A recording stopped short of its end record (killed, crashed, probe
 //! unplugged) leaves a capture without one, perhaps ending inside a record:
@@ -74,6 +80,26 @@ pub enum Record<'a> {
     Lost { from: u32, to: u32 },
     Suspect { from: u32, to: u32, writers: u32 },
     End { next: u32 },
+    Dwt(Dwt),
+    Swo(&'a [u8]),
+}
+
+/// The DWT's configuration, as the debug port reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dwt {
+    pub devarch: u32,
+    pub ctrl: u32,
+    /// The SWO baud rate the program set.
+    pub baud: u32,
+    pub comparators: Vec<Comparator>,
+}
+
+/// A DWT comparator's registers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Comparator {
+    pub comp: u32,
+    pub mask: u32,
+    pub function: u32,
 }
 
 pub struct Writer {
@@ -138,6 +164,25 @@ impl Writer {
             Record::End { next } => {
                 self.file.write_all(&[4])?;
                 self.file.write_all(&next.to_le_bytes())?;
+            }
+            Record::Dwt(ref dwt) => {
+                let count = u8::try_from(dwt.comparators.len()).map_err(|_| "more than 255 comparators")?;
+                self.file.write_all(&[6])?;
+                for word in [dwt.devarch, dwt.ctrl, dwt.baud] {
+                    self.file.write_all(&word.to_le_bytes())?;
+                }
+                self.file.write_all(&[count])?;
+                for comparator in &dwt.comparators {
+                    for word in [comparator.comp, comparator.mask, comparator.function] {
+                        self.file.write_all(&word.to_le_bytes())?;
+                    }
+                }
+            }
+            Record::Swo(bytes) => {
+                let length = u32::try_from(bytes.len()).map_err(|_| "SWO bytes of more than 4 GiB")?;
+                self.file.write_all(&[7])?;
+                self.file.write_all(&length.to_le_bytes())?;
+                self.file.write_all(bytes)?;
             }
         }
         Ok(())
@@ -277,7 +322,7 @@ pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
             });
         };
         let tag = tag[0];
-        if !(1..=5).contains(&tag) {
+        if !(1..=7).contains(&tag) {
             return Err(format!("unknown record tag {tag} in the capture").into());
         }
         let Some(record) = cursor.record(tag) else {
@@ -300,7 +345,7 @@ pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
                     cut: None,
                 });
             }
-            Record::Pass { .. } | Record::Suspect { .. } => {}
+            Record::Pass { .. } | Record::Suspect { .. } | Record::Dwt(_) | Record::Swo(_) => {}
         }
         records.push(record);
     }
@@ -353,11 +398,34 @@ impl<'a> Cursor<'a> {
                 to: self.u32()?,
             },
             4 => Record::End { next: self.u32()? },
-            _ => Record::Suspect {
+            5 => Record::Suspect {
                 from: self.u32()?,
                 to: self.u32()?,
                 writers: self.u32()?,
             },
+            6 => {
+                let (devarch, ctrl, baud) = (self.u32()?, self.u32()?, self.u32()?);
+                let count = self.take(1)?[0];
+                let comparators = (0..count)
+                    .map(|_| {
+                        Some(Comparator {
+                            comp: self.u32()?,
+                            mask: self.u32()?,
+                            function: self.u32()?,
+                        })
+                    })
+                    .collect::<Option<_>>()?;
+                Record::Dwt(Dwt {
+                    devarch,
+                    ctrl,
+                    baud,
+                    comparators,
+                })
+            }
+            _ => {
+                let length = self.u32()? as usize;
+                Record::Swo(self.take(length)?)
+            }
         })
     }
 }

@@ -10,8 +10,8 @@
 //! below. A rule holds when the whole interval keeps to it, fails when none
 //! of it does, and is unknown otherwise.
 //!
-//! A rule on a curve (kind and metric `value`, its field as the detail)
-//! bounds a statistic of its samples with plain numbers. Its stat is a count,
+//! A rule on a curve (kind and metric `value`, its field as the detail, none
+//! for a variable the DWT watches) bounds a statistic of its samples with plain numbers. Its stat is a count,
 //! a min, a percentile, a max or a mean; its regression a percentage. Numbers
 //! compare as 64-bit floating-point.
 
@@ -294,7 +294,8 @@ fn rule(written: Written) -> Result<Rule, String> {
     })
 }
 
-/// A rule on a curve: its field as the detail, plain numbers as bounds.
+/// A rule on a curve: its field as the detail, none for a variable the DWT
+/// watches; plain numbers as bounds.
 fn value_rule(
     kind: Option<String>,
     subject: String,
@@ -308,9 +309,6 @@ fn value_rule(
     if kind.as_deref().is_some_and(|kind| kind != values::KIND) {
         return Err(format!("{name}: the kind of a value is value"));
     }
-    let Some(detail) = detail else {
-        return Err(format!("{name}: give the field as the detail"));
-    };
     if matches!(stat, Stat::Jitter | Stat::Share) {
         return Err(format!("{name}: a value has no {}", stat.name()));
     }
@@ -333,7 +331,7 @@ fn value_rule(
             kind: Some(values::KIND.to_owned()),
             subject,
             metric: values::KIND.to_owned(),
-            detail: Some(detail),
+            detail,
             stat,
         },
         min,
@@ -680,7 +678,7 @@ fn judge_value(
     let name = rule.name();
     if !report.curves.contains(&curve) {
         return Err(format!(
-            "{name}: {curve} is not a numeric field of an application event"
+            "{name}: {curve} is not a curve: a numeric field of an application event, or a variable the DWT watches"
         ));
     }
     let Some(sampled) = report.values.iter().find(|sampled| sampled.curve == curve) else {
@@ -705,7 +703,7 @@ fn judge_value(
                 values::KIND,
                 curve.subject.as_str(),
                 values::KIND,
-                Some(curve.field.as_str()),
+                curve.field.as_deref(),
             );
             let value = match baseline_value(baseline, &name, key, stat) {
                 Ok(value) => value,
@@ -765,12 +763,10 @@ fn judge_rule(report: &Report, rule: &Rule, baseline: Option<&Baseline>) -> Resu
             stat,
         } => (kind, subject, metric, detail, *stat),
     };
-    if metric == values::KIND
-        && let Some(field) = detail
-    {
+    if metric == values::KIND {
         let curve = Curve {
             subject: subject.clone(),
-            field: field.clone(),
+            field: detail.clone(),
         };
         return judge_value(report, rule, (curve, stat), (min, max), baseline);
     }

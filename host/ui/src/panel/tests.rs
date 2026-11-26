@@ -52,6 +52,7 @@ fn trace(event: &Event) -> Trace<'_> {
         cut: None,
         frequency: None,
         measured: None,
+        watched: None,
     }
 }
 
