@@ -73,6 +73,14 @@ impl Spans {
         (view.column(self.from[n]), view.column(self.to[n]) + 1.0, self.which[n])
     }
 
+    /// The place of the span whose pixel columns in `view`, as `bands` draws
+    /// them, hold column `x`.
+    pub fn at_column(&self, view: &View, x: f32) -> Option<usize> {
+        let x = x.floor();
+        let n = self.to.partition_point(|&to| view.column(to) < x);
+        (n < self.from.len() && view.column(self.from[n]) <= x).then(|| self.which[n])
+    }
+
     /// How many spans `view` shows, as `bands` finds them.
     pub fn count(&self, view: &View) -> usize {
         let right = view.left + view.width as f32;

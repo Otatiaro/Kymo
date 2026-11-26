@@ -3,6 +3,7 @@
 //! mutex's holders and each of its waiters; and each task's time ready, with
 //! what woke it. They grow with the trace.
 
+use crate::band::Band;
 use crate::levels::Levels;
 use crate::names;
 use crate::palette::{Palette, Shade};
@@ -40,6 +41,11 @@ pub struct Meaning {
     /// tasks before it; a task's never changes.
     pub shades: Vec<Shade>,
     pub load: Load,
+    /// The CPU's line in bars: what holds the core.
+    pub band: Band,
+    /// The capture's first event and its last.
+    start: Option<Edge>,
+    end: Option<Edge>,
     /// The application's events by the context that emitted them, in the
     /// order the contexts first came: their cycles, and their elements.
     pub instants: Vec<(Context, Levels, Vec<usize>)>,
@@ -62,6 +68,9 @@ impl Meaning {
             names: Vec::new(),
             shades: Vec::new(),
             load: Load::default(),
+            band: Band::default(),
+            start: None,
+            end: None,
             instants: Vec::new(),
         }))
     }
@@ -113,6 +122,35 @@ impl Meaning {
             self.shades.push(shade);
         }
         self.load = Load::of(kernel);
+        let event = |(element, at): (usize, &Element)| match at {
+            Element::Event { cycles, .. } => Some(Edge {
+                element,
+                cycles: *cycles,
+                lost: false,
+            }),
+            _ => None,
+        };
+        if self.start.is_none() {
+            self.start = elements.iter().enumerate().skip(from).find_map(event);
+        }
+        let end = elements.iter().enumerate().skip(from).rev().find_map(event);
+        self.end = end.or(self.end);
+        // Whole again, as the load: the spans still open grow.
+        let open = kernel.open();
+        let closed = &kernel.closed;
+        let runs: Vec<_> = closed
+            .runs
+            .iter()
+            .map(|&run| (run, false))
+            .chain(open.runs.iter().map(|&run| (run, true)))
+            .collect();
+        let interrupts: Vec<_> = closed
+            .interrupts
+            .iter()
+            .map(|&interrupt| (interrupt, false))
+            .chain(open.interrupts.iter().map(|&interrupt| (interrupt, true)))
+            .collect();
+        self.band = Band::of(&runs, &interrupts, self.start.zip(self.end));
     }
 
     /// The colour of `task`'s runs, the idle task's grey for None.
