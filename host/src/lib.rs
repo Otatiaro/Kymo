@@ -14,6 +14,7 @@ pub mod format;
 mod freertos;
 pub mod interrupts;
 pub mod intervals;
+pub mod itm;
 pub mod lines;
 pub mod load;
 pub mod mcp;
@@ -25,6 +26,7 @@ pub mod record;
 #[cfg(any(test, feature = "served"))]
 pub mod served;
 pub mod stats;
+pub mod swo;
 pub mod symbols;
 pub mod target;
 pub mod text;

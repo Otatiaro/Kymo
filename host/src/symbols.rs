@@ -11,6 +11,7 @@
 //! is followed by the address: `name@0x20000100`.
 
 use crate::events::Pointee;
+use crate::values::Reading;
 use object::{Object, ObjectSymbol, SymbolKind};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -29,14 +30,24 @@ struct Symbol {
 pub struct Symbols {
     functions: Vec<Symbol>,
     objects: Vec<Symbol>,
+    /// How each static variable of a numeric type reads, by address.
+    numbers: BTreeMap<u64, Reading>,
 }
 
 impl Symbols {
     /// The functions and objects of `file`, demangled; `bases` gives the base
-    /// class subobjects of the objects, by address, as the DWARF describes them.
-    pub fn read(file: &object::File, bases: &BTreeMap<u64, Vec<(u64, String)>>) -> Self {
+    /// class subobjects of the objects, by address, as the DWARF describes
+    /// them, and `numbers` how its numeric variables read.
+    pub fn read(
+        file: &object::File,
+        bases: &BTreeMap<u64, Vec<(u64, String)>>,
+        numbers: BTreeMap<u64, Reading>,
+    ) -> Self {
         let thumb = matches!(file.architecture(), object::Architecture::Arm);
-        let mut symbols = Self::default();
+        let mut symbols = Self {
+            numbers,
+            ..Self::default()
+        };
         for symbol in file.symbols() {
             let (Ok(name), size) = (symbol.name(), symbol.size()) else {
                 continue;
@@ -77,8 +88,35 @@ impl Symbols {
                     bases: Vec::new(),
                 })
                 .collect(),
-            objects: Vec::new(),
+            ..Self::default()
         }
+    }
+
+    /// Symbols of `objects` alone, each its address, its size, its name and
+    /// how it reads.
+    #[cfg(test)]
+    pub(crate) fn of_numbers(objects: &[(u64, u64, &str, Reading)]) -> Self {
+        Self {
+            objects: objects
+                .iter()
+                .map(|&(address, size, name, _)| Symbol {
+                    address,
+                    size,
+                    name: name.to_owned(),
+                    bases: Vec::new(),
+                })
+                .collect(),
+            numbers: objects
+                .iter()
+                .map(|&(address, _, _, reading)| (address, reading))
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// How the numeric variable at `address` reads; none for another object.
+    pub fn number(&self, address: u64) -> Option<Reading> {
+        self.numbers.get(&address).copied()
     }
 
     /// The address of the function that holds `address`, a Thumb address or
@@ -170,6 +208,7 @@ mod tests {
                 symbol(0x2110, 8, "lock", &[]),
                 symbol(0x2200, 8, "after_gap", &[]),
             ],
+            numbers: BTreeMap::new(),
         }
     }
 
@@ -208,6 +247,7 @@ mod tests {
         let symbols = Symbols {
             functions: Vec::new(),
             objects: list,
+            numbers: BTreeMap::new(),
         };
         assert_eq!(
             symbols.name(&Pointee::Other, 0x200a).as_deref(),

@@ -94,6 +94,7 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, u32)]) -> Tra
         cut: None,
         frequency: None,
         measured: None,
+        watched: None,
     }
 }
 

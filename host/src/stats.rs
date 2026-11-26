@@ -162,6 +162,8 @@ pub struct Spread {
 pub struct Sampled {
     pub curve: Curve,
     pub count: usize,
+    /// A watched variable's samples dropped in a gap of the SWO stream.
+    pub excluded_loss: usize,
     /// The samples an overrun write may have made.
     pub excluded_suspect: usize,
     pub nan: usize,
@@ -278,29 +280,45 @@ pub fn sampled(trace: &Trace, values: &Values, range: Range) -> Vec<Sampled> {
     let high = range.to.unwrap_or(i64::MAX);
     let mut curves: Vec<(Sampled, Vec<Point<Number>>)> = Vec::new();
     let mut by_curve: HashMap<&Curve, usize> = HashMap::new();
-    for sample in &values.samples {
-        if sample.at.cycles < low || sample.at.cycles >= high {
-            continue;
-        }
-        let curve = *by_curve.entry(&sample.curve).or_insert_with(|| {
+    let mut of = |curves: &mut Vec<(Sampled, Vec<Point<Number>>)>, curve| {
+        *by_curve.entry(curve).or_insert_with(|| {
             let empty = Sampled {
-                curve: sample.curve.clone(),
+                curve: curve.clone(),
                 count: 0,
+                excluded_loss: 0,
                 excluded_suspect: 0,
                 nan: 0,
                 spread: None,
             };
             curves.push((empty, Vec::new()));
             curves.len() - 1
-        });
+        })
+    };
+    let dropped = trace.watched.iter().flat_map(|watched| &watched.dropped);
+    for (curve, cycles) in dropped {
+        if *cycles >= low && *cycles < high {
+            let curve = of(&mut curves, curve);
+            curves[curve].0.excluded_loss += 1;
+        }
+    }
+    for sample in &values.samples {
+        if sample.at.cycles < low || sample.at.cycles >= high {
+            continue;
+        }
+        let curve = of(&mut curves, &sample.curve);
         let (counts, points) = &mut curves[curve];
-        if places.covers_suspect(sample.at, sample.at) {
+        let watched = sample.curve.field.is_none();
+        if !watched && places.covers_suspect(sample.at, sample.at) {
             counts.excluded_suspect += 1;
         } else if sample.value.is_nan() {
             counts.nan += 1;
         } else {
             counts.count += 1;
-            points.push(places.point(sample.value, sample.at));
+            let mut point = places.point(sample.value, sample.at);
+            if watched {
+                point.seconds = places.seconds(sample.at.cycles);
+            }
+            points.push(point);
         }
     }
     curves.sort_by(|a, b| a.0.curve.cmp(&b.0.curve));
@@ -325,6 +343,10 @@ struct Places {
     losses: Vec<usize>,
     /// The suspects' indexes `from..to`.
     suspects: Vec<(u32, u32)>,
+    /// The cycles of the first event, where the seconds start, and their
+    /// frequency.
+    origin: i64,
+    frequency: Option<f64>,
 }
 
 impl Places {
@@ -340,6 +362,8 @@ impl Places {
             seconds: Vec::new(),
             losses: Vec::new(),
             suspects: Vec::new(),
+            origin: cycles_before,
+            frequency: trace.frequency,
         };
         for (n, element) in trace.elements.iter().enumerate() {
             let mut seconds = None;
@@ -370,6 +394,11 @@ impl Places {
     fn covers_suspect(&self, from: Edge, to: Edge) -> bool {
         let (low, high) = (self.index[from.element], self.index[to.element]);
         self.suspects.iter().any(|&(from, to)| from <= high && to > low)
+    }
+
+    /// The seconds from the first event to `cycles`.
+    fn seconds(&self, cycles: i64) -> Option<f64> {
+        self.frequency.map(|hz| (cycles - self.origin) as f64 / hz)
     }
 
     fn point<V>(&self, value: V, edge: Edge) -> Point<V> {
@@ -623,13 +652,11 @@ pub fn text(report: &Report) -> Vec<String> {
     }
     for sampled in &report.values {
         let curve = &sampled.curve;
-        let mut line = format!(
-            "{kind} {} {kind} {}: {}",
-            curve.subject,
-            curve.field,
-            sampled.count,
-            kind = values::KIND
-        );
+        let mut line = format!("{kind} {} {kind}", curve.subject, kind = values::KIND);
+        if let Some(field) = &curve.field {
+            line += &format!(" {field}");
+        }
+        line += &format!(": {}", sampled.count);
         if let Some(spread) = &sampled.spread {
             line += &format!(
                 ", min {} at {}, p50 {}, p90 {}, p99 {}, max {} at {}, mean {}",
@@ -646,8 +673,11 @@ pub fn text(report: &Report) -> Vec<String> {
         if sampled.nan > 0 {
             line += &format!(", {} NaN", sampled.nan);
         }
-        if sampled.excluded_suspect > 0 {
-            line += &format!(" (excluded: {} suspect)", sampled.excluded_suspect);
+        if sampled.excluded_loss + sampled.excluded_suspect > 0 {
+            line += &format!(
+                " (excluded: {} loss, {} suspect)",
+                sampled.excluded_loss, sampled.excluded_suspect
+            );
         }
         lines.push(line);
     }
@@ -702,10 +732,10 @@ fn curve(sampled: &Sampled) -> Value {
         "metric": values::KIND,
         "detail": sampled.curve.field,
         "count": sampled.count,
-        "excluded_loss": 0,
+        "excluded_loss": sampled.excluded_loss,
         "excluded_suspect": sampled.excluded_suspect,
         "cut": 0,
-        "lower_bound": sampled.excluded_suspect > 0,
+        "lower_bound": sampled.excluded_loss + sampled.excluded_suspect > 0,
         "jitter": null,
         "share": null,
         "nan": sampled.nan,

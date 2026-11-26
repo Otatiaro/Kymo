@@ -8,6 +8,8 @@ fn describe(record: &Record) -> String {
         Record::Lost { from, to } => format!("lost {from} {to}"),
         Record::Suspect { from, to, writers } => format!("suspect {from} {to} {writers}"),
         Record::End { next } => format!("end {next}"),
+        Record::Dwt(ref dwt) => format!("dwt {dwt:?}"),
+        Record::Swo(bytes) => format!("swo {bytes:?}"),
     }
 }
 
@@ -22,6 +24,23 @@ fn capture(name: &str, elf: Elf) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) 
         elf,
     };
     let slots: Vec<u8> = (0..48).collect();
+    let dwt = Dwt {
+        devarch: 0x4770_1a02,
+        ctrl: 0x4000_0000,
+        baud: 2_000_000,
+        comparators: vec![
+            Comparator {
+                comp: 0x2000_0104,
+                mask: 0,
+                function: 0x5800_082d,
+            },
+            Comparator {
+                comp: 0x2000_0000,
+                mask: 1,
+                function: 2,
+            },
+        ],
+    };
     let records = [
         (
             Record::Pass {
@@ -30,6 +49,9 @@ fn capture(name: &str, elf: Elf) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) 
             },
             5,
         ),
+        (Record::Dwt(dwt), 5),
+        (Record::Swo(&slots[..3]), 5),
+        (Record::Swo(&[]), 5),
         (
             Record::Event {
                 index: 7,

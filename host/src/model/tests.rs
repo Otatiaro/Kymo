@@ -61,6 +61,7 @@ fn the_slots_taken_and_lost_cover_the_recording() {
         cut: None,
         frequency: None,
         measured: None,
+        watched: None,
     };
     assert_eq!(trace.slots(), (3, 3));
     let (taken, lost) = trace.slots();
