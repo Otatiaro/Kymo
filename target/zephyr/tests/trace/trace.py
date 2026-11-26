@@ -29,11 +29,23 @@ Then checks that:
   released once;
 - every family on by default was recorded;
 - the scenarios of application.cpp, in their order (SCENARIOS).
+
+Then reads the capture with `kymo decode --meaning`, and checks that:
+
+- nothing contradicts the kernel's order;
+- the idle thread runs, as the idle task, never as a task;
+- every wake has a reason, the wait the thread leaves, and a cause;
+- control, main, waits for the contested mutex;
+- the get that hands its slot to the writer does not block control: its one
+  wake by a get is the timed one of the waits scenario;
+- the wakes of the scenarios, in their order (WAKES), with their reasons and
+  causes.
 """
 
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -139,11 +151,37 @@ SCENARIOS = [
      + [("pipe_write_blocking", {"pipe": "application::pipe"})] + TICK),
     ("handoff", [ready(WRITER), ("thread_sleep_ticks_enter", {"ticks": "1"}), switch(WRITER),
                  ("msgq_put_blocking", {"msgq": "application::handoff_msgq"})] + TICK
-     + [("msgq_get_blocking", {"msgq": "application::handoff_msgq"}), ready(WRITER)]),
+     + [("msgq_get_blocking", {"msgq": "application::handoff_msgq"}), ready(WRITER),
+        ("thread_sleep_ticks_enter", {"ticks": "1"})] + TICK),
     ("creation", [("thread_create", {"thread": EPHEMERAL, "priority": "4", "name": '""'}),
                   ("thread_name_set", {"thread": EPHEMERAL, "name": '"ephemeral"'}),
                   ("thread_sched_abort", {"thread": EPHEMERAL})]),
 ]
+
+# The wakes kymo decode --meaning prints for each scenario, in order: (thread,
+# reason, cause), None for any cause. A cause ending in a space is a prefix:
+# a handler's name is followed by its interrupt's. Other wakes may come
+# between them.
+DEVICE = f"handler:{DEVICE_HANDLER} "
+WAITS = ["sem_take", "msgq_get", "msgq_put", "event_wait", "pipe_read", "pipe_write"]
+WAKES = [
+    ("start", [("main", "created", None)]
+     + [(thread, "created", "task:main") for thread in ("low", "ping", "pong", "receiver", "writer")]),
+    ("switches", [("ping", "sem_take", "task:main")]
+     + [("pong", "sem_take", "task:ping"), ("ping", "sem_take", "task:pong")] * ROUNDS),
+    ("handler", [("receiver", "msgq_get", DEVICE)]),
+    # low, below control, has not run since its creation: it takes its
+    # semaphore without blocking.
+    ("mutexes", [("main", "sem_take", "task:low"), ("main", "mutex", "task:low")]),
+    ("sleeps", [("main", "sleep", "elapsed")]),
+    ("ready priority", [("low", "sem_take", "task:main"), ("main", "sleep", "elapsed")]),
+    ("waits", [("main", wait, "elapsed") for wait in WAITS]),
+    # The get that hands its slot to the writer does not block main: the
+    # sleep that follows is what main waits for.
+    ("handoff", [("writer", "sem_take", "task:main"), ("main", "sleep", "elapsed"),
+                 ("writer", "msgq_put", "task:main"), ("main", "sleep", "elapsed")]),
+]
+WAKE = re.compile(r"wake at=\d+ task=(\S+) reason=(\S+) cause=(.+)")
 
 
 def parse(output: str) -> tuple[list, list[str]]:
@@ -273,6 +311,46 @@ def check(output: str, core_clock: str = "25000000") -> list[str]:
     return errors
 
 
+def check_meaning(output: str) -> list[str]:
+    """kymo decode --meaning's lines against what the scenarios make."""
+    errors = []
+    lines = output.splitlines()
+    errors += [f"{line}: against the kernel's order" for line in lines if line.startswith("contradiction")]
+    errors += [f"{line}: the idle thread as a task" for line in lines
+               if not line.startswith("run ") and "task=idle" in line.split()]
+    if not any(line.startswith("run ") and "task=idle" in line.split() for line in lines):
+        errors.append("the idle thread never runs")
+    wakes = []
+    for line in lines:
+        if line.startswith("wake "):
+            match = WAKE.fullmatch(line)
+            if not match:
+                errors.append(f"{line}: not a wake line")
+                continue
+            if "unknown" in (match[2], match[3]) and match[2] != "created":
+                errors.append(f"{line}: a wake without its reason or cause, no event lost")
+            wakes.append((line, match[1], match[2], match[3]))
+    if not any(line.startswith("wait ") and "task=main" in line and "contested" in line for line in lines):
+        errors.append("main never waits for the contested mutex")
+    # The timed get of the waits scenario only; not the handoff's.
+    if sum(wake[1:3] == ("main", "msgq_get") for wake in wakes) != 1:
+        errors.append("main woken from the get that hands its slot to the writer")
+
+    at = 0
+    for scenario, expected in WAKES:
+        for thread, reason, cause in expected:
+            while at < len(wakes) and not (
+                    wakes[at][1:3] == (thread, reason)
+                    and (cause is None or wakes[at][3] == cause
+                         or (cause.endswith(" ") and wakes[at][3].startswith(cause)))):
+                at += 1
+            if at == len(wakes):
+                errors.append(f"scenario {scenario}: no wake of {thread} by {reason}, cause {cause}, where expected")
+                return errors
+            at += 1
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", required=True)
@@ -284,13 +362,21 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         capture = os.path.join(directory, "application.kcap")
         recording = record_to_exit(args.qemu, args.machine, args.image, args.host, capture, END)
+        decoded = None
+        if recording.returncode == 0 and recording.exit_status is not None:
+            decoded = subprocess.run([args.host, "decode", capture, "--meaning"],
+                                     capture_output=True, text=True, check=False)
     print(recording.stderr.strip())
-    if recording.returncode != 0 or recording.exit_status is None:
+    if decoded is None:
         print(recording.stdout[-2000:])
         print("kymo record failed" if recording.returncode != 0 else f"stopped short of {END}")
         return 1
     errors = [] if recording.exit_status == 1 else ["the application failed"]
     errors += check(recording.stdout)
+    if decoded.returncode != 0:
+        errors.append(f"kymo decode --meaning failed: {decoded.stderr.strip()}")
+    else:
+        errors += check_meaning(decoded.stdout)
     for error in errors[:20]:
         print(error)
     print("RESULT:", "FAIL" if errors else "PASS")

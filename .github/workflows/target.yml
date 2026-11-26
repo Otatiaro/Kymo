@@ -459,7 +459,7 @@ jobs:
 
   # The Zephyr adapter: the test application on the Cortex-M3 (mps2/an385) and
   # the Cortex-M33 (mps2/an521/cpu0), built with GCC 16 and with the Zephyr
-  # SDK's compiler, recorded by the host with its trace checked
+  # SDK's compiler, recorded by the host with its trace and its meaning checked
   # (target/zephyr/tests); clang-tidy over the adapter on the GCC 16 builds,
   # which generate the kernel's headers it reads.
   zephyr:
@@ -540,7 +540,7 @@ jobs:
           workspaces: host
           shared-key: host-release
 
-      # kymo record, for the application's trace.
+      # kymo record and kymo decode --meaning, for the application's trace.
       - name: Build the host
         run: |
           sudo apt-get install -y libudev-dev

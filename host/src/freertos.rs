@@ -40,6 +40,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
         let blocked = |wait| Hook::TaskBlocked {
             task: None,
             wait: Some(wait),
+            timeout: None,
         };
         let hook = match hook {
             "starting" => Hook::Starting { idle: field("idle")? },
@@ -102,6 +103,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
         elapsed: &[],
         tick: Some(SYSTICK),
         requeue: true,
+        confirm_blocks: false,
         precedence: Precedence::HigherIsHigher,
     })
 }

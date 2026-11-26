@@ -46,6 +46,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
             "task_sleep" | "task_wait" | "task_wait_timeout" => Hook::TaskBlocked {
                 task: Some(field("task")?),
                 wait: None,
+                timeout: None,
             },
             "enter_systick" => Hook::KernelEnter { handler: "systick" },
             "exit_systick" => Hook::KernelExit { handler: "systick" },
@@ -83,6 +84,7 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
         elapsed: &ELAPSED,
         tick: None,
         requeue: false,
+        confirm_blocks: false,
         precedence: Precedence::LowerIsHigher,
     })
 }

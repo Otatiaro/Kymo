@@ -425,7 +425,7 @@ fn a_waiting_task_whose_priority_changes_is_woken_after() {
 
 /// Each task's priority over the trace, as `(cycles, priority)` at each of
 /// `cycles`.
-fn priorities(steps: &[(&str, &[u32])], task: usize, cycles: &[i64]) -> Vec<Option<u8>> {
+fn priorities(steps: &[(&str, &[u32])], task: usize, cycles: &[i64]) -> Vec<Option<i32>> {
     let catalogue = catalogue();
     let trace = trace(&catalogue, steps);
     let mut meaning = Meaning::new(&catalogue, 0).unwrap();
@@ -593,5 +593,5 @@ fn an_image_with_both_adapters_is_refused() {
     opsy.name = "kymo::opsy::task_started".to_owned();
     catalogue.events.insert(100, opsy);
     let error = Meaning::new(&catalogue, 0).err().expect("refused").to_string();
-    assert_eq!(error, "the image has both OpSy's and FreeRTOS's adapter events");
+    assert_eq!(error, "the image has the adapter events of OpSy's and FreeRTOS's");
 }

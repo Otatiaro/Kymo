@@ -23,7 +23,8 @@ recording into a timeline, statistics and rule checks on the host.
   `struct` on the target; the host reads its layout from DWARF and names
   tasks, objects and interrupts from symbols. Events carry addresses, not
   names, except where the kernel only knows a name at run time (a FreeRTOS
-  task's, in `task_create`).
+  task's, in `task_create`; a Zephyr thread's, in `thread_create` and
+  `thread_name_set`).
 - **Lock-free on the target.** Overwrite rings of fixed-size slots, one per
   channel the application routes event families to, reserved with
   `LDREX`/`STREX`; interrupts are never masked; losses are counted exactly,

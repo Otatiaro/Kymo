@@ -19,7 +19,7 @@
  * 6. control blocks for a tick on each kind of wait: semaphore, message queue
  *    get and put, event, pipe read and write;
  * 7. control gets from a full message queue a writer blocks on: the get hands
- *    the slot to the writer, and does not block;
+ *    the slot to the writer, and does not block; then control sleeps a tick;
  * 8. a thread created, named and aborted before it runs.
  */
 #include "qemu.hpp"
@@ -260,6 +260,7 @@ bool handoff()
 	k_sleep(K_TICKS(1));   // the writer runs, and blocks on the full queue
 	pass = k_msgq_get(&handoff_msgq, &value, K_NO_WAIT) == 0 && pass;   // hands the slot to the writer
 	pass = k_msgq_get(&handoff_msgq, &value, K_NO_WAIT) == 0 && pass;   // the writer's message
+	k_sleep(K_TICKS(1));   // control leaves the core: what it waited for is the sleep
 	return pass;
 }
 
