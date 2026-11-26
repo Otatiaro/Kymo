@@ -23,6 +23,10 @@ impl Timeline {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let area = Rect::from_min_max(egui::pos2(rect.left() + LABELS, rect.top() + RULER), rect.max);
         let width = f64::from(area.width().max(1.0));
+        let dt = f64::from(ui.input(|input| input.unstable_dt));
+        if self.glide(dt, width, response.is_pointer_button_down_on()) {
+            ui.ctx().request_repaint();
+        }
         if response.double_clicked() {
             self.whole();
         }
@@ -46,9 +50,7 @@ impl Timeline {
                 _ => self.start -= f64::from(response.drag_delta().x) * self.span / width,
             }
         }
-        if response.drag_stopped() {
-            self.anchor = None;
-        }
+        let let_go = response.drag_stopped() && self.anchor.take().is_none();
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.selection = None;
             self.picked = None;
@@ -56,13 +58,22 @@ impl Timeline {
         if response.hovered() {
             let (scroll, zoom) = ui.input(|input| (input.smooth_scroll_delta, input.zoom_delta()));
             self.moving |= scroll != egui::Vec2::ZERO || zoom != 1.0;
-            if let Some(pointer) = response.hover_pos() {
+            if (scroll.y != 0.0 || zoom != 1.0)
+                && let Some(pointer) = response.hover_pos()
+            {
                 let at = (f64::from(pointer.x - area.left()) / width).clamp(0.0, 1.0);
                 self.zoom(at, (-f64::from(scroll.y) * 0.002).exp() / f64::from(zoom));
             }
             self.start -= f64::from(scroll.x) * self.span / width;
         }
         self.clamp();
+        // Let go during a scroll, the view glides on, from the view as this
+        // frame leaves it.
+        if let_go {
+            self.release(f64::from(ui.input(|input| input.pointer.velocity().x)));
+            ui.ctx().request_repaint();
+        }
+        self.moving |= self.glide.is_some();
         let (lines, names) = self.layout();
         let tops = rows::tops(&lines, area.height());
         let line_at = |y: f32| rows::at(&tops, y - area.top());
@@ -581,6 +592,7 @@ impl Timeline {
             }
         }
         if !response.dragged()
+            && self.glide.is_none()
             && let Some(pointer) = response.hover_pos()
             && let Some((hovered, arrow)) = self.hovered(&view, area, pointer, &lines, &open, &drawn_rows)
         {
