@@ -1,0 +1,26 @@
+# The Zephyr adapter: the kernel's trace points record Kymo events in the
+# application's ring, which the probe drains.
+
+config KYMO
+	bool "Kymo tracing"
+	depends on CPU_CORTEX_M_HAS_VTOR
+	select TRACING
+	select TRACING_ISR
+	select THREAD_NAME
+	select ARM_ON_ENTER_CPU_IDLE_HOOK
+	select CPP
+	select REQUIRES_FULL_LIBCPP
+	help
+	  Records the kernel's scheduling, wake causes, mutexes and interrupts
+	  as Kymo events (include/kymo/zephyr/events.hpp). The application
+	  gives the adapter's library, kymo_zephyr, its tracer in a header
+	  named kymo_zephyr_trace.hpp, on the include path it adds:
+
+	    target_include_directories(kymo_zephyr PRIVATE <directory>)
+
+	  The idle thread does not sleep while tracing: a sleeping core makes
+	  some parts read the whole system bus, the ring included, as zeros to
+	  the probe. Needs C++17 or later.
+
+config TRACING_FORMAT_HEADER
+	default "kymo/zephyr/trace.h" if KYMO

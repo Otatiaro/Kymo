@@ -8,7 +8,9 @@ Each source file is checked once per set of preprocessor definitions it is
 built with; the CPU and the optimisation level do not change what clang-tidy
 sees. Clang does not find the headers of a GCC cross toolchain by itself, so
 each compiler is asked for its include directories, which are passed to
-clang-tidy instead of clang's own.
+clang-tidy instead of the system ones. GCC's own headers (lib/gcc/...: the
+intrinsics of <arm_acle.h>, <stddef.h>) are left to clang's, which declare
+what clang knows.
 
 The checks and the files they cover are those of the .clang-tidy files. The
 exit status is 1 when clang-tidy reports anything.
@@ -41,7 +43,7 @@ def kept(args):
         if pending:
             out.append(arg)
             pending = False
-        elif arg in ("-I", "-isystem", "-D", "-U"):
+        elif arg in ("-I", "-isystem", "-D", "-U", "-imacros", "-include"):
             out.append(arg)
             pending = True
         elif arg.startswith(KEPT):
@@ -50,14 +52,33 @@ def kept(args):
 
 
 def include_directories(compiler, options):
-    """The system include directories @p compiler searches with @p options."""
+    """The system include directories @p compiler searches with @p options,
+    less the compiler's own (lib/gcc/<target>/<version>/include*)."""
     flags = [o for o in options if o.startswith(("-std=", "-mcpu=", "-mthumb", "-mfloat-abi=", "-mfpu="))]
     result = subprocess.run([compiler.strip('"'), *flags, "-xc++", "-E", "-v", "-"],
                             input="", capture_output=True, text=True, check=True)
     lines = result.stderr.splitlines()
     start = lines.index("#include <...> search starts here:") + 1
     end = lines.index("End of search list.")
-    return [str(Path(line.strip()).resolve()) for line in lines[start:end]]
+    directories = [Path(line.strip()).resolve() for line in lines[start:end]]
+    return [str(d) for d in directories
+            if not (len(d.parts) >= 4 and d.parts[-4] == "gcc" and d.name.startswith("include"))]
+
+
+def float_abi(compiler, options):
+    """The float ABI @p compiler takes with @p options, as an option: clang's
+    default for a CPU with an FPU differs from GCC's when the build leaves it
+    out."""
+    if any(o.startswith("-mfloat-abi=") for o in options):
+        return []
+    flags = [o for o in options if o.startswith(("-mcpu=", "-mthumb", "-mfpu="))]
+    result = subprocess.run([compiler.strip('"'), *flags, "-Q", "--help=target"],
+                            capture_output=True, text=True, check=True)
+    for line in result.stdout.splitlines():
+        words = line.split()
+        if len(words) == 2 and words[0] == "-mfloat-abi=":
+            return [f"-mfloat-abi={words[1]}"]
+    return []
 
 
 def main():
@@ -88,7 +109,7 @@ def main():
         key = (args[0], tuple(f for f in flags if f.startswith(("-std=", "-mcpu="))))
         if key not in directories:
             directories[key] = include_directories(args[0], flags)
-        units.append((source, flags, directories[key]))
+        units.append((source, flags + float_abi(args[0], flags), directories[key]))
 
     # A header is checked with the configuration of the file it is checked
     # from, and misc-include-cleaner looks at that file alone: through a test,
@@ -97,6 +118,7 @@ def main():
     if options.headers:
         first = arguments(next(e for e in entries if Path(e["file"]).suffix in (".cpp", ".cc", ".cxx")))
         flags = kept(first)
+        flags += float_abi(first[0], flags)
         key = (first[0], tuple(f for f in flags if f.startswith(("-std=", "-mcpu="))))
         if key not in directories:
             directories[key] = include_directories(first[0], flags)
@@ -108,7 +130,7 @@ def main():
 
     def check(unit):
         source, flags, includes = unit
-        extra = ["--target=arm-none-eabi", "-nostdinc", *flags]
+        extra = ["--target=arm-none-eabi", "-nostdlibinc", *flags]
         for directory in includes:
             extra += ["-isystem", directory]
         command = [options.clang_tidy, "--quiet", str(source), "--"] + extra

@@ -1,0 +1,16 @@
+---
+# The checks of target/, but for Zephyr's interface, which is C macros:
+#
+# - cppcoreguidelines-macro-usage allows the trace hooks the tracing format
+#   header defines (trace.h).
+# - misc-include-cleaner ignores Zephyr's inner headers, its generated ones
+#   (autoconf.h, the system calls) and CMSIS's: <zephyr/kernel.h> is the
+#   kernel's interface, and <cmsis_core.h> the core's.
+# - misc-header-include-cycle ignores <zephyr/kernel.h>, which includes
+#   <zephyr/tracing/tracing.h>, which includes it back.
+InheritParentConfig: true
+CheckOptions:
+  cppcoreguidelines-macro-usage.AllowedRegexp: '^sys_port_trace_[a-z_]+$'
+  misc-include-cleaner.IgnoreHeaders: 'zephyr[/\\].*;syscalls[/\\].*;autoconf\.h;cmsis_.*\.h;core_cm[0-9a-z]*\.h'
+  misc-header-include-cycle.IgnoredFilesList: 'kernel\.h'
+...

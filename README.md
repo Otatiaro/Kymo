@@ -7,7 +7,7 @@ Kymo records what an RTOS does (which task runs and why it woke up,
 interrupts, mutexes) with as little intrusion as possible, and turns the
 recording into a timeline, statistics and rule checks on the host.
 
-> **Status: early work.** The target library, the OpSy and FreeRTOS adapters,
+> **Status: early work.** The target library, the OpSy, FreeRTOS and Zephyr adapters,
 > recording through a probe, decoding, statistics, rule checks and the timeline
 > work; formats still change without notice.
 
@@ -129,8 +129,9 @@ program does not use it.
 The program enables the DWT cycle counter, which timestamps the events. An
 RTOS adapter emits the kernel's events through the same tracer:
 `target/opsy/include/kymo/opsy/hooks.hpp` for OpSy,
-`target/freertos/include/kymo/freertos/trace.h` for FreeRTOS; each header
-says how to install it.
+`target/freertos/include/kymo/freertos/trace.h` for FreeRTOS,
+`target/zephyr/include/kymo/zephyr/trace.h` for Zephyr (a module,
+`target/zephyr`); each header says how to install it.
 
 With an RTOS adapter, `kymo-ui` shows rows for the kernel's tasks, handlers
 and mutexes in place of a row per event type. An application event is then a
@@ -156,6 +157,8 @@ FreeRTOS has no fault hook: the application's fault handler calls
 entry stub). The bounds of a task's stack are the kernel's, unknown there: on
 the process stack the 64 words are read whatever they are, so every task stack
 must start at least 256 bytes before the end of its readable memory.
+
+The Zephyr adapter records no fault yet.
 
 On the host, build with `cargo build --release --manifest-path host/Cargo.toml`
 (add `-p kymo-ui` for the timeline), then:
@@ -245,7 +248,7 @@ more with SWO.
 
 | Path | Content |
 |---|---|
-| `target/` | the target side, C++17: core and one adapter per RTOS ([OpSy](https://github.com/Otatiaro/OpSy), [FreeRTOS](https://github.com/FreeRTOS/FreeRTOS-Kernel)), with their tests under QEMU |
+| `target/` | the target side, C++17: core and one adapter per RTOS ([OpSy](https://github.com/Otatiaro/OpSy), [FreeRTOS](https://github.com/FreeRTOS/FreeRTOS-Kernel), [Zephyr](https://github.com/zephyrproject-rtos/zephyr)), with their tests under QEMU |
 | `host/` | the host side, Rust: acquisition (probe-rs, J-Link and ST-Link libraries, QEMU), model, the `kymo` CLI |
 | `host/ui/` | `kymo-ui`, the timeline of a capture (egui on wgpu), apart so the CLI pulls no graphics |
 
