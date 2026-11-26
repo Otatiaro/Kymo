@@ -44,7 +44,7 @@ FUNCTION = re.compile(r"^([0-9a-f]+) ([0-9a-f]+) [Tt] (cost_\w+|_Z9test_mainv)$"
 CALLER = "_Z9test_mainv"
 CASES = ["cost_slots_1", "cost_slots_2", "cost_slots_3", "cost_slots_4", "cost_disabled",
          "cost_text", "cost_empty", "cost_begin", "cost_end",
-         "cost_words_3", "cost_keyed_begin", "cost_words_1", "cost_keyed_end"]
+         "cost_words_3", "cost_keyed_begin", "cost_words_1", "cost_keyed_end", "cost_reference"]
 # The application's events and the plain emit of the same payload: each pair
 # costs the same, in instructions and in flash (ADR-088).
 SAME = [("cost_text", "cost_slots_1"), ("cost_begin", "cost_slots_1"), ("cost_end", "cost_empty"),

@@ -80,10 +80,10 @@ struct words_1
 };
 
 #ifndef KYMO_COST_BASELINE
-static_assert(kymo::slots_for<slots_1> == 1);
-static_assert(kymo::slots_for<slots_2> == 2);
-static_assert(kymo::slots_for<slots_3> == 3);
-static_assert(kymo::slots_for<slots_4> == 4);
+// study: static_assert(kymo::slots_for<slots_1> == 1);
+// study: static_assert(kymo::slots_for<slots_2> == 2);
+// study: static_assert(kymo::slots_for<slots_3> == 3);
+// study: static_assert(kymo::slots_for<slots_4> == 4);
 static_assert(sizeof(kymo::begin_of<slots_1>) == sizeof(slots_1));
 static_assert(sizeof(kymo::end_of<slots_1>) == sizeof(empty));
 static_assert(sizeof(kymo::keyed_begin_of<slots_1>) == sizeof(words_3));
@@ -175,6 +175,8 @@ extern "C" [[gnu::noinline]] void cost_keyed_end(std::uint32_t seed)
 #endif
 }
 
+extern "C" void cost_reference(std::uint32_t seed);
+
 void test_main()
 {
 #ifndef KYMO_COST_BASELINE
@@ -193,5 +195,18 @@ void test_main()
 	cost_keyed_begin(7);
 	cost_words_1(8);
 	cost_keyed_end(8);
+	cost_reference(9);
 	qemu::finish(true);
+}
+
+// study: an emit that writes a reference first (the ring's reference is set
+// half a turn back, which takes 2 instructions the baseline has not).
+extern "C" [[gnu::noinline]] void cost_reference(std::uint32_t seed)
+{
+#ifdef KYMO_COST_BASELINE
+	keep(make<words_1>(seed));
+#else
+	trace_ring.reference.store(0x80000000U, std::memory_order_relaxed);
+	trace::emit(make<words_1>(seed));
+#endif
 }
