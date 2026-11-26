@@ -71,6 +71,12 @@ impl Timeline {
             .as_ref()
             .map(|meaning| meaning.kernel.open())
             .unwrap_or_default();
+        let pointed = response
+            .hover_pos()
+            .filter(|pointer| pointer.y >= area.top())
+            .and_then(|pointer| line_at(pointer.y))
+            .map(|n| lines[n]);
+        self.keys(ui, pointed, &open);
 
         let view = View {
             origin: self.origin(),

@@ -32,6 +32,11 @@ impl Spans {
         self.which.push(which);
     }
 
+    /// The spans' starts, in cycles, sorted.
+    pub fn starts(&self) -> &[i64] {
+        &self.from
+    }
+
     /// The pixel columns of `view` holding a span, merged into bands where
     /// they touch, as `Levels::columns` merges events: a span covers the
     /// columns of its start to that of its end.

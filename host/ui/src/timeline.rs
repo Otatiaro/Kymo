@@ -11,6 +11,7 @@
 
 mod draw;
 mod hover;
+mod jump;
 mod list;
 mod load;
 mod measure;
@@ -140,6 +141,11 @@ pub struct Timeline {
     words: Words,
     /// The headings of the column of names folded, by section and path.
     folded: BTreeSet<String>,
+    /// The last jump's target, in cycles, and the view it left: its start
+    /// and width.
+    jumped: Option<(i64, f64, f64)>,
+    /// Whether the list of shortcuts shows.
+    shortcuts: bool,
 }
 
 /// The namespaces the filter reads (names.rs).
@@ -224,6 +230,8 @@ impl Timeline {
             kept: None,
             words: Words::default(),
             folded: BTreeSet::new(),
+            jumped: None,
+            shortcuts: false,
         };
         timeline.add(0);
         timeline.panel = timeline.meaning.as_ref().map(|meaning| {
@@ -396,6 +404,7 @@ impl Timeline {
             .default_size(ui.available_height() * BOTTOM)
             .show(ui, |ui| self.bottom(ui));
         egui::CentralPanel::default().show(ui, |ui| self.timeline(ui));
+        self.show_shortcuts(ui.ctx());
         // The panel came before the view moved: it shows the new range next frame.
         if self.behind() {
             ui.ctx().request_repaint();
