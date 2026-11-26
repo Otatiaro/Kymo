@@ -184,7 +184,7 @@ impl Timeline {
             capture,
             meaning,
             durations: Durations::new(catalogue, trace.first),
-            values: Values::new(catalogue),
+            values: Values::new(catalogue, trace.watched.as_ref()),
             catalogue,
             trace,
             ids: catalogue.events.keys().copied().collect(),
@@ -286,7 +286,8 @@ impl Timeline {
             let curve = self.values.as_ref().and_then(|values| values.named(name));
             let (Some(curve), Some(values)) = (curve, &mut self.values) else {
                 return Err(format!(
-                    "the image declares no curve {name}: a numeric field of an application event, as event.field"
+                    "the capture has no curve {name}: a numeric field of an application event, as event.field, \
+                     or a variable the DWT watched"
                 )
                 .into());
             };
