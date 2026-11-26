@@ -460,8 +460,10 @@ jobs:
   # The Zephyr adapter: the test application on the Cortex-M3 (mps2/an385) and
   # the Cortex-M33 (mps2/an521/cpu0), built with GCC 16 and with the Zephyr
   # SDK's compiler, recorded by the host with its trace and its meaning checked
-  # (target/zephyr/tests); clang-tidy over the adapter on the GCC 16 builds,
-  # which generate the kernel's headers it reads.
+  # (target/zephyr/tests); on the GCC 16 builds, clang-tidy over the adapter
+  # (those builds generate the kernel's headers it reads) and the cost per
+  # path, the bench built plain and traced, held against
+  # target/zephyr/tests/bench/overhead-<cpu>.json.
   zephyr:
     name: Zephyr adapter (${{ matrix.board }}, ${{ matrix.compiler }})
     runs-on: ubuntu-latest
@@ -473,8 +475,10 @@ jobs:
         include:
           - board: mps2/an385
             machine: mps2-an385
+            cpu: m3
           - board: mps2/an521/cpu0
             machine: mps2-an521
+            cpu: m33
     steps:
       - uses: actions/checkout@v5
 
@@ -566,3 +570,35 @@ jobs:
           pip install clang-tidy==23.1.4
           python3 target/tidy.py --clang-tidy clang-tidy --build build \
             --headers target/zephyr/include target/zephyr/kymo_zephyr.cpp target/zephyr/tests/application.cpp
+
+      # profile.py, which counts the instructions between the bench's markers.
+      - uses: actions/checkout@v5
+        if: matrix.compiler == 'gcc16'
+        with:
+          repository: Otatiaro/OpSy
+          ref: ${{ env.OPSY_COMMIT }}
+          path: opsy
+
+      # The cost bench, under GCC 16 only: the record is that compiler's.
+      - name: Build the bench, plain and traced
+        if: matrix.compiler == 'gcc16'
+        working-directory: zephyrproject
+        run: |
+          set -euo pipefail
+          west build -b ${{ matrix.board }} -d "$GITHUB_WORKSPACE/build-bench-plain" "$GITHUB_WORKSPACE/target/zephyr/tests/bench"
+          west build -b ${{ matrix.board }} -d "$GITHUB_WORKSPACE/build-bench-traced" "$GITHUB_WORKSPACE/target/zephyr/tests/bench" \
+            -- -DEXTRA_CONF_FILE=traced.conf
+
+      - name: clang-tidy over the bench
+        if: matrix.compiler == 'gcc16'
+        run: python3 target/tidy.py --clang-tidy clang-tidy --build build-bench-traced target/zephyr/tests/bench/bench.cpp
+
+      - name: Cost per path against the record
+        if: matrix.compiler == 'gcc16'
+        run: >
+          python3 target/opsy/tests/bench/overhead.py
+          --profile opsy/tests/qemu/bench/profile.py
+          --machine ${{ matrix.machine }}
+          --plain build-bench-plain/zephyr/zephyr.elf
+          --traced build-bench-traced/zephyr/zephyr.elf
+          --expected target/zephyr/tests/bench/overhead-${{ matrix.cpu }}.json
