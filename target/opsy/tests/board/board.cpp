@@ -59,6 +59,7 @@ constexpr std::uint32_t period_cycles = core_clock / 1000;
 constexpr auto timer_priority = opsy::isr_priority::from_preempt_sub<opsy::preemption_bits>(opsy::opsy_preemption + 2, 0);
 
 constexpr std::uint32_t rcc_cr = 0x44020C00, rcc_cfgr1 = 0x44020C1C, rcc_apb1lenr = 0x44020C9C;
+constexpr std::uint32_t flash_acr = 0x40022000;
 constexpr std::uint32_t tim2 = 0x40000000;
 constexpr std::uint32_t tim_cr1 = tim2 + 0x00, tim_dier = tim2 + 0x0C, tim_sr = tim2 + 0x10;
 constexpr std::uint32_t tim_egr = tim2 + 0x14, tim_psc = tim2 + 0x28, tim_arr = tim2 + 0x2C;
@@ -100,6 +101,12 @@ void board_clock()
 	}
 	reg(rcc_cfgr1) = (reg(rcc_cfgr1) & ~7u) | 2u; // SW: HSE
 	while (((reg(rcc_cfgr1) >> 3) & 7u) != 2u)
+	{
+	}
+	// LATENCY and WRHIGHFREQ: no wait state, which 8 MHz allows in any voltage
+	// range, where the reset value has three
+	reg(flash_acr) &= ~0x3Fu;
+	while ((reg(flash_acr) & 0x3Fu) != 0)
 	{
 	}
 	SystemCoreClock = core_clock;

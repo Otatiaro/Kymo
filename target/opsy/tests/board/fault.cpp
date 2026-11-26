@@ -43,6 +43,7 @@ std::uint32_t volatile& reg(std::uint32_t address)
 
 constexpr std::uint32_t core_clock = 8'000'000;
 constexpr std::uint32_t rcc_cr = 0x44020C00, rcc_cfgr1 = 0x44020C1C;
+constexpr std::uint32_t flash_acr = 0x40022000;
 /// Where the sensor would be: an address nothing answers on the STM32H563.
 constexpr std::uint32_t sensor = 0xF0000000;
 constexpr std::uint32_t samples = 100;
@@ -61,6 +62,12 @@ void board_clock()
 	}
 	reg(rcc_cfgr1) = (reg(rcc_cfgr1) & ~7u) | 2u; // SW: HSE
 	while (((reg(rcc_cfgr1) >> 3) & 7u) != 2u)
+	{
+	}
+	// LATENCY and WRHIGHFREQ: no wait state, which 8 MHz allows in any voltage
+	// range, where the reset value has three
+	reg(flash_acr) &= ~0x3Fu;
+	while ((reg(flash_acr) & 0x3Fu) != 0)
 	{
 	}
 	SystemCoreClock = core_clock;

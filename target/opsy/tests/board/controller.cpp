@@ -8,10 +8,10 @@
  * runs a cycle, a duration `cycle`, and marks it done. When the next tick
  * finds the cycle not done, the handler emits an `alarm`.
  *
- * A cycle ends about three quarters of a period after its tick, the tick's
+ * A cycle ends about five eighths of a period after its tick, the tick's
  * handler and the switch to the controller included. TIM3 interrupts every 50
  * periods and 368 cycles: its handler, the link's, copies a burst for about
- * 375 µs. Its phase in the period moves by 368 cycles each time: a run of
+ * 380 µs. Its phase in the period moves by 368 cycles each time: a run of
  * bursts lands in the cycle, preempts it past the next tick, and raises the
  * alarm; the bursts between land while the core is idle or in `logger`, and
  * nothing happens.
@@ -64,6 +64,7 @@ constexpr std::uint32_t link_counts = 50046;
 constexpr auto irq_priority = opsy::isr_priority::from_preempt_sub<opsy::preemption_bits>(opsy::opsy_preemption + 2, 0);
 
 constexpr std::uint32_t rcc_cr = 0x44020C00, rcc_cfgr1 = 0x44020C1C, rcc_apb1lenr = 0x44020C9C;
+constexpr std::uint32_t flash_acr = 0x40022000;
 constexpr std::uint32_t tim2 = 0x40000000, tim3 = 0x40000400;
 constexpr std::uint32_t tim_cr1 = 0x00, tim_dier = 0x0C, tim_sr = 0x10, tim_egr = 0x14, tim_psc = 0x28, tim_arr = 0x2C;
 
@@ -134,6 +135,12 @@ void board_clock()
 	}
 	reg(rcc_cfgr1) = (reg(rcc_cfgr1) & ~7u) | 2u; // SW: HSE
 	while (((reg(rcc_cfgr1) >> 3) & 7u) != 2u)
+	{
+	}
+	// LATENCY and WRHIGHFREQ: no wait state, which 8 MHz allows in any voltage
+	// range, where the reset value has three
+	reg(flash_acr) &= ~0x3Fu;
+	while ((reg(flash_acr) & 0x3Fu) != 0)
 	{
 	}
 	SystemCoreClock = core_clock;
