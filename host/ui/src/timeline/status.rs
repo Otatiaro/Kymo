@@ -66,6 +66,8 @@ impl Timeline {
         segment(ui, frequency, false, palette.loss);
         ui.separator();
         segment(ui, format!("laid out in {:.2} ms", self.painted), false, palette.loss);
+        ui.separator();
+        segment(ui, "? shortcuts".to_owned(), false, palette.loss);
     }
 
     /// `cycles` from the origin, as seconds when the frequency is known.
