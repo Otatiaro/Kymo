@@ -19,7 +19,8 @@
  * cycle of its bus: a half sine of 200 periods, from 0 to 10000 and back,
  * repeated. Its `position` is a curve the host reads. `sampler` also writes
  * it to `g_position`, which the DWT watches: each write goes out on SWO (PB3,
- * 2 MBd), dated by the anchor on the ring's slot 0.
+ * 8 MBd), dated by the anchor on the ring's slot 0. The DWT also sends every
+ * exception's entry and exit on SWO.
  *
  * Built without NDEBUG: the idle task spins on NOP, and the probe can read
  * the ring while nothing runs.
@@ -289,12 +290,18 @@ void start_cycle_counter()
 constexpr std::uint32_t dbgmcu_cr = 0x44024004;
 std::uint32_t volatile g_dwt_started = 0; ///< 1 once the DWT sends g_position, for board.py
 
-/** @brief SWO on PB3, which is TRACESWO (AF0) from reset, and g_position watched */
+/**
+ * @brief SWO on PB3, which is TRACESWO (AF0) from reset, g_position watched
+ *        and every exception traced: 8 MBd, which their load needs
+ */
 void start_swo()
 {
 	reg(dbgmcu_cr) |= (1u << 5) | (1u << 4); // TRACE_EN, TRACE_IOEN; TRACE_MODE 0: asynchronous
-	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 2'000'000}) && kymo::dwt::watch(g_position))
+	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 8'000'000}) && kymo::dwt::watch(g_position))
+	{
+		kymo::dwt::exceptions();
 		g_dwt_started = 1;
+	}
 }
 
 } // namespace

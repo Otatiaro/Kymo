@@ -1,7 +1,8 @@
 /**
  * @file    dwt.hpp
  * @brief   Variables watched by the DWT: each write to one is sent on SWO,
- *          its value and a local timestamp, without code where it is written.
+ *          its value and a local timestamp, without code where it is written;
+ *          and, optionally, every exception's entry and exit.
  *
  * The program configures the chip's SWO pin and trace clock, then calls
  * start(), which configures the ITM, the TPIU (asynchronous NRZ at the given
@@ -12,6 +13,7 @@
  *
  *     kymo::dwt::start(os, {8'000'000, 2'000'000}); // trace clock, baud rate
  *     kymo::dwt::watch(speed);
+ *     kymo::dwt::exceptions();                      // optional: every exception
  *
  * **The anchor.** start() puts a comparator on the timestamp word of the
  * ring's slot 0: each event that starts at slot 0, at most once a lap, sends
@@ -90,6 +92,7 @@ constexpr std::uint32_t tpiu_formatter_off = 0x100; ///< TrigIn kept, EnFCont cl
 
 constexpr std::uintptr_t dwt_ctrl = 0xE0001000;
 constexpr std::uint32_t dwt_cyccntena = 1U << 0;
+constexpr std::uint32_t dwt_exctrcena = 1U << 16;
 constexpr std::uint32_t dwt_notrcpkt = 1U << 27;
 constexpr unsigned dwt_numcomp_shift = 28;
 
@@ -256,6 +259,19 @@ bool start(ring<Slots> const& ring, swo config)
 	reg(itm_tcr) = itm_itmena | itm_tsena | itm_txena;
 	swo_baud.store(config.baud, std::memory_order_relaxed);
 	return true;
+}
+
+/**
+ * @brief Sends every exception's entry, exit and return on SWO, each with a
+ *        local timestamp, after start().
+ *
+ * The DWT traces all exceptions or none: SWO's load follows the program's
+ * interrupts. A packet is about 6 bytes with its timestamp; at an 8 MHz core,
+ * 2 MBd overflows at 1 kHz of interrupts and 8 MBd keeps up.
+ */
+inline void exceptions()
+{
+	detail::reg(detail::dwt_ctrl) |= detail::dwt_exctrcena;
 }
 
 /**

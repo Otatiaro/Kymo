@@ -119,6 +119,11 @@ std::uint32_t watched;
 	return kymo::dwt::watch(watched);
 }
 
+[[gnu::noinline]] void dwt_exceptions()
+{
+	kymo::dwt::exceptions();
+}
+
 void test_main()
 {
 	if (dwt_start())
@@ -127,5 +132,6 @@ void test_main()
 		fail("start() published a baud rate without an anchor");
 	if (dwt_watch())
 		fail("watch() took a comparator QEMU does not model");
+	dwt_exceptions();
 	qemu::finish(true);
 }
