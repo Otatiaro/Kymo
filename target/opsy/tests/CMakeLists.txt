@@ -180,4 +180,20 @@ if(KYMO_OPSY_BOARD)
 			--image $<TARGET_FILE:opsy_board_fault> --host ${KYMO_HOST}
 			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
 	set_tests_properties(opsy_board_fault_h563 PROPERTIES TIMEOUT 120)
+
+	# An alarm now and then (board/controller.cpp): recorded, and each alarm
+	# traced to its cause (board/controller.py).
+	add_executable(opsy_board_controller
+		${KYMO_OPSY_DIR}/scheduler.cpp
+		${KYMO_OPSY_DIR}/tests/qemu/startup.cpp
+		${CMAKE_CURRENT_SOURCE_DIR}/board/controller.cpp)
+	opsy_qemu_image(opsy_board_controller)
+	target_compile_options(opsy_board_controller PRIVATE -g ${OPSY_OPTIMISATION})
+	target_compile_definitions(opsy_board_controller PRIVATE KYMO_TEST_RING_SLOTS=1024)
+	target_include_directories(opsy_board_controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/traced ${KYMO_OPSY_DIR}/tests/qemu ${kymo_include})
+	add_test(NAME opsy_board_controller_h563
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/board/controller.py
+			--image $<TARGET_FILE:opsy_board_controller> --host ${KYMO_HOST}
+			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_OPSY_BOARD})
+	set_tests_properties(opsy_board_controller_h563 PROPERTIES TIMEOUT 120)
 endif()
