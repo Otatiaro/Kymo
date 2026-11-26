@@ -53,7 +53,11 @@ per mutex, held, with its owner named where it fits, or waited for
 (fainter). Handlers and mutexes follow their namespace, then their name.
 Hovering a span shows its start, end and duration; a task's, its priority
 at the pointer, left out until an event gives it and from a loss to the
-next, and the last events up to the switch that ends it.
+next, and the last events up to the switch that ends it. An application
+event (outside kymo::) is a flag at the head of the row of the context that
+emitted it: the innermost handler open but the kernel's, else the task on
+the core, else the CPU's row. Hovering a flag shows its time, index, fields
+and context.
 
 An image whose events include begins (kymo::begin_of, keyed_begin_of)
 shows, last, a line per type of duration, by namespace: each duration a

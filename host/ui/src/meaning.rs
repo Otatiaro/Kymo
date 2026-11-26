@@ -3,13 +3,14 @@
 //! mutex's holders and each of its waiters; and each task's time ready, with
 //! what woke it. They grow with the trace.
 
+use crate::levels::Levels;
 use crate::names;
 use crate::palette::{Palette, Shade};
 use crate::spans::Spans;
 use eframe::egui::Color32;
 use kymo::events::Catalogue;
 use kymo::load::{Covered, Cpu};
-use kymo::meaning::{Edge, Meaning as Kernel, Ready, Span, Subject};
+use kymo::meaning::{Context, Edge, Instant, Meaning as Kernel, Ready, Span, Subject};
 use kymo::model::Element;
 use kymo::stats::Instance;
 use kymo::target::Result;
@@ -39,6 +40,9 @@ pub struct Meaning {
     /// tasks before it; a task's never changes.
     pub shades: Vec<Shade>,
     pub load: Load,
+    /// The application's events by the context that emitted them, in the
+    /// order the contexts first came: their cycles, and their elements.
+    pub instants: Vec<(Context, Levels, Vec<usize>)>,
 }
 
 impl Meaning {
@@ -58,13 +62,16 @@ impl Meaning {
             names: Vec::new(),
             shades: Vec::new(),
             load: Load::default(),
+            instants: Vec::new(),
         }))
     }
 
     /// Takes in `elements` from `from` on. The spans of a row close in the
     /// order they start, so each comes after those its row holds.
     pub fn add(&mut self, elements: &[Element], from: usize) {
+        let instants = self.kernel.instants.len();
         self.kernel.add(elements, from);
+        by_context(&mut self.instants, &self.kernel.instants[instants..]);
         let closed = &self.kernel.closed;
         for (n, run) in closed.runs.iter().enumerate().skip(self.placed[0]) {
             let row = match run.task {
@@ -290,6 +297,29 @@ fn grown<T: Default>(list: &mut Vec<T>, n: usize) -> &mut T {
         list.resize_with(n + 1, T::default);
     }
     &mut list[n]
+}
+
+/// Application events by the context that emitted them, as
+/// `Meaning::instants` holds them, `instants` appended: each to its context's
+/// cycles and elements, a context new after the others.
+fn by_context(contexts: &mut Vec<(Context, Levels, Vec<usize>)>, instants: &[Instant]) {
+    // Each context's cycles, appended to its levels at once.
+    let mut cycles: Vec<Vec<i64>> = vec![Vec::new(); contexts.len()];
+    for instant in instants {
+        let at = match contexts.iter().position(|(context, ..)| *context == instant.context) {
+            Some(at) => at,
+            None => {
+                contexts.push((instant.context, Levels::default(), Vec::new()));
+                cycles.push(Vec::new());
+                contexts.len() - 1
+            }
+        };
+        cycles[at].push(instant.edge.cycles);
+        contexts[at].2.push(instant.edge.element);
+    }
+    for ((_, levels, _), cycles) in contexts.iter_mut().zip(&cycles) {
+        levels.extend(cycles);
+    }
 }
 
 #[cfg(test)]

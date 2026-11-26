@@ -85,6 +85,17 @@ fn catalogue() -> Catalogue {
             },
         );
     }
+    // An event of the image that is no hook.
+    events.insert(
+        100,
+        Event {
+            id: 100,
+            name: "app::tick".to_owned(),
+            size: 0,
+            fields: Vec::new(),
+            text: None,
+        },
+    );
     Catalogue {
         events,
         rings: Vec::new(),
@@ -97,7 +108,8 @@ fn catalogue() -> Catalogue {
 }
 
 /// A trace of `steps`: `"lost"`, or a hook and its field values, at index 0
-/// on, 10 cycles apart. `task_create:<name>` creates a task of that name.
+/// on, 10 cycles apart. `task_create:<name>` creates a task of that name;
+/// `tick` is an application event.
 fn trace<'a>(catalogue: &'a Catalogue, steps: &[(&str, &[u32])]) -> Trace<'a> {
     let mut elements = Vec::new();
     let mut index = 0;
@@ -111,10 +123,15 @@ fn trace<'a>(catalogue: &'a Catalogue, steps: &[(&str, &[u32])]) -> Trace<'a> {
             continue;
         }
         let (step, name) = step.split_once(':').unwrap_or((step, ""));
+        let wanted = if step == "tick" {
+            "app::tick".to_owned()
+        } else {
+            format!("{PREFIX}{step}")
+        };
         let event = catalogue
             .events
             .values()
-            .find(|event| event.name == format!("{PREFIX}{step}"))
+            .find(|event| event.name == wanted)
             .expect("a hook of the catalogue");
         // A field left out is 0.
         let mut payload: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
@@ -214,6 +231,33 @@ fn the_idle_task_is_no_task() {
             "ready from=3 to=9 task=PONG",
         ]
     );
+}
+
+#[test]
+fn an_application_event_before_the_start_is_in_its_context() {
+    // Held back with the hooks until the start gives the idle task.
+    let mut steps = START.to_vec();
+    steps.push(("tick", &[]));
+    steps.push(("starting", &[25_000_000, IDLE]));
+    steps.push(("task_switched_in", &[IDLE]));
+    steps.push(("tick", &[]));
+    let catalogue = catalogue();
+    let trace = trace(&catalogue, &steps);
+    for split in 0..trace.elements.len() {
+        let mut meaning = Meaning::new(&catalogue, 0).unwrap();
+        meaning.add(&trace.elements[..split], 0);
+        meaning.add(&trace.elements, split);
+        let contexts: Vec<_> = meaning
+            .instants
+            .iter()
+            .map(|instant| (instant.edge.element, meaning.place(instant.context)))
+            .collect();
+        assert_eq!(
+            contexts,
+            [(7, ("task", "PING".to_owned())), (10, ("task", "idle".to_owned()))],
+            "split at {split}"
+        );
+    }
 }
 
 #[test]

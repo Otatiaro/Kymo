@@ -84,6 +84,17 @@ pub(crate) fn catalogue() -> Catalogue {
             text: None,
         },
     );
+    // Kymo's own event that is no hook: the start of a duration.
+    events.insert(
+        102,
+        Event {
+            id: 102,
+            name: "kymo::begin_of<app::tick>".to_owned(),
+            size: 0,
+            fields: Vec::new(),
+            text: None,
+        },
+    );
     // The fault event: its words, then its return addresses.
     let word = |name: &str, offset: u64, size: u64, kind: Kind| EventField {
         name: name.to_owned(),
@@ -148,6 +159,8 @@ fn trace<'a>(catalogue: &'a Catalogue, first: u32, steps: &[(&str, &[u32])]) -> 
         }
         let name = if step == "tick" {
             "app::tick".to_owned()
+        } else if step == "begin" {
+            "kymo::begin_of<app::tick>".to_owned()
         } else if step == "fault" {
             crate::fault::EVENT.to_owned()
         } else {
@@ -295,6 +308,72 @@ fn a_fault_on_the_task_or_in_the_handler_it_came_in() {
     assert_eq!(
         lines.last().unwrap(),
         &format!("fault at=2 exception=11 {FAULT} stack=msp sp=0x00000000")
+    );
+}
+
+/// The context of each application event in `steps`, as `kymo decode
+/// --meaning` names it, after checking that every split in two pieces gives
+/// the same.
+fn instants(first: u32, steps: &[(&str, &[u32])]) -> Vec<String> {
+    let catalogue = catalogue();
+    let trace = trace(&catalogue, first, steps);
+    let described = |meaning: &Meaning| -> Vec<String> {
+        meaning
+            .instants
+            .iter()
+            .map(|instant| {
+                let (name, value) = meaning.place(instant.context);
+                format!("{} {name}={value}", instant.edge.element)
+            })
+            .collect()
+    };
+    let mut whole = Meaning::new(&catalogue, first).unwrap();
+    whole.add(&trace.elements, 0);
+    let instants = described(&whole);
+    for split in 1..trace.elements.len() {
+        let mut pieces = Meaning::new(&catalogue, first).unwrap();
+        pieces.add(&trace.elements[..split], 0);
+        pieces.add(&trace.elements, split);
+        assert_eq!(described(&pieces), instants, "split at {split}");
+    }
+    instants
+}
+
+#[test]
+fn an_application_event_is_in_the_context_that_emits_it() {
+    assert_eq!(
+        instants(
+            0,
+            &[
+                ("tick", &[]),
+                ("task_started", &[A]),
+                ("tick", &[]),
+                ("isr_enter", &[H, 45]),
+                ("tick", &[]),
+                ("enter_systick", &[]),
+                ("tick", &[]),
+                ("exit_systick", &[]),
+                ("isr_exit", &[H]),
+                ("enter_idle", &[]),
+                ("tick", &[]),
+                ("lost", &[]),
+                ("tick", &[]),
+                ("task_started", &[B]),
+                ("tick", &[]),
+                // Kymo's own, no application event.
+                ("begin", &[]),
+            ]
+        ),
+        [
+            "0 context=unknown",
+            "2 task=0x20000100",
+            "4 handler=0x08000401 (IRQ29)",
+            // The kernel's handler is left out, as for a wake's cause.
+            "6 handler=0x08000401 (IRQ29)",
+            "10 task=idle",
+            "12 context=unknown",
+            "14 task=0x20000200",
+        ]
     );
 }
 
