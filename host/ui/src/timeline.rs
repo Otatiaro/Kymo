@@ -11,6 +11,7 @@
 
 mod draw;
 mod hover;
+mod inertia;
 mod jump;
 mod list;
 mod load;
@@ -146,6 +147,8 @@ pub struct Timeline {
     jumped: Option<(i64, f64, f64)>,
     /// Whether the list of shortcuts shows.
     shortcuts: bool,
+    /// The view let go during a drag, while it glides.
+    glide: Option<inertia::Glide>,
 }
 
 /// The namespaces the filter reads (names.rs).
@@ -232,6 +235,7 @@ impl Timeline {
             folded: BTreeSet::new(),
             jumped: None,
             shortcuts: false,
+            glide: None,
         };
         timeline.add(0);
         timeline.panel = timeline.meaning.as_ref().map(|meaning| {
