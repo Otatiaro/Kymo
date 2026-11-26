@@ -251,7 +251,9 @@ fn press(timeline: &mut Timeline, events: Vec<egui::Event>, modifiers: egui::Mod
             .collect(),
         ..Default::default()
     };
-    let _ = egui::Context::default().run_ui(input, |ui| timeline.keys(ui, line, &Open::default()));
+    let mut output = egui::Context::default().run_ui(input, |ui| timeline.keys(ui, line, &Open::default()));
+    // No painter takes the font atlas.
+    output.textures_delta.clear();
 }
 
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
