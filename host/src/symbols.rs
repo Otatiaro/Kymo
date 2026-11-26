@@ -114,6 +114,14 @@ impl Symbols {
         }
     }
 
+    /// The address of the object named `name`, demangled.
+    pub fn object(&self, name: &str) -> Option<u64> {
+        self.objects
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.address)
+    }
+
     /// How the numeric variable at `address` reads; none for another object.
     pub fn number(&self, address: u64) -> Option<Reading> {
         self.numbers.get(&address).copied()

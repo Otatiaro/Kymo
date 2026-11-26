@@ -502,7 +502,10 @@ fn a_value_rule_without_a_detail_bounds_a_watched_variable() {
     let report = sampled(vec![level, field], &[]);
     let json = stats::json(&report);
     crate::stats::tests::check_schema(&json);
-    assert!(json.contains(r#""subject":"app::level","metric":"value","detail":null"#), "{json}");
+    assert!(
+        json.contains(r#""subject":"app::level","metric":"value","detail":null"#),
+        "{json}"
+    );
     let rules = r#"[
         {"subject":"app::level","metric":"value","stat":"max","max":9},
         {"subject":"app::level","metric":"value","stat":"min","min":0}

@@ -2,7 +2,7 @@
 
 use kymo::model::{Element, Trace};
 use kymo::target::{self, Backend, Connection, Result};
-use kymo::{capture, check, decode, events, meaning, record, stats};
+use kymo::{capture, check, decode, events, meaning, record, stats, swo};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -258,6 +258,9 @@ fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
     }
     let catalogue = catalogue_of(copy, &bytes, elf.as_deref(), svd.as_deref())?;
     let trace = Trace::read(&catalogue, &bytes, clock)?;
+    if let Some(watched) = &trace.watched {
+        eprintln!("{}", swo::summary(watched));
+    }
     let origin = trace.elements.iter().find_map(|element| match element {
         Element::Event { cycles, .. } => Some(*cycles),
         _ => None,

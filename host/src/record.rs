@@ -633,11 +633,70 @@ impl<'a> Recorder<'a> {
 }
 
 /// What a pass hands to the writer: its host time, the write index it read,
-/// if any, and the items it settled.
+/// if any, the items it settled and the SWO bytes received.
 struct Pass<'a> {
     host_ns: u64,
     write_index: Option<u32>,
     items: Vec<Item<'a>>,
+    swo: Vec<u8>,
+}
+
+/// The variable the target sets to its SWO baud rate once its DWT is set to
+/// watch (target/include/kymo/dwt.hpp); zero before.
+const SWO_BAUD: &str = "kymo::dwt::swo_baud";
+const DWT_CTRL: u32 = 0xe000_1000;
+const DWT_COMP0: u32 = 0xe000_1020;
+/// The stride from a comparator's registers to the next one's.
+const DWT_STRIDE: u32 = 16;
+const DWT_DEVARCH: u32 = 0xe000_1fbc;
+/// DWT_DEVARCH.ARCHID of an ARMv8-M DWT, which has no DWT_MASKn.
+const ARMV8M: u32 = 0x1a02;
+
+/// The DWT's configuration, read without writing anything; its baud rate is
+/// `baud`.
+pub fn read_dwt(target: &mut dyn Target, baud: u32) -> Result<capture::Dwt> {
+    let devarch = target.read_word(DWT_DEVARCH)?;
+    let ctrl = target.read_word(DWT_CTRL)?;
+    let mut comparators = Vec::new();
+    for n in 0..ctrl >> 28 {
+        let base = DWT_COMP0 + n * DWT_STRIDE;
+        let mask = if devarch & 0xffff == ARMV8M {
+            0
+        } else {
+            target.read_word(base + 4)?
+        };
+        comparators.push(capture::Comparator {
+            comp: target.read_word(base)?,
+            mask,
+            function: target.read_word(base + 8)?,
+        });
+    }
+    Ok(capture::Dwt {
+        devarch,
+        ctrl,
+        baud,
+        comparators,
+    })
+}
+
+/// The DWT's configuration, with the probe receiving SWO, when the program
+/// sends on it: none when its ELF has no `kymo::dwt::swo_baud`. What keeps
+/// SWO from being read is warned of: the recording goes on without it.
+fn start_swo(target: &mut dyn Target, catalogue: &Catalogue) -> Option<capture::Dwt> {
+    let address = u32::try_from(catalogue.symbols.object(SWO_BAUD)?).ok()?;
+    let mut start = || -> Result<Option<capture::Dwt>> {
+        let baud = target.read_word(address)?;
+        if baud == 0 {
+            return Err("the program has not called kymo::dwt::start yet".into());
+        }
+        let dwt = read_dwt(target, baud)?;
+        target.start_swo(baud)?;
+        Ok(Some(dwt))
+    };
+    start().unwrap_or_else(|error| {
+        eprintln!("warning: SWO not read: {error}");
+        None
+    })
 }
 
 /// `kymo record` of `ring`: prints the events as they come, until Enter is
@@ -669,6 +728,8 @@ pub fn run(
     }
     raise_priority();
     let started = Instant::now();
+    let dwt = start_swo(target, catalogue);
+    let mut swo = dwt.is_some();
     let mut recorder = Recorder::start(target, catalogue, ring)?;
     let first = recorder.next();
     println!("record {first}");
@@ -680,7 +741,11 @@ pub fn run(
                 channel: ring.name.clone(),
                 elf,
             };
-            Writer::create(&out, &header)
+            let mut capture = Writer::create(&out, &header)?;
+            if let Some(dwt) = &dwt {
+                capture.write(&Record::Dwt(dwt.clone()))?;
+            }
+            Ok::<_, Box<dyn std::error::Error>>(capture)
         })
         .transpose()?;
     let (passes, received) = std::sync::mpsc::channel::<Pass>();
@@ -706,10 +771,20 @@ pub fn run(
             if zeros == 0 && recorder.zeros() > 0 {
                 eprintln!("warning: {}", ASLEEP);
             }
+            let bytes = if swo {
+                target.read_swo().unwrap_or_else(|error| {
+                    eprintln!("warning: SWO no longer read: {error}");
+                    swo = false;
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
             let pass = Pass {
                 host_ns,
                 write_index,
                 items,
+                swo: bytes,
             };
             // A writer gone has failed: its error is the one reported.
             if passes.send(pass).is_err() || done {
@@ -836,6 +911,9 @@ fn write(
             }
         }
         if let Some(capture) = &mut capture {
+            if !pass.swo.is_empty() {
+                capture.write(&Record::Swo(&pass.swo))?;
+            }
             capture.flush()?;
         }
     }
@@ -910,6 +988,9 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
         suspect(trace.suspects()),
         measured(trace.measured)
     );
+    if let Some(watched) = &trace.watched {
+        eprintln!("{}", crate::swo::summary(watched));
+    }
     Ok(())
 }
 

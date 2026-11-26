@@ -1019,3 +1019,51 @@ fn records_with(preempt: bool, bursts: bool, seeds: u64) {
     eprintln!("suspect writers {all_suspects}, seeds with a wrong event and no suspect {silent}");
     assert_eq!(preempt, all_suspects > 0, "suspect writers");
 }
+
+/// Registers read one word at a time; reading any other address fails.
+struct Registers(BTreeMap<u32, u32>);
+
+impl Target for Registers {
+    fn read_words(&mut self, address: u32, words: &mut [u32]) -> Result<()> {
+        for (n, word) in words.iter_mut().enumerate() {
+            let at = address + 4 * n as u32;
+            *word = *self.0.get(&at).ok_or_else(|| format!("read at {at:#x}"))?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn the_dwt_is_read_by_architecture() {
+    use crate::capture::{Comparator, Dwt};
+    let comparator = |comp, mask, function| Comparator { comp, mask, function };
+    // ARMv8-M has no DWT_MASKn: reading one would fail.
+    let mut armv8m = Registers(BTreeMap::from([
+        (0xe000_1fbc, 0x4770_1a02),
+        (0xe000_1000, 2 << 28 | 1),
+        (0xe000_1020, 0x2000_0014),
+        (0xe000_1028, 0x0812),
+        (0xe000_1030, 0x2000_0100),
+        (0xe000_1038, 0x0412),
+    ]));
+    assert_eq!(
+        super::read_dwt(&mut armv8m, 2_000_000).unwrap(),
+        Dwt {
+            devarch: 0x4770_1a02,
+            ctrl: 2 << 28 | 1,
+            baud: 2_000_000,
+            comparators: vec![comparator(0x2000_0014, 0, 0x0812), comparator(0x2000_0100, 0, 0x0412)],
+        }
+    );
+    let mut armv7m = Registers(BTreeMap::from([
+        (0xe000_1fbc, 0),
+        (0xe000_1000, 1 << 28),
+        (0xe000_1020, 0x2000_0014),
+        (0xe000_1024, 2),
+        (0xe000_1028, 0b0011),
+    ]));
+    assert_eq!(
+        super::read_dwt(&mut armv7m, 115_200).unwrap().comparators,
+        [comparator(0x2000_0014, 2, 0b0011)]
+    );
+}
