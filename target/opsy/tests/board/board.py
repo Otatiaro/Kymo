@@ -29,7 +29,13 @@ instances, the application's `sampling` durations among them, bounded by
   board writes, so a loss is the host falling behind;
 - that the setpoints' half sine runs from 0 to its peak, and that `kymo check`
   bounds its excursion: a rule at the lowest and the highest position decoded
-  passes, one a micrometre inside either fails.
+  passes, one a micrometre inside either fails;
+- that kymo::dwt configured the data trace, read from the registers after the
+  reset: the anchor on slot 0's timestamp word through the least capable
+  comparator, g_position on another, and the ITM and the TPIU sending SWO at
+  2 MBd. The comparators keep their functions across the reset: what the run
+  before left is freed, and a debugger's watchpoint, written before the reset,
+  is kept.
 """
 
 import argparse
@@ -50,6 +56,14 @@ TIMER = "app::(anonymous namespace)::timer_isr"
 NESTED = "app::(anonymous namespace)::nested_isr"
 SETPOINT = "app::(anonymous namespace)::setpoint"
 PEAK = 10000  # micrometres
+# A debugger's watchpoint on the most capable comparator, 3, which the system
+# reset keeps: a write to the flash's last word, which never comes, raises a
+# debug event (MATCH 0b0101, ACTION 0b01, 4 bytes).
+WATCHPOINT_COMPARATOR = 3
+WATCHPOINT_ADDRESS = 0x081FFFFC
+WATCHPOINT_FUNCTION = 0x815
+WATCHPOINT = ["b32", hex(0xE0001020 + 16 * WATCHPOINT_COMPARATOR),
+              hex(WATCHPOINT_ADDRESS), "0", hex(WATCHPOINT_FUNCTION)]
 
 
 def check_board(output: str) -> list[str]:
@@ -150,6 +164,53 @@ def check_setpoints(host: str, capture: str, output: str) -> list[str]:
     return errors
 
 
+def read_words(probe_rs: str, probe: str, address: int, count: int) -> list[int]:
+    """count words from the running board, through the debug port."""
+    done = subprocess.run([probe_rs, "read", "--chip", CHIP, "--probe", probe, "b32", hex(address), str(count)],
+                          capture_output=True, text=True, encoding="utf-8", check=True)
+    return [int(word, 16) for line in done.stdout.splitlines() if ":" in line for word in line.split(":")[1].split()]
+
+
+def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
+    """What kymo::dwt::start() and watch() configured, read from the registers."""
+    symbols = {}
+    for line in subprocess.run([nm, "-C", image], capture_output=True, text=True, encoding="utf-8",
+                               check=True).stdout.splitlines():
+        address, _, name = line.split(" ", 2)
+        symbols[name] = int(address, 16)
+    anchor = symbols["trace_ring"] + 12  # write_index, lapped, then slot 0's header: its timestamp word
+    position = symbols["app::(anonymous namespace)::g_position"]
+    if read_words(probe_rs, probe, symbols["app::(anonymous namespace)::g_dwt_started"], 1) != [1]:
+        return ["kymo::dwt::start() or watch() failed"]
+    words = read_words(probe_rs, probe, 0xE0001020, 16)
+    comparators = [(words[4 * n], words[4 * n + 2]) for n in range(4)]
+    # A data value on write (MATCH 0b1101, ACTION 0b10) of 4 bytes (DATAVSIZE 2).
+    sent = {comp: n for n, (comp, function) in enumerate(comparators) if function & 0xC3F == 0x82D}
+    errors = [f"no comparator sends writes to {name} at {address:#x}"
+              for name, address in (("the anchor", anchor), ("g_position", position)) if address not in sent]
+    watchpoint = comparators[WATCHPOINT_COMPARATOR]
+    if (watchpoint[0], watchpoint[1] & 0xFFF) != (WATCHPOINT_ADDRESS, WATCHPOINT_FUNCTION):
+        errors.append(f"the debugger's watchpoint is gone: {watchpoint[0]:#x}, {watchpoint[1]:#x}")
+    if not errors:
+        # start() freed what the run before the reset left, and kept the
+        # watchpoint: the anchor took, of the others, the one with the fewest
+        # capabilities, the highest of those.
+        ones = [bin(function >> 27).count("1") for _, function in comparators]
+        free = [n for n in range(4) if n != WATCHPOINT_COMPARATOR]
+        least = max(n for n in free if ones[n] == min(ones[m] for m in free))
+        print(f"DWT: anchor on comparator {sent[anchor]}, g_position on {sent[position]}; capabilities {ones}")
+        if sent[anchor] != least:
+            errors.append(f"the anchor is on comparator {sent[anchor]}, not {least}, the least capable")
+    itm_tcr = read_words(probe_rs, probe, 0xE0000E80, 1)[0]
+    acpr, = read_words(probe_rs, probe, 0xE0040010, 1)
+    sppr, = read_words(probe_rs, probe, 0xE00400F0, 1)
+    ffcr, = read_words(probe_rs, probe, 0xE0040304, 1)
+    # ITMENA, TSENA, TXENA; 8 MHz / 2 MBd; NRZ; the formatter off.
+    if (itm_tcr & 0xB, acpr, sppr, ffcr) != (0xB, 3, 2, 0x100):
+        errors.append(f"ITM_TCR {itm_tcr:#x}, ACPR {acpr}, SPPR {sppr}, FFCR {ffcr:#x}: not SWO at 2 MBd")
+    return errors
+
+
 def slope(x: list[int], y: list[float]) -> float:
     """The least-squares slope of y against x."""
     mean_x, mean_y = sum(x) / len(x), sum(y) / len(y)
@@ -163,18 +224,20 @@ def main() -> int:
     parser.add_argument("--host", required=True)
     parser.add_argument("--probe-rs", required=True)
     parser.add_argument("--probe-id", required=True)
+    parser.add_argument("--nm", required=True)
     parser.add_argument("--seconds", type=int, default=30)
     args = parser.parse_args()
 
     probe = f"0483:374e:{args.probe_id}"
-    for command in ("download", "reset"):
+    for command in ("download", "write", "reset"):
         flashed = subprocess.run([args.probe_rs, command, "--probe", probe, "--chip", CHIP]
-                                 + ([args.image] if command == "download" else []),
+                                 + {"download": [args.image], "write": WATCHPOINT, "reset": []}[command],
                                  capture_output=True, text=True, encoding="utf-8")
         if flashed.returncode != 0:
             print(flashed.stderr)
             print(f"probe-rs {command} failed")
             return 1
+    dwt_errors = check_dwt(args.probe_rs, probe, args.nm, args.image)
     with tempfile.TemporaryDirectory() as directory:
         capture = os.path.join(directory, "board.kcap")
         record = subprocess.run(
@@ -190,7 +253,7 @@ def main() -> int:
             print(decode.stderr)
             print("kymo decode failed")
             return 1
-        errors = (check(decode.stdout) + check_board(decode.stdout)
+        errors = (dwt_errors + check(decode.stdout) + check_board(decode.stdout)
                   + check_setpoints(args.host, capture, decode.stdout)
                   + check_stats(args.host, args.image, capture, {SAMPLING: None})
                   + check_rules(args.host, args.image, capture))
