@@ -180,6 +180,13 @@ pub struct Faulted {
     pub edge: Edge,
 }
 
+/// An application event, and the context that emitted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Instant {
+    pub edge: Edge,
+    pub context: Context,
+}
+
 /// Spans, each list in the order its spans closed.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Spans {
@@ -545,7 +552,9 @@ pub struct Meaning<'a> {
     /// task: while the dialect has it, from the trace's start to it or to a
     /// loss.
     buffering: bool,
-    buffer: Vec<(u16, Vec<u8>, Edge)>,
+    /// Each hook held back with its payload, or none for an application
+    /// event.
+    buffer: Vec<(Option<u16>, Vec<u8>, Edge)>,
     /// The task whose priority the last hook changed, not known to wait: a
     /// task_ready of it right after only moves it within the ready list.
     reinsert: Option<usize>,
@@ -569,6 +578,8 @@ pub struct Meaning<'a> {
     pub contradictions: Vec<usize>,
     /// The hardware faults, in order.
     pub faults: Vec<Faulted>,
+    /// The application's events, outside the `kymo::` namespace, in order.
+    pub instants: Vec<Instant>,
     /// The task on the core and since when; none while unknown.
     running: Option<(Option<usize>, Edge)>,
     /// The handlers entered and not left, innermost last, each with its
@@ -642,6 +653,7 @@ impl<'a> Meaning<'a> {
             closed: Spans::default(),
             contradictions: Vec::new(),
             faults: Vec::new(),
+            instants: Vec::new(),
             running: None,
             entered: Vec::new(),
             nesting_known: true,
@@ -715,6 +727,13 @@ impl<'a> Meaning<'a> {
                     self.last = Some(edge);
                     let id = event.event.id;
                     let Some(hook) = hooks.get(&id) else {
+                        if crate::values::is_application(event.event) {
+                            if self.buffering {
+                                self.buffer.push((None, Vec::new(), edge));
+                            } else {
+                                self.instant(edge);
+                            }
+                        }
                         continue;
                     };
                     if let Hook::Fault(layout) = hook {
@@ -725,7 +744,7 @@ impl<'a> Meaning<'a> {
                         self.hook(hook, &event.payload, edge);
                         self.flush(&hooks);
                     } else {
-                        self.buffer.push((id, event.payload.clone(), edge));
+                        self.buffer.push((Some(id), event.payload.clone(), edge));
                     }
                 }
                 Element::Lost { .. } => {
@@ -747,8 +766,22 @@ impl<'a> Meaning<'a> {
     fn flush(&mut self, hooks: &HashMap<u16, Hook>) {
         self.buffering = false;
         for (id, payload, edge) in std::mem::take(&mut self.buffer) {
-            self.hook(&hooks[&id], &payload, edge);
+            match id {
+                Some(id) => self.hook(&hooks[&id], &payload, edge),
+                None => self.instant(edge),
+            }
         }
+    }
+
+    /// An application event at `edge`, in the context an event is emitted
+    /// in.
+    fn instant(&mut self, edge: Edge) {
+        let context = match self.context() {
+            Cause::Handler(handler) => Context::Handler(handler),
+            Cause::Task(task) => Context::Task(task),
+            Cause::Elapsed | Cause::Unknown => Context::Unknown,
+        };
+        self.instants.push(Instant { edge, context });
     }
 
     /// The task `field` gives: none for the idle task.

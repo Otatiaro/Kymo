@@ -204,7 +204,7 @@ impl Timeline {
                     .faults
                     .iter()
                     .filter(|faulted| (wide..=far).contains(&faulted.edge.cycles))
-                    .filter(|faulted| super::rows::fault_row(lines, faulted.context) == Some(n))
+                    .filter(|faulted| super::rows::context_row(lines, faulted.context) == Some(n))
                     .take(8)
                     .map(|faulted| {
                         let mut card = Card::new("Fault".to_owned(), "", Swatch::Fault);
@@ -220,6 +220,9 @@ impl Timeline {
                     }),
             );
         }
+        if let (Some(meaning), Some(n)) = (&self.meaning, n) {
+            cards.extend(self.instant_cards(meaning, lines, n, view, pointer.x));
+        }
         cards.extend(
             self.marks()
                 .filter(|mark| mark.from <= high && mark.to >= low)
@@ -227,6 +230,46 @@ impl Timeline {
                 .filter_map(|mark| mark_card(&self.trace.elements[mark.element])),
         );
         (!cards.is_empty()).then_some((Hover { cards }, arrow))
+    }
+
+    /// The application events flagged on line `n` within a flag's half
+    /// width of pixel `x`, a card each, the first 8 of each context.
+    fn instant_cards(&self, meaning: &Meaning, lines: &[Line], n: usize, view: &View, x: f32) -> Vec<Card> {
+        let low = view.cycles(x - super::draw::INSTANT);
+        let high = view.cycles(x + super::draw::INSTANT);
+        let mut cards = Vec::new();
+        for (context, levels, elements) in &meaning.instants {
+            if super::rows::context_row(lines, *context) != Some(n) {
+                continue;
+            }
+            let cycles = levels.cycles();
+            let from = cycles.partition_point(|&cycles| cycles < low);
+            let to = cycles.partition_point(|&cycles| cycles <= high);
+            for &element in &elements[from..to.min(from + 8)] {
+                let Element::Event { event, cycles, .. } = &self.trace.elements[element] else {
+                    continue;
+                };
+                let mut card = Card::new(event.event.name.clone(), "event", Swatch::Event);
+                card.facts.push(("time", self.time((*cycles - self.origin()) as f64)));
+                card.facts.push(("index", event.index.to_string()));
+                let fields = self.fields(event);
+                if !fields.is_empty() {
+                    card.facts.push(("fields", fields));
+                }
+                card.facts.push(meaning.kernel.place(*context));
+                cards.push(card);
+            }
+            if to - from > 8
+                && let Some(card) = cards.last_mut()
+            {
+                card.notes.push(format!(
+                    "{} events of this context within {} pixels",
+                    to - from,
+                    super::draw::INSTANT
+                ));
+            }
+        }
+        cards
     }
 }
 

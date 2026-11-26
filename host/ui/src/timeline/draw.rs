@@ -407,10 +407,37 @@ impl Timeline {
                 }
             }
         }
+        // An application event: a flag pointing down at the head of the row
+        // of the context that emitted it, as wide as the columns of the
+        // events it stands for.
+        if let Some(meaning) = &self.meaning {
+            for (context, levels, _) in &meaning.instants {
+                let Some(n) = rows::context_row(&lines[..shown], *context) else {
+                    continue;
+                };
+                let top = area.top() + tops[n] + 1.0;
+                for (from, to) in levels.columns(&view) {
+                    if to <= area.left() || from >= area.right() {
+                        continue;
+                    }
+                    let points = vec![
+                        egui::pos2(from - INSTANT, top),
+                        egui::pos2(to + INSTANT, top),
+                        egui::pos2(to, top + 2.0 * INSTANT),
+                        egui::pos2(from, top + 2.0 * INSTANT),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(
+                        points,
+                        palette.event,
+                        Stroke::new(1.0, palette.surface),
+                    ));
+                }
+            }
+        }
         // A fault: a red diamond, outlined, on the row it came in.
         if let Some(meaning) = &self.meaning {
             for faulted in &meaning.kernel.faults {
-                let Some(n) = rows::fault_row(&lines[..shown], faulted.context) else {
+                let Some(n) = rows::context_row(&lines[..shown], faulted.context) else {
                     continue;
                 };
                 let x = view.column(faulted.edge.cycles) + 0.5;
@@ -565,6 +592,10 @@ const GUIDE: f32 = 16.0;
 
 /// Half the width and height of a fault's diamond, in pixels.
 pub(super) const FAULT: f32 = 6.0;
+
+/// Half the width of an application event's flag, and half its height, in
+/// pixels.
+pub(super) const INSTANT: f32 = 4.0;
 
 /// The width of a heading's mark and the gap after it, in pixels.
 const MARK: f32 = 13.0;

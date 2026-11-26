@@ -35,16 +35,16 @@ fn a_line_is_found_from_its_top_to_before_the_next() {
 }
 
 #[test]
-fn a_fault_is_marked_on_its_task_or_handler_else_on_the_cpu() {
+fn what_happened_in_a_context_is_marked_on_its_task_or_handler_else_on_the_cpu() {
     let lines = [Line::Cpu, Line::Task(Some(0)), Line::Task(None), Line::Handler(1)];
-    assert_eq!(fault_row(&lines, Context::Task(Some(0))), Some(1));
-    assert_eq!(fault_row(&lines, Context::Task(None)), Some(2));
-    assert_eq!(fault_row(&lines, Context::Handler(1)), Some(3));
+    assert_eq!(context_row(&lines, Context::Task(Some(0))), Some(1));
+    assert_eq!(context_row(&lines, Context::Task(None)), Some(2));
+    assert_eq!(context_row(&lines, Context::Handler(1)), Some(3));
     // Its row not shown, or none to show.
-    assert_eq!(fault_row(&lines, Context::Task(Some(4))), Some(0));
-    assert_eq!(fault_row(&lines, Context::Exception(11)), Some(0));
-    assert_eq!(fault_row(&lines, Context::Unknown), Some(0));
-    assert_eq!(fault_row(&lines[1..], Context::Unknown), None);
+    assert_eq!(context_row(&lines, Context::Task(Some(4))), Some(0));
+    assert_eq!(context_row(&lines, Context::Exception(11)), Some(0));
+    assert_eq!(context_row(&lines, Context::Unknown), Some(0));
+    assert_eq!(context_row(&lines[1..], Context::Unknown), None);
 }
 
 /// Lines given more room than they take fill it, sections keeping their

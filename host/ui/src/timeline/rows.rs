@@ -171,9 +171,10 @@ pub(super) fn wake_rows(lines: &[Line], from: Line, to: Line) -> Option<(usize, 
     Some((row(from)?, row(to)?))
 }
 
-/// The line a fault that came in `context` is marked on: the task's or the
-/// handler's, else the CPU's; none when neither is shown.
-pub(super) fn fault_row(lines: &[Line], context: Context) -> Option<usize> {
+/// The line what happened in `context` is marked on, a fault or an
+/// application event: the task's or the handler's, else the CPU's; none when
+/// neither is shown.
+pub(super) fn context_row(lines: &[Line], context: Context) -> Option<usize> {
     let row = |line: Line| lines.iter().position(|&other| other == line);
     let own = match context {
         Context::Task(task) => row(Line::Task(task)),

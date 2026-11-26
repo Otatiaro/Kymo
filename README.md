@@ -130,6 +130,13 @@ RTOS adapter emits the kernel's events through the same tracer:
 `target/freertos/include/kymo/freertos/trace.h` for FreeRTOS; each header
 says how to install it.
 
+With an RTOS adapter, `kymo-ui` shows rows for the kernel's tasks, handlers
+and mutexes in place of a row per event type. An application event is then a
+flag at the head of the row of the context that emitted it: the innermost
+handler open, the kernel's left out, else the task on the core, else (before
+the first task switch, after a loss) the CPU's row. Hovering a flag shows the
+event's time, index, fields and context.
+
 The OpSy adapter records a hardware fault as a `kymo::fault`
 (`target/include/kymo/fault.hpp`): the fault status registers, the frame the
 core stacked and `EXC_RETURN`, before the application's fault handler runs.

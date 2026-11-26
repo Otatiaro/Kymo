@@ -195,3 +195,33 @@ fn the_statistics_name_subjects_as_their_rows() {
     assert_eq!(full[&("mutex", "g_mutex".to_owned())], "app::g_mutex");
     assert_eq!(full.len(), 4);
 }
+
+/// Application events go each to its context's cycles and elements, taken
+/// in in pieces as with a capture that grows.
+#[test]
+fn application_events_are_kept_by_the_context_that_emitted_them() {
+    let instant = |element: usize, context: Context| Instant {
+        edge: edge(element, 10 * element as i64),
+        context,
+    };
+    let a = Context::Task(Some(0));
+    let h = Context::Handler(0);
+    let mut contexts = Vec::new();
+    by_context(&mut contexts, &[instant(1, a), instant(2, h), instant(3, a)]);
+    by_context(
+        &mut contexts,
+        &[instant(5, Context::Unknown), instant(6, h), instant(7, a)],
+    );
+    let kept: Vec<_> = contexts
+        .iter()
+        .map(|(context, levels, elements)| (*context, levels.cycles().to_vec(), elements.clone()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (a, vec![10, 30, 70], vec![1, 3, 7]),
+            (h, vec![20, 60], vec![2, 6]),
+            (Context::Unknown, vec![50], vec![5]),
+        ]
+    );
+}
