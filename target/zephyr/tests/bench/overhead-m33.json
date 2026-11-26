@@ -1,0 +1,9 @@
+{
+  "switch_ping_pong": 147,
+  "semaphore_from_isr": 102,
+  "queue_from_isr": 104,
+  "mutex_free": 72,
+  "mutex_contended": 288,
+  "sleep_one_tick": 143,
+  "release_no_switch": 32
+}
