@@ -376,6 +376,9 @@ fn run() -> Result<ExitCode> {
             if arguments.next().is_some() {
                 return Err(usage(USAGE));
             }
+            if let Err(error) = kymo::power::unthrottle() {
+                eprintln!("warning: could not leave power throttling: {error}");
+            }
             kymo::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock())?;
             return Ok(ExitCode::SUCCESS);
         }
