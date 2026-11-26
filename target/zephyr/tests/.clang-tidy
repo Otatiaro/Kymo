@@ -1,0 +1,15 @@
+---
+# The checks of target/zephyr, with those target/freertos/tests leaves out for
+# a test program: magic numbers, globals shared with the kernel's threads,
+# external linkage (trace/trace.py names the objects application::...), and
+# the kernel's do-while macros.
+InheritParentConfig: true
+Checks: >
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -misc-use-internal-linkage
+CheckOptions:
+  cppcoreguidelines-avoid-do-while.IgnoreMacros: true
+  readability-function-cognitive-complexity.IgnoreMacros: true
+...
