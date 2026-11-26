@@ -279,19 +279,30 @@ impl Timeline {
         }
     }
 
-    /// Shows the curves `names`, as `event.field`; an error names the first
-    /// the image does not declare.
+    /// Shows the curves `names`, as `event.field` or a variable, each in full
+    /// or by its last scopes when only one curve ends so; an error names the
+    /// first the image does not declare, or the curves an ambiguous one fits.
     pub fn choose(&mut self, names: &[String]) -> Result<()> {
         for name in names {
-            let curve = self.values.as_ref().and_then(|values| values.named(name));
-            let (Some(curve), Some(values)) = (curve, &mut self.values) else {
-                return Err(format!(
-                    "the capture has no curve {name}: a numeric field of an application event, as event.field, \
-                     or a variable the DWT watched"
-                )
-                .into());
-            };
-            values.chosen.insert(curve);
+            let found = self
+                .values
+                .as_ref()
+                .map_or(Err(Vec::new()), |values| values.designated(name));
+            match (found, &mut self.values) {
+                (Ok(curve), Some(values)) => {
+                    values.chosen.insert(curve);
+                }
+                (Err(fits), _) if fits.len() > 1 => {
+                    return Err(format!("the curve {name} is ambiguous, write it in full: {}", fits.join(", ")).into());
+                }
+                _ => {
+                    return Err(format!(
+                        "the capture has no curve {name}: a numeric field of an application event, as event.field, \
+                         or a variable the DWT watched"
+                    )
+                    .into());
+                }
+            }
         }
         Ok(())
     }

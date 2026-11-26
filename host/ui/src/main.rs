@@ -132,7 +132,9 @@ choice is kept for the next runs.
                 system, light or dark, as chosen in the toolbar
   --value <event.field|variable>
                 shows that curve, as ticked in the Values menu; repeated,
-                each one named
+                each one named. A name may leave out its first scopes,
+                and never writes an anonymous namespace, when only one
+                curve ends so
   --measure     prints the time to read the capture and build the timeline,
                 shows the whole capture then the narrowest view, 300 frames
                 each without vsync, prints the frame times and quits
