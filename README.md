@@ -231,6 +231,14 @@ anchor takes the last one. Neither is in the path of an emit: in -Os, `start()`
 and `watch()` take 312 bytes of flash on a Cortex-M33 and 272 on a Cortex-M4,
 and 56 and 52 bytes of stack at most.
 
+`kymo::dwt::exceptions()`, called after `start()`, also sends every
+exception's entry, exit and return on SWO, with no code in the handlers: 16
+bytes of flash, no stack. The DWT traces all exceptions or none, so SWO's load
+follows the program's interrupts, about 6 bytes per packet with its timestamp.
+**Size the baud rate to that load**: at an 8 MHz core and 1 kHz of interrupts,
+19 packets a period overflow the ITM at 2 MBd, and 8 MBd keeps up. An
+overflowing ITM drops packets and says so; it never stalls the core.
+
 With the probe-rs backend, `kymo record` reads the DWT's configuration once
 `start()` has run, receives SWO beside the ring and keeps both in the capture;
 it writes nothing to the target. Each watched variable is a curve named after

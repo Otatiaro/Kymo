@@ -32,10 +32,10 @@ instances, the application's `sampling` durations among them, bounded by
   passes, one a micrometre inside either fails;
 - that kymo::dwt configured the data trace, read from the registers after the
   reset: the anchor on slot 0's timestamp word through the least capable
-  comparator, g_position on another, and the ITM and the TPIU sending SWO at
-  2 MBd. The comparators keep their functions across the reset: what the run
-  before left is freed, and a debugger's watchpoint, written before the reset,
-  is kept.
+  comparator, g_position on another, the ITM and the TPIU sending SWO at
+  8 MBd, and the exceptions traced. The comparators keep their functions
+  across the reset: what the run before left is freed, and a debugger's
+  watchpoint, written before the reset, is kept.
 """
 
 import argparse
@@ -205,9 +205,12 @@ def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
     acpr, = read_words(probe_rs, probe, 0xE0040010, 1)
     sppr, = read_words(probe_rs, probe, 0xE00400F0, 1)
     ffcr, = read_words(probe_rs, probe, 0xE0040304, 1)
-    # ITMENA, TSENA, TXENA; 8 MHz / 2 MBd; NRZ; the formatter off.
-    if (itm_tcr & 0xB, acpr, sppr, ffcr) != (0xB, 3, 2, 0x100):
-        errors.append(f"ITM_TCR {itm_tcr:#x}, ACPR {acpr}, SPPR {sppr}, FFCR {ffcr:#x}: not SWO at 2 MBd")
+    # ITMENA, TSENA, TXENA; 8 MHz / 8 MBd; NRZ; the formatter off.
+    if (itm_tcr & 0xB, acpr, sppr, ffcr) != (0xB, 0, 2, 0x100):
+        errors.append(f"ITM_TCR {itm_tcr:#x}, ACPR {acpr}, SPPR {sppr}, FFCR {ffcr:#x}: not SWO at 8 MBd")
+    dwt_ctrl, = read_words(probe_rs, probe, 0xE0001000, 1)
+    if dwt_ctrl & (1 << 16) == 0:
+        errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::exceptions() left EXCTRCENA clear")
     return errors
 
 
@@ -229,10 +232,16 @@ def main() -> int:
     args = parser.parse_args()
 
     probe = f"0483:374e:{args.probe_id}"
-    for command in ("download", "write", "reset"):
-        flashed = subprocess.run([args.probe_rs, command, "--probe", probe, "--chip", CHIP]
-                                 + {"download": [args.image], "write": WATCHPOINT, "reset": []}[command],
-                                 capture_output=True, text=True, encoding="utf-8")
+    for command in ("download", "write", "clear", "reset"):
+        if command == "clear":
+            # DWT_CTRL keeps EXCTRCENA across the reset: cleared, so that only
+            # the image's kymo::dwt::exceptions() sets it.
+            dwt_ctrl, = read_words(args.probe_rs, probe, 0xE0001000, 1)
+            arguments = ["write", "--probe", probe, "--chip", CHIP, "b32", "0xE0001000", hex(dwt_ctrl & ~(1 << 16))]
+        else:
+            arguments = [command, "--probe", probe, "--chip", CHIP] + {
+                "download": [args.image], "write": WATCHPOINT, "reset": []}[command]
+        flashed = subprocess.run([args.probe_rs] + arguments, capture_output=True, text=True, encoding="utf-8")
         if flashed.returncode != 0:
             print(flashed.stderr)
             print(f"probe-rs {command} failed")
