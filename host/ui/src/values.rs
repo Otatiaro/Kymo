@@ -151,6 +151,29 @@ impl Values {
         self.curves.iter().position(|curve| curve.to_string() == name)
     }
 
+    /// The place of the curve `name` designates: its name in full, or with
+    /// scopes left out from the left, the anonymous namespaces never written.
+    /// An error lists the curves it could designate: none, or several.
+    pub fn designated(&self, name: &str) -> Result<usize, Vec<String>> {
+        if let Some(n) = self.named(name) {
+            return Ok(n);
+        }
+        let ends = |curve: &Curve| {
+            let field = curve
+                .field
+                .as_ref()
+                .map(|field| format!(".{field}"))
+                .unwrap_or_default();
+            let scopes = crate::names::scopes(&curve.subject);
+            (0..scopes.len()).any(|from| format!("{}{field}", scopes[from..].join("::")) == name)
+        };
+        let found: Vec<usize> = (0..self.curves.len()).filter(|&n| ends(&self.curves[n])).collect();
+        match found[..] {
+            [n] => Ok(n),
+            _ => Err(found.iter().map(|&n| self.curves[n].to_string()).collect()),
+        }
+    }
+
     /// The curves chosen, one a line, to save.
     pub fn saved(&self) -> String {
         let names: Vec<String> = self.chosen.iter().map(|&n| self.curves[n].to_string()).collect();

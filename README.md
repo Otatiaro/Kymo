@@ -110,7 +110,9 @@ mean; `kymo check` bounds them with plain numbers:
 ```
 
 `kymo-ui` shows none at first: its Values menu ticks the curves to show, and
-`--value <event.field>` one at launch. Each is a line under the durations, a
+`--value <event.field>` one at launch, its name in full or by its last scopes
+when only one curve ends so (`--value g_position` for
+`app::(anonymous namespace)::g_position`). Each is a line under the durations, a
 step from each sample to the next, cut by a loss, none where a sample is NaN,
 its axis from the lowest to the highest value in the view. Zoomed out, each
 pixel column spans the step entering it and its samples, so a peak of one

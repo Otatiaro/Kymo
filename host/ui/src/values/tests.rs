@@ -122,6 +122,60 @@ fn the_curves_are_the_numeric_fields_of_application_events() {
     assert_eq!(values.named("app::tick.x"), None);
 }
 
+/// Values holding only the curves `names`, as `subject` or `subject.field`.
+fn named_curves(names: &[(&str, Option<&str>)]) -> Values {
+    let mut curves: Vec<Curve> = names
+        .iter()
+        .map(|&(subject, field)| Curve {
+            subject: subject.to_owned(),
+            field: field.map(str::to_owned),
+        })
+        .collect();
+    curves.sort();
+    Values {
+        samples: vec![Vec::new(); curves.len()],
+        curves,
+        chosen: BTreeSet::new(),
+        last: None,
+        end: 0,
+    }
+}
+
+/// A curve is designated in full, or by its last scopes when only one curve
+/// ends so; the anonymous namespaces are never written.
+#[test]
+fn a_curve_is_designated_by_its_last_scopes_when_unambiguous() {
+    let values = named_curves(&[
+        ("app::(anonymous namespace)::g_position", None),
+        ("app::(anonymous namespace)::setpoint", Some("position")),
+        ("app::motor::speed", None),
+        ("io::speed", None),
+        ("app::motor::setpoint", Some("speed")),
+    ]);
+    let at = |name: &str| values.named(name).unwrap();
+    let position = at("app::(anonymous namespace)::g_position");
+    assert_eq!(
+        values.designated("app::(anonymous namespace)::g_position"),
+        Ok(position)
+    );
+    assert_eq!(values.designated("g_position"), Ok(position));
+    assert_eq!(values.designated("app::g_position"), Ok(position));
+    let setpoint = at("app::(anonymous namespace)::setpoint.position");
+    assert_eq!(values.designated("setpoint.position"), Ok(setpoint));
+    assert_eq!(values.designated("motor::speed"), Ok(at("app::motor::speed")));
+    assert_eq!(
+        values.designated("setpoint.speed"),
+        Ok(at("app::motor::setpoint.speed"))
+    );
+    assert_eq!(
+        values.designated("speed"),
+        Err(vec!["app::motor::speed".to_owned(), "io::speed".to_owned()])
+    );
+    assert_eq!(values.designated("position"), Err(Vec::new()));
+    assert_eq!(values.designated("_position"), Err(Vec::new()));
+    assert_eq!(values.designated("pp::g_position"), Err(Vec::new()));
+}
+
 /// A loss cuts the step of each curve's last sample at the last event
 /// before it, whichever type that is; the next sample is not cut.
 #[test]
