@@ -30,9 +30,8 @@ running the image. Given a capture made by kymo record --out, prints what
 kymo record printed while making it, but for the seconds: they are
 recomputed over the whole capture. With --meaning, prints instead the
 kernel's spans in a capture of an image built with a Kymo kernel adapter
-(OpSy's or FreeRTOS's): a line each for a task on the core (`run`, the idle
-task as `task=idle`), a handler running
-(`interrupt`, `depth` handlers below it, `unknown` from a loss to the next
+(OpSy's, FreeRTOS's or Zephyr's): a line each for a task on the core
+(`run`, the idle task as `task=idle`), a handler running (`interrupt`, `depth` handlers below it, `unknown` from a loss to the next
 task switch), a mutex held (`hold`) or waited for (`wait`), from one event
 index to another; `lost` for an edge hidden by a loss, `to=open` for a span
 still open at the end. Then a line for each task_ready, `wake at=<index>`,
