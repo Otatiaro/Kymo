@@ -5,6 +5,7 @@ use super::rows;
 use super::rows::Line;
 use super::view::{View, edged, ticks};
 use super::{LABELS, RULER, Timeline};
+use crate::band::Layer;
 use crate::durations::Durations;
 use crate::palette::{BAND, Palette};
 use crate::spans::{Band, Spans};
@@ -222,7 +223,7 @@ impl Timeline {
                     covered.map(|covered| (load::row(&view, subs, covered), vec![color], None))
                 };
                 let drawn = match line {
-                    Line::Cpu => {
+                    Line::Cpu if loaded => {
                         // The first task's line on top, as the lines list them.
                         let order: Vec<usize> = super::rows::tasks(meaning).into_iter().rev().collect();
                         let colors = std::iter::once(palette.interrupt)
@@ -245,7 +246,18 @@ impl Timeline {
                 }
             }
             match line {
-                Line::Section(_) | Line::Cpu | Line::Group(_) => {}
+                Line::Section(_) | Line::Group(_) => {}
+                Line::Cpu => {
+                    let Some(meaning) = meaning else { continue };
+                    for (layer, spans) in meaning.band.layers() {
+                        let color = match layer {
+                            Layer::Unknown => lost,
+                            Layer::Task(task) => meaning.task_color(Some(task), &palette),
+                            Layer::Handlers => palette.interrupt,
+                        };
+                        bars.paint(Some(spans), std::iter::empty(), high, low, color);
+                    }
+                }
                 Line::Duration(row, shown) => {
                     let durations = self.durations();
                     let of = &durations.types[row];

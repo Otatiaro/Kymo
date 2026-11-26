@@ -5,6 +5,7 @@ use super::rows::Line;
 use super::status::counted;
 use super::view::View;
 use super::{HOVER, SWITCH, Timeline};
+use crate::band::{Held, Under};
 use crate::meaning::{self, Meaning};
 use crate::palette::{Palette, Shade};
 use eframe::egui::{self, Pos2, Rect};
@@ -54,6 +55,8 @@ enum Swatch {
     Hold,
     Wait,
     Loss,
+    /// The time unknown on the CPU's line.
+    Lost,
     Suspect,
     Fault,
 }
@@ -74,6 +77,7 @@ impl Swatch {
             Self::Hold => palette.hold,
             Self::Wait => palette.wait,
             Self::Loss => palette.loss,
+            Self::Lost => palette.lost,
             Self::Suspect => palette.suspect,
             Self::Fault => palette.loss,
         }
@@ -160,6 +164,7 @@ impl Timeline {
                 Some(bins) => {
                     cards.extend(load::at(bins, pointer.x).and_then(|bin| self.load_card(meaning, line, bin, open)))
                 }
+                None if line == Line::Cpu => cards.extend(self.band_card(meaning, view, pointer.x)),
                 None => (cards, arrow) = self.span_cards(meaning, line, low, high, open),
             }
         }
@@ -542,6 +547,37 @@ impl Timeline {
             Line::Section(_) | Line::Cpu | Line::Event(_) | Line::Duration(..) | Line::Value(_) | Line::Group(_) => {}
         }
         (cards, arrow)
+    }
+
+    /// The piece of the CPU's band drawn at pixel `x` of `view`: what holds
+    /// the core, from when and for how long; for a handler, what it
+    /// interrupts; for the time unknown, the loss before it.
+    fn band_card(&self, meaning: &Meaning, view: &View, x: f32) -> Option<Card> {
+        let piece = meaning.band.at(view, x)?;
+        let mut card = match piece.held {
+            Held::Task(task) => self.card(Line::Task(Some(task)), "run", Swatch::task(meaning, Some(task))),
+            Held::Handler { handler, .. } => self.card(Line::Handler(handler), "interrupt", Swatch::Interrupt),
+            Held::Unknown => Card::new("Unknown".to_owned(), "task on the core", Swatch::Lost),
+        };
+        card.facts.extend(self.extent(piece.span, piece.still).facts());
+        match piece.held {
+            Held::Handler { under, .. } => {
+                let under = match under {
+                    Under::Handler(handler) => self.label(Line::Handler(handler)),
+                    Under::Task(task) => self.label(Line::Task(task)),
+                    Under::Unknown => "unknown since a loss".to_owned(),
+                };
+                card.facts.push(("interrupts", under));
+            }
+            Held::Unknown if piece.span.from.lost => {
+                let elements = &self.trace.elements[piece.span.from.element..=piece.span.to.element];
+                card.facts
+                    .extend(elements.iter().find_map(marked).map(|gap| ("after", gap)));
+            }
+            Held::Unknown => card.notes.push("Before the first switch the capture holds.".to_owned()),
+            Held::Task(_) => {}
+        }
+        Some(card)
     }
 
     /// What woke the activation that time ready `which` is part of, and when,

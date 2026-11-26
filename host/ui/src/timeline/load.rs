@@ -77,7 +77,8 @@ impl Default for Binning {
     }
 }
 
-/// The most spans a row of `meaning` shows in `view`.
+/// The most spans a row of `meaning` shows in `view`, the CPU's band
+/// counted by its layers.
 pub(super) fn busiest(meaning: &Meaning, view: &View) -> usize {
     meaning
         .runs
@@ -89,6 +90,7 @@ pub(super) fn busiest(meaning: &Meaning, view: &View) -> usize {
         .map(|spans| spans.count(view))
         .max()
         .unwrap_or_default()
+        .max(meaning.band.busiest(view))
 }
 
 /// A bin as drawn: its pixel columns `left..right`, its cycles `from..to`

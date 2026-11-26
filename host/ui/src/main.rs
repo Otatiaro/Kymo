@@ -4,6 +4,7 @@
 mod app;
 #[cfg(windows)]
 mod background;
+mod band;
 mod durations;
 mod filter;
 mod levels;
