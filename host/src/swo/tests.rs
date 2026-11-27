@@ -1081,6 +1081,33 @@ fn a_capture_of_swo_alone_reads_back_dated_by_its_ticks() {
 }
 
 #[test]
+fn the_samples_of_swo_alone_have_their_statistics() {
+    let catalogue = with_ring();
+    let stream = Stream::default()
+        .tick()
+        .stamp(1)
+        .value(0, 5, 2)
+        .stamp(100)
+        .tick()
+        .stamp(924)
+        .tick()
+        .stamp(1_024);
+    let read = Read {
+        end: stream.0.len(),
+        host_ns: 0,
+    };
+    let capture = swo_alone("samples", &stream.0, &[read], false);
+    let trace = crate::model::Trace::read(&catalogue, &capture, Some(1_000_000)).unwrap();
+    let values = crate::values::sample(&catalogue, &trace);
+    let range = crate::stats::Range { from: None, to: None };
+    let sampled = crate::stats::sampled(&trace, &values, range);
+    assert_eq!(sampled.len(), 1);
+    assert_eq!(sampled[0].count, 1);
+    let min = &sampled[0].spread.as_ref().expect("a spread").min;
+    assert_eq!((min.cycles, min.seconds), (100, Some(1e-4)));
+}
+
+#[test]
 fn a_gap_past_a_quarter_of_a_period_is_placed_approximately() {
     // Off by 400 ns, between a quarter and a half of the period.
     let (bytes, reads) = read_ticks(&[1_024, 1_024, 3_072, 1_024, 1_024], &[0, 400, -400, 400, 400, 400]);
