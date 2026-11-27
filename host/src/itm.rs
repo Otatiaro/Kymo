@@ -3,8 +3,8 @@
 //!
 //! A packet starts with a header byte that tells its kind and its size. The
 //! packets Kymo reads are the DWT's data values, each sent when a comparator
-//! matches a write, its exception trace packets, and the local timestamps the
-//! ITM sends after them. Global
+//! matches a write, its exception trace and event counter packets, and the
+//! local timestamps the ITM sends after them. Global
 //! timestamps, extension packets and the instrumentation ports' packets are
 //! read past. A header the protocol reserves, or a synchronisation packet cut
 //! short, is malformed: the bytes that follow it may not start a packet.
@@ -31,6 +31,9 @@ pub enum Packet {
     /// An exception trace packet: the exception's number and what the core
     /// did with it.
     Exception { number: u16, function: Function },
+    /// An event counter packet: the bits of the DWT's counters that wrapped,
+    /// `CYC` among them.
+    Counter { wrapped: u8 },
     /// A packet read past that the next local timestamp dates too: one of an
     /// instrumentation port or of another hardware source.
     Source,
@@ -57,6 +60,11 @@ pub enum Function {
 /// The hardware source of exception trace packets, and their payload's size.
 const EXCEPTION_TRACE: u8 = 1;
 const EXCEPTION_SIZE: usize = 2;
+/// The hardware source of event counter packets; their payload is one byte.
+const EVENT_COUNTER: u8 = 0;
+/// An event counter packet's bit for `POSTCNT` reaching zero: the DWT's
+/// periodic tick.
+pub const CYC: u8 = 1 << 5;
 
 /// The packets of `bytes` in order, and whether the last one is cut short at
 /// the end of the bytes, then left out.
@@ -127,6 +135,8 @@ fn packet(bytes: &[u8]) -> Option<(Packet, usize)> {
                 },
                 _ => Packet::Malformed,
             }
+        } else if header & 0b100 != 0 && id == EVENT_COUNTER && length == 1 {
+            Packet::Counter { wrapped: value as u8 }
         } else {
             Packet::Source
         };

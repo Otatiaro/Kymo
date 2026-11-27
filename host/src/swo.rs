@@ -35,6 +35,10 @@
 //! The exception packets the DWT sends when its exception trace is on
 //! (ADR-102) are dated the same way: between two anchors, by the timestamp
 //! after them. Those of a gap are dropped, never decoded.
+//!
+//! Without anchors, the DWT's periodic tick dates the stream instead
+//! (ADR-104, `tick`): the local timestamps between two ticks add up to its
+//! period, a control the stream carries on its own.
 
 use crate::capture::Dwt;
 use crate::events::{Catalogue, Pointee, Ring};
@@ -149,54 +153,7 @@ pub struct Expected {
 /// trace's events `expected` to start at slot 0 by the comparator `anchor`.
 /// Each sample is its watch, its value and its cycles.
 pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) -> Dated {
-    let (packets, _) = itm::packets(bytes);
-    let mut stream = Vec::new();
-    let mut waiting = Vec::new();
-    let mut clock = 0u64;
-    let mut overflows = 0;
-    // The packets the next timestamp dates, those read past included.
-    let mut since = 0usize;
-    for packet in packets {
-        let what = match packet {
-            Packet::DataValue {
-                comparator,
-                write: true,
-                value,
-                ..
-            } => Some(What::Value { comparator, value }),
-            Packet::Exception { number, function } => Some(What::Exception { number, function }),
-            _ => None,
-        };
-        if let Some(what) = what {
-            since += 1;
-            waiting.push(stream.len());
-            stream.push(Item::Dated {
-                what,
-                itm: None,
-                alone: false,
-            });
-            continue;
-        }
-        match packet {
-            Packet::DataValue { write: false, .. } | Packet::Source => since += 1,
-            Packet::Timestamp { delta, control } => {
-                clock += u64::from(delta) + 1;
-                for &item in &waiting {
-                    if let Item::Dated { itm, alone, .. } = &mut stream[item] {
-                        *itm = Some(clock);
-                        *alone = control == 0 && since == 1;
-                    }
-                }
-                waiting.clear();
-                since = 0;
-            }
-            Packet::Overflow | Packet::Malformed => {
-                overflows += usize::from(packet == Packet::Overflow);
-                stream.push(Item::Broken);
-            }
-            Packet::Sync | Packet::Other | Packet::DataValue { write: true, .. } | Packet::Exception { .. } => {}
-        }
-    }
+    let (stream, overflows) = read(bytes);
 
     // The anchors received, by timestamp: their places in the stream.
     let mut received: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -242,22 +199,10 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     dated.set_aside = matched.iter().flatten().count() - anchors.len();
     let sample = |item: &Item| match *item {
         Item::Dated {
-            what: What::Value { comparator, value },
-            itm,
+            what: What::Value { comparator, .. },
             ..
-        } if comparator != anchor => watches
-            .iter()
-            .position(|watch| watch.comparator == comparator)
-            .map(|watch| (watch, value, itm)),
-        _ => None,
-    };
-    let exception = |item: &Item| match *item {
-        Item::Dated {
-            what: What::Exception { number, function },
-            itm,
-            ..
-        } => Some((number, function, itm)),
-        _ => None,
+        } if comparator == anchor => None,
+        _ => sample(item, watches),
     };
     let first = anchors.first().map_or(stream.len(), |&(.., at)| at);
     let last = anchors.last().map_or(stream.len(), |&(.., at)| at);
@@ -300,6 +245,269 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     dated
 }
 
+/// What dating reads of the stream `bytes`, and the overflows it reports.
+fn read(bytes: &[u8]) -> (Vec<Item>, usize) {
+    let (packets, _) = itm::packets(bytes);
+    let mut stream = Vec::new();
+    let mut waiting = Vec::new();
+    let mut clock = 0u64;
+    let mut overflows = 0;
+    // The packets the next timestamp dates, those read past included.
+    let mut since = 0usize;
+    for packet in packets {
+        let what = match packet {
+            Packet::DataValue {
+                comparator,
+                write: true,
+                value,
+                ..
+            } => Some(What::Value { comparator, value }),
+            Packet::Exception { number, function } => Some(What::Exception { number, function }),
+            Packet::Counter { wrapped } if wrapped & itm::CYC != 0 => Some(What::Tick),
+            _ => None,
+        };
+        if let Some(what) = what {
+            since += 1;
+            waiting.push(stream.len());
+            stream.push(Item::Dated {
+                what,
+                itm: None,
+                alone: false,
+            });
+            continue;
+        }
+        match packet {
+            Packet::DataValue { write: false, .. } | Packet::Source | Packet::Counter { .. } => since += 1,
+            Packet::Timestamp { delta, control } => {
+                clock += u64::from(delta) + 1;
+                for &item in &waiting {
+                    if let Item::Dated { itm, alone, .. } = &mut stream[item] {
+                        *itm = Some(clock);
+                        *alone = control == 0 && since == 1;
+                    }
+                }
+                waiting.clear();
+                since = 0;
+            }
+            Packet::Overflow | Packet::Malformed => {
+                overflows += usize::from(packet == Packet::Overflow);
+                stream.push(Item::Broken);
+            }
+            Packet::Sync | Packet::Other | Packet::DataValue { write: true, .. } | Packet::Exception { .. } => {}
+        }
+    }
+    (stream, overflows)
+}
+
+/// The sample `item` is, when it is one of `watches`': the index of its
+/// watch, its value and the ITM's clock that dates it.
+fn sample(item: &Item, watches: &[Watch]) -> Option<(usize, u32, Option<u64>)> {
+    match *item {
+        Item::Dated {
+            what: What::Value { comparator, value },
+            itm,
+            ..
+        } => watches
+            .iter()
+            .position(|watch| watch.comparator == comparator)
+            .map(|watch| (watch, value, itm)),
+        _ => None,
+    }
+}
+
+/// The exception packet `item` is: its number, its function and the ITM's
+/// clock that dates it.
+fn exception(item: &Item) -> Option<(u16, Function, Option<u64>)> {
+    match *item {
+        Item::Dated {
+            what: What::Exception { number, function },
+            itm,
+            ..
+        } => Some((number, function, itm)),
+        _ => None,
+    }
+}
+
+/// DWT_CTRL.CYCEVTENA: the DWT sends its periodic tick.
+const CYCEVTENA: u32 = 1 << 22;
+/// DWT_CTRL.CYCTAP: `POSTCNT` counts at bit 10 of `CYCCNT`, else at bit 6.
+const CYCTAP: u32 = 1 << 9;
+
+/// The periods the DWT's tick can have, in cycles: 64 or 1024, times
+/// `POSTPRESET` plus one.
+fn periods() -> impl Iterator<Item = i64> {
+    [64, 1024]
+        .into_iter()
+        .flat_map(|tap| (1..=16).map(move |preset| tap * preset))
+}
+
+/// The period of the tick DWT_CTRL `ctrl` sets: none when it is off.
+pub fn tick_period(ctrl: u32) -> Option<i64> {
+    let tap = if ctrl & CYCTAP != 0 { 1024 } else { 64 };
+    (ctrl & CYCEVTENA != 0).then(|| tap * (i64::from((ctrl >> 1) & 0xf) + 1))
+}
+
+/// The samples of `watches` in `bytes`, a SWO stream, and its exception
+/// packets, dated by the DWT's periodic tick (ADR-104), checked against
+/// DWT_CTRL `ctrl` when the capture holds it.
+///
+/// A tick is a counter packet with `CYC`; like an anchor, one whose
+/// timestamp is delayed, or dates other packets too, dates nothing. The
+/// period is the spacing, within `TOLERANCE`, that neighbouring ticks show
+/// most often. The stretch between two ticks is dated when the ITM's cycles
+/// between them are the period times the ticks they are apart, within
+/// `TOLERANCE`, and no overflow or malformed packet lies between them.
+///
+/// The stretches dated one after the other are a segment, its cycles counted
+/// from its first tick. A stretch not dated is a gap: the periods it lost
+/// are not known, and the segment after it has an origin of its own.
+pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
+    let (stream, overflows) = read(bytes);
+    let mut ticked = Ticked {
+        overflows,
+        ..Ticked::default()
+    };
+    let itm_of = |at: usize| match stream[at] {
+        Item::Dated { itm: Some(itm), .. } => itm as i64,
+        _ => unreachable!("a tick kept is dated"),
+    };
+    let received: Vec<(usize, bool)> = stream
+        .iter()
+        .enumerate()
+        .filter_map(|(at, item)| match *item {
+            Item::Dated {
+                what: What::Tick,
+                itm: Some(_),
+                alone,
+            } => Some((at, alone)),
+            _ => None,
+        })
+        .collect();
+    // Each tick kept: its rank among the ticks received, and its place.
+    let kept: Vec<(usize, usize)> = received
+        .iter()
+        .enumerate()
+        .filter(|&(_, &(_, alone))| alone)
+        .map(|(n, &(at, _))| (n, at))
+        .collect();
+    ticked.ticks = kept.len();
+    ticked.set_aside = received.len() - kept.len();
+    let broken = |from: usize, to: usize| stream[from + 1..to].iter().any(|item| matches!(item, Item::Broken));
+
+    let mut seen: HashMap<i64, usize> = HashMap::new();
+    for pair in kept.windows(2) {
+        let [(n, start), (m, end)] = [pair[0], pair[1]];
+        if m == n + 1 && !broken(start, end) {
+            let spacing = itm_of(end) - itm_of(start);
+            if let Some(period) = periods().find(|period| (spacing - period).abs() <= TOLERANCE) {
+                *seen.entry(period).or_default() += 1;
+            }
+        }
+    }
+    let Some(period) = seen
+        .into_iter()
+        .max_by_key(|&(period, count)| (count, period))
+        .map(|(period, _)| period)
+    else {
+        ticked.refused = Some(if kept.len() < 2 {
+            "the stream holds fewer than two ticks: the program did not call kymo::dwt::ticks".into()
+        } else {
+            "no two neighbouring ticks are a period of the DWT's tick apart".into()
+        });
+        return ticked;
+    };
+    if let Some(ctrl) = ctrl
+        && tick_period(ctrl) != Some(period)
+    {
+        ticked.refused = Some(match tick_period(ctrl) {
+            Some(set) => format!("the ticks come every {period} cycles, DWT_CTRL sets {set}"),
+            None => format!("the ticks come every {period} cycles, DWT_CTRL sets none"),
+        });
+        return ticked;
+    }
+    ticked.period = Some(period);
+
+    let first = kept.first().map_or(stream.len(), |&(_, at)| at);
+    let last = kept.last().map_or(stream.len(), |&(_, at)| at);
+    let outside = || stream[..first].iter().chain(stream.get(last..).unwrap_or_default());
+    ticked.undated = outside().filter(|item| sample(item, watches).is_some()).count();
+    ticked.exceptions_undated = outside().filter(|item| exception(item).is_some()).count();
+    // The segment under way, and the rank of its first tick.
+    let mut segment: Option<(Segment, usize)> = None;
+    for pair in kept.windows(2) {
+        let [(n, start), (m, end)] = [pair[0], pair[1]];
+        let between = &stream[start + 1..end];
+        let expected = (m - n) as i64 * period;
+        let sound = ((itm_of(end) - itm_of(start)) - expected).abs() <= TOLERANCE && !broken(start, end);
+        if !sound {
+            ticked.segments.extend(segment.take().map(|(segment, _)| segment));
+            ticked.gaps += 1;
+            ticked.dropped += between.iter().filter(|item| sample(item, watches).is_some()).count();
+            ticked.exceptions_dropped += between.iter().filter(|item| exception(item).is_some()).count();
+            continue;
+        }
+        let (segment, origin) = segment.get_or_insert_with(|| (Segment::default(), n));
+        let from = (n - *origin) as i64 * period;
+        let at = |itm: u64| from + itm as i64 - itm_of(start);
+        for (watch, value, itm) in between.iter().filter_map(|item| sample(item, watches)) {
+            match itm {
+                Some(itm) => segment.samples.push((watch, value, at(itm))),
+                None => ticked.dropped += 1,
+            }
+        }
+        for (number, function, itm) in between.iter().filter_map(exception) {
+            match itm {
+                Some(itm) => segment.exceptions.push(Exception {
+                    number,
+                    function,
+                    cycles: at(itm),
+                }),
+                None => ticked.exceptions_dropped += 1,
+            }
+        }
+        segment.cycles = (m - *origin) as i64 * period;
+    }
+    ticked.segments.extend(segment.map(|(segment, _)| segment));
+    ticked
+}
+
+/// The samples and exception packets of a stream, dated by the DWT's tick.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ticked {
+    /// What made the stream's ticks unusable, when something did.
+    pub refused: Option<String>,
+    /// The tick's period, in cycles.
+    pub period: Option<i64>,
+    /// The ticks kept, and those set aside: their timestamp delayed or
+    /// shared.
+    pub ticks: usize,
+    pub set_aside: usize,
+    pub overflows: usize,
+    /// The segments, in the order of the stream, each with an origin of its
+    /// own.
+    pub segments: Vec<Segment>,
+    /// The stretches not dated, and the samples and exception packets they
+    /// dropped.
+    pub gaps: usize,
+    pub dropped: usize,
+    pub exceptions_dropped: usize,
+    /// The samples and exception packets before the first tick kept, after
+    /// the last one, or without a timestamp after them.
+    pub undated: usize,
+    pub exceptions_undated: usize,
+}
+
+/// Stretches between ticks dated one after the other: their cycles, from
+/// the first tick to the last, and what they hold, in cycles from the first
+/// tick.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Segment {
+    pub cycles: i64,
+    /// The index of its watch, its value and its cycles.
+    pub samples: Vec<(usize, u32, i64)>,
+    pub exceptions: Vec<Exception>,
+}
+
 /// What the stream holds that dating reads.
 #[derive(Clone, Copy, Debug)]
 enum Item {
@@ -310,11 +518,13 @@ enum Item {
     Broken,
 }
 
-/// A packet dating reads: a data value written, or an exception packet.
+/// A packet dating reads: a data value written, an exception packet, or the
+/// DWT's periodic tick.
 #[derive(Clone, Copy, Debug)]
 enum What {
     Value { comparator: u8, value: u32 },
     Exception { number: u16, function: Function },
+    Tick,
 }
 
 /// An exception packet, dated: the exception's number, what the core did with

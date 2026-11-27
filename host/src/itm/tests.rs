@@ -82,7 +82,12 @@ fn reads_past_other_packets() {
     assert!(!cut);
     assert_eq!(
         packets,
-        [[Packet::Source; 2].as_slice(), &[Packet::Other; 4], &[value(2, 1, 4)]].concat()
+        [
+            &[Packet::Source, Packet::Counter { wrapped: CYC }],
+            [Packet::Other; 4].as_slice(),
+            &[value(2, 1, 4)]
+        ]
+        .concat()
     );
 }
 
