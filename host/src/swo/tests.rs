@@ -44,6 +44,20 @@ impl Stream {
         }
     }
 
+    /// A local timestamp `cycles` after the one before, delayed: its control 1.
+    fn delayed(mut self, cycles: u32) -> Self {
+        self = self.stamp(cycles);
+        let at = self.0.iter().rposition(|&byte| byte == 0xc0).expect("a timestamp");
+        self.0[at] = 0xd0;
+        self
+    }
+
+    /// An exception packet: hardware source 1, its number and its function.
+    fn exception(mut self) -> Self {
+        self.0.extend([0x0e, 0x2d, 0x10]);
+        self
+    }
+
     fn overflow(mut self) -> Self {
         self.0.push(0x70);
         self
@@ -103,10 +117,10 @@ fn the_itm_clock_counts_each_delta_plus_one() {
     for _ in 0..10 {
         stream = stream.stamp(100);
     }
-    let stream = stream.value(1, 1, 2).anchor(0x200).stamp(100);
+    let stream = stream.value(1, 1, 2).stamp(50).anchor(0x200).stamp(50);
     let dated = date(&stream.0, 0, &[LEVEL], &expected(&[(1_000, 0x100), (2_000, 0x200)]));
     assert_eq!(dated.gaps, []);
-    assert_eq!(dated.samples, [(0, 1, 2_000)]);
+    assert_eq!(dated.samples, [(0, 1, 1_950)]);
 }
 
 #[test]
@@ -185,6 +199,47 @@ fn an_anchor_timestamp_seen_again_matches_the_later_write() {
     );
     assert_eq!(dated.gaps, []);
     assert_eq!(dated.samples, [(0, 42, 2_300)]);
+}
+
+/// Three anchors, at 1000, 1500 and 2000 cycles, the middle one misdated by
+/// 200 cycles through `middle`, a sample on each side of it.
+fn around_a_misdated_anchor(middle: impl FnOnce(Stream) -> Stream) -> Dated {
+    let stream = Stream::default().anchor(0x100).stamp(10).value(1, 42, 2).stamp(300);
+    let stream = middle(stream.anchor(0x180))
+        .value(1, 43, 2)
+        .stamp(100)
+        .anchor(0x200)
+        .stamp(200);
+    date(
+        &stream.0,
+        0,
+        &[LEVEL],
+        &expected(&[(1_000, 0x100), (1_500, 0x180), (2_000, 0x200)]),
+    )
+}
+
+#[test]
+fn an_anchor_with_a_delayed_or_shared_timestamp_dates_nothing() {
+    for (what, middle) in [
+        (
+            "delayed",
+            (|stream: Stream| stream.delayed(400)) as fn(Stream) -> Stream,
+        ),
+        ("shared with an exception", |stream| stream.exception().stamp(400)),
+        ("shared with a sample", |stream| stream.value(1, 7, 2).stamp(400)),
+    ] {
+        let dated = around_a_misdated_anchor(middle);
+        assert_eq!(dated.gaps, [], "{what}");
+        assert_eq!((dated.anchors, dated.set_aside), (2, 1), "{what}");
+        assert_eq!(dated.span, Some((1_000, 2_000)), "{what}");
+        assert_eq!(dated.samples.first(), Some(&(0, 42, 1_300)), "{what}");
+        assert_eq!(dated.samples.last(), Some(&(0, 43, 1_800)), "{what}");
+    }
+
+    // The same anchor, synchronous and alone, is a reference: 200 cycles off.
+    let dated = around_a_misdated_anchor(|stream| stream.stamp(400));
+    assert_eq!((dated.anchors, dated.set_aside), (3, 0));
+    assert_eq!(dated.gaps, [(1_000, 1_500), (1_500, 2_000)]);
 }
 
 #[test]

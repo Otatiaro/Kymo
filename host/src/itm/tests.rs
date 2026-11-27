@@ -80,7 +80,10 @@ fn reads_past_other_packets() {
     ];
     let (packets, cut) = packets(&bytes);
     assert!(!cut);
-    assert_eq!(packets, [[Packet::Other; 6].as_slice(), &[value(2, 1, 4)]].concat());
+    assert_eq!(
+        packets,
+        [[Packet::Source; 2].as_slice(), &[Packet::Other; 4], &[value(2, 1, 4)]].concat()
+    );
 }
 
 #[test]

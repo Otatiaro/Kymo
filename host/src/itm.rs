@@ -27,8 +27,11 @@ pub enum Packet {
         value: u32,
         size: u8,
     },
-    /// A packet read past: a global timestamp, an extension, a packet of an
-    /// instrumentation port or another hardware source.
+    /// A packet read past that the next local timestamp dates too: one of an
+    /// instrumentation port or of another hardware source.
+    Source,
+    /// A packet read past that no local timestamp dates: a global timestamp
+    /// or an extension.
     Other,
     /// A header the protocol reserves, or zeros not ending a synchronisation
     /// packet.
@@ -86,7 +89,7 @@ fn packet(bytes: &[u8]) -> Option<(Packet, usize)> {
                 size: length as u8,
             }
         } else {
-            Packet::Other
+            Packet::Source
         };
         return Some((packet, 1 + length));
     }
