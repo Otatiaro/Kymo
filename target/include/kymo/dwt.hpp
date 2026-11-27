@@ -46,6 +46,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <type_traits>
 
 // The architecture selects registers and code paths in #if: macros, not constants.
@@ -100,6 +101,8 @@ constexpr std::uint32_t dwt_cyctap = 1U << 9; ///< POSTCNT counts CYCCNT's bit 1
 constexpr unsigned dwt_postinit_shift = 5;
 constexpr unsigned dwt_postpreset_shift = 1;
 constexpr std::uint32_t dwt_post_mask = 0xF;
+constexpr std::uint32_t cyccnt_bit_6 = 1U << 6;   ///< POSTCNT's count, CYCTAP clear
+constexpr std::uint32_t cyccnt_bit_10 = 1U << 10; ///< POSTCNT's count, CYCTAP set
 constexpr std::uint32_t dwt_tick_fields =
 	dwt_cycevtena | dwt_cyctap | (dwt_post_mask << dwt_postinit_shift) | (dwt_post_mask << dwt_postpreset_shift);
 constexpr std::uint32_t dwt_notrcpkt = 1U << 27;
@@ -131,12 +134,11 @@ constexpr std::uint32_t function_write_value = 0b1101; ///< data value packet on
  */
 constexpr std::uint32_t tick_fields(std::uint32_t cycles)
 {
-	constexpr std::uint32_t taps[] = {64, 1024};
-	for (std::uint32_t const tap : taps)
+	for (std::uint32_t const tap : {cyccnt_bit_6, cyccnt_bit_10})
 		if (cycles % tap == 0 && cycles / tap >= 1 && cycles / tap <= dwt_post_mask + 1)
 		{
 			std::uint32_t const post = (cycles / tap) - 1;
-			return dwt_cycevtena | (tap == 64 ? 0 : dwt_cyctap) | (post << dwt_postinit_shift) |
+			return dwt_cycevtena | (tap == cyccnt_bit_6 ? 0 : dwt_cyctap) | (post << dwt_postinit_shift) |
 			       (post << dwt_postpreset_shift);
 		}
 	return 0;
