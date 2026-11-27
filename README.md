@@ -167,7 +167,7 @@ On the host, build with `cargo build --release --manifest-path host/Cargo.toml`
 ```sh
 kymo events app.elf                     # the event types the ELF declares
 kymo record --probe probe-rs --chip STM32H563ZITx --elf app.elf --out run.kymo
-kymo decode run.kymo                    # the events, one line each
+kymo decode run.kymo                    # the events, one line each, then the SWO's exceptions
 kymo decode run.kymo --meaning          # the kernel's spans and wakes
 kymo stats run.kymo [--json]            # latencies, durations, periods, shares, values
 kymo check run.kymo rules.json          # rules on those statistics, an exit code for CI

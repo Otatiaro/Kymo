@@ -86,6 +86,10 @@ add_test(NAME opsy_awake_${OPSY_TARGET}
 	COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/awake/awake.py
 		--objdump ${CMAKE_OBJDUMP} --image $<TARGET_FILE:opsy_qemu_tests>)
 
+# The trace oracle's handling of the SWO on packets no clean capture holds.
+add_test(NAME opsy_oracle_${OPSY_TARGET}
+	COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/trace/oracle_test.py)
+
 foreach(tool KYMO_QEMU KYMO_HOST Python3_EXECUTABLE)
 	if(NOT ${tool})
 		list(APPEND missing ${tool})

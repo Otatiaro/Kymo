@@ -1067,3 +1067,40 @@ fn the_dwt_is_read_by_architecture() {
         [comparator(0x2000_0014, 2, 0b0011)]
     );
 }
+
+#[test]
+fn decode_prints_the_swo_span_and_gaps_then_its_exception_packets() {
+    use crate::itm::Function;
+    use crate::swo::{Exception, Watched};
+    let packet = |cycles, number, function| Exception {
+        number,
+        function,
+        cycles,
+    };
+    let watched = Watched {
+        span: Some((100, 400)),
+        gaps: vec![(200, 250)],
+        exceptions: vec![
+            packet(120, 61, Function::Entered),
+            packet(130, 61, Function::Exited),
+            packet(130, 0, Function::Returned),
+        ],
+        ..Watched::default()
+    };
+    assert_eq!(
+        super::swo_lines(&watched),
+        [
+            "swo 100 400",
+            "gap 200 250",
+            "exception 120 61 entered",
+            "exception 130 61 exited",
+            "exception 130 0 returned",
+        ]
+    );
+    // Without a packet, nothing: the span and gaps only bound the exceptions.
+    let watched = Watched {
+        exceptions: Vec::new(),
+        ..watched
+    };
+    assert!(super::swo_lines(&watched).is_empty());
+}
