@@ -108,7 +108,7 @@ fn write(path: &Path, items: &[Item], end: u32) {
     let header = Header {
         first: 0,
         clock: Some(CLOCK),
-        channel: ring.name.clone(),
+        channel: Some(ring.name.clone()),
         elf: Elf::Embedded(b"not read: the catalogue is the test's".to_vec()),
     };
     let mut writer = Writer::create(path, &header).unwrap();
@@ -792,7 +792,7 @@ fn write_kernel_from(path: &Path, start: u32, steps: &[(&str, &[u32])]) {
     let header = Header {
         first: 0,
         clock: Some(CLOCK),
-        channel: ring.name.clone(),
+        channel: Some(ring.name.clone()),
         elf: Elf::Embedded(b"not read: the catalogue is the test's".to_vec()),
     };
     let mut writer = Writer::create(path, &header).unwrap();

@@ -66,21 +66,35 @@ pub enum Element<'a> {
 impl<'a> Trace<'a> {
     /// The capture `bytes`, read with the ring its header names, its seconds
     /// at `clock` hertz, or the capture's, or else at the frequency measured
-    /// over the whole capture.
+    /// over the whole capture. A capture of SWO alone names no ring and holds
+    /// no event: the DWT's tick dates its stream, and the host time of its
+    /// reads gives the frequency (ADR-104).
     pub fn read(catalogue: &'a Catalogue, bytes: &[u8], clock: Option<u64>) -> Result<Self> {
         let capture::Capture { header, records, cut } = capture::read(bytes)?;
-        let ring = catalogue.ring(Some(&header.channel))?;
+        let ring = header
+            .channel
+            .as_deref()
+            .map(|channel| catalogue.ring(Some(channel)))
+            .transpose()?;
         let mut timeline = Timeline::new(clock.or(header.clock));
         let mut elements = Vec::new();
         let mut end = None;
         let mut dwt = None;
         let mut swo = Vec::new();
+        let mut reads = Vec::new();
         for record in &records {
             match *record {
                 Record::Dwt(ref config) => dwt = Some(config),
-                Record::Swo(bytes) => swo.extend_from_slice(bytes),
+                Record::Swo { host_ns, bytes } => {
+                    swo.extend_from_slice(bytes);
+                    reads.push(swo::Read {
+                        end: swo.len(),
+                        host_ns,
+                    });
+                }
                 Record::Pass { host_ns, write_index } => timeline.pass(host_ns, write_index),
                 Record::Event { index, slots } => {
+                    let ring = ring.ok_or("the capture holds events but names no ring")?;
                     let event = decode::event(catalogue, ring, index, slots)?
                         .ok_or_else(|| format!("event {index}: its slots in the capture do not hold it whole"))?;
                     let cycles = timeline.event(index, event.timestamp);
@@ -96,13 +110,19 @@ impl<'a> Trace<'a> {
             }
         }
         // The frequency is known only once every event is read.
-        let frequency = timeline.frequency();
+        let given = clock.or(header.clock);
+        let watched = dwt.map(|dwt| match ring {
+            Some(ring) => swo::watched(catalogue, ring, dwt, &swo, &elements),
+            None => swo::alone(catalogue, dwt, &swo, &reads, given),
+        });
+        let frequency = timeline
+            .frequency()
+            .or_else(|| watched.as_ref().and_then(|watched| watched.ticks.as_ref()?.frequency));
         for element in &mut elements {
             if let Element::Event { cycles, seconds, .. } = element {
                 *seconds = timeline.seconds(*cycles, frequency);
             }
         }
-        let watched = dwt.map(|dwt| swo::watched(catalogue, ring, dwt, &swo, &elements));
         Ok(Self {
             first: header.first,
             elements,

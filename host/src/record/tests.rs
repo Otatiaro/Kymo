@@ -779,7 +779,7 @@ fn a_capture_reads_back_as_the_recording_yielded_it() {
         let header = Header {
             first: recorder.next(),
             clock: Some(clock),
-            channel: ring.name.clone(),
+            channel: Some(ring.name.clone()),
             elf: Elf::Reference(String::new()),
         };
         let mut writer = Writer::create(&path, &header).unwrap();

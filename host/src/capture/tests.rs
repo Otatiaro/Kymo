@@ -9,7 +9,7 @@ fn describe(record: &Record) -> String {
         Record::Suspect { from, to, writers } => format!("suspect {from} {to} {writers}"),
         Record::End { next } => format!("end {next}"),
         Record::Dwt(ref dwt) => format!("dwt {dwt:?}"),
-        Record::Swo(bytes) => format!("swo {bytes:?}"),
+        Record::Swo { host_ns, bytes } => format!("swo {host_ns} {bytes:?}"),
     }
 }
 
@@ -20,7 +20,7 @@ fn capture(name: &str, elf: Elf) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) 
     let header = Header {
         first: 5,
         clock: Some(1_000_000),
-        channel: "kymo::ring".into(),
+        channel: Some("kymo::ring".into()),
         elf,
     };
     let slots: Vec<u8> = (0..48).collect();
@@ -50,8 +50,14 @@ fn capture(name: &str, elf: Elf) -> (Vec<u8>, usize, Vec<(usize, u32, String)>) 
             5,
         ),
         (Record::Dwt(dwt), 5),
-        (Record::Swo(&slots[..3]), 5),
-        (Record::Swo(&[]), 5),
+        (
+            Record::Swo {
+                host_ns: 3,
+                bytes: &slots[..3],
+            },
+            5,
+        ),
+        (Record::Swo { host_ns: 4, bytes: &[] }, 5),
         (
             Record::Event {
                 index: 7,
@@ -114,7 +120,7 @@ fn a_capture_cut_anywhere_reads_up_to_its_last_whole_record() {
         }
         let capture = read.unwrap_or_else(|error| panic!("cut at {length}: {error}"));
         assert_eq!((capture.header.first, capture.header.clock), (5, Some(1_000_000)));
-        assert_eq!(capture.header.channel, "kymo::ring");
+        assert_eq!(capture.header.channel.as_deref(), Some("kymo::ring"));
         let whole: Vec<_> = ends.iter().filter(|(end, ..)| *end <= length).collect();
         let records: Vec<_> = capture.records.iter().map(describe).collect();
         let expected: Vec<_> = whole.iter().map(|(.., text)| text.clone()).collect();
@@ -147,7 +153,7 @@ fn the_header_holds_the_elf_embedded_or_named() {
         let written = Header {
             first: 5,
             clock: None,
-            channel: "kymo::ring".into(),
+            channel: Some("kymo::ring".into()),
             elf,
         };
         Writer::create(&path, &written).unwrap().finish().unwrap();

@@ -39,7 +39,7 @@ fn main() -> Result<()> {
     let catalogue = events::parse(&image, &image_name)?;
     let wanted: usize = wanted.parse()?;
     let capture::Capture { header, records, .. } = capture::read(&bytes)?;
-    let ring = catalogue.ring(Some(&header.channel))?;
+    let ring = catalogue.ring(header.channel.as_deref())?;
     let events: Vec<(u32, &[u8])> = records
         .iter()
         .filter_map(|record| match *record {

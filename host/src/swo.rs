@@ -138,6 +138,21 @@ pub struct Watched {
     pub exceptions_dropped: usize,
     /// The exception packets outside the anchors.
     pub exceptions_undated: usize,
+    /// How the DWT's tick dated the stream, in a capture of SWO alone: none
+    /// when the anchors did.
+    pub ticks: Option<Ticks>,
+}
+
+/// How the DWT's tick dated a stream (`tick`): its period, the ticks kept
+/// and set aside, the segments, and what placed them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ticks {
+    pub period: i64,
+    pub kept: usize,
+    pub segments: usize,
+    pub uncertainty: Option<f64>,
+    pub frequency: Option<f64>,
+    pub counted: bool,
 }
 
 /// An event of the trace that starts at slot 0: its element, its cycles and
@@ -446,6 +461,9 @@ pub fn tick(bytes: &[u8], reads: &[Read], watches: &[Watch], ctrl: Option<u32>, 
     // segment, its ticks' cycles and host times.
     let mut segment: Option<(Segment, usize)> = None;
     let mut points: Vec<Vec<(i64, u64)>> = Vec::new();
+    // The samples dropped: their watch, and the segment and cycles in it of
+    // the tick before them, the segment none before the first.
+    let mut dropped: Vec<(usize, Option<usize>, i64)> = Vec::new();
     for pair in kept.windows(2) {
         let [(n, start), (m, end)] = [pair[0], pair[1]];
         let between = &stream[start + 1..end];
@@ -454,7 +472,16 @@ pub fn tick(bytes: &[u8], reads: &[Read], watches: &[Watch], ctrl: Option<u32>, 
         if !sound {
             ticked.segments.extend(segment.take().map(|(segment, _)| segment));
             ticked.gaps += 1;
-            ticked.dropped += between.iter().filter(|item| sample(item, watches).is_some()).count();
+            let before = (
+                ticked.segments.len().checked_sub(1),
+                ticked.segments.last().map_or(0, |segment| segment.cycles),
+            );
+            dropped.extend(
+                between
+                    .iter()
+                    .filter_map(|item| sample(item, watches))
+                    .map(|(watch, ..)| (watch, before.0, before.1)),
+            );
             ticked.exceptions_dropped += between.iter().filter(|item| exception(item).is_some()).count();
             continue;
         }
@@ -470,7 +497,7 @@ pub fn tick(bytes: &[u8], reads: &[Read], watches: &[Watch], ctrl: Option<u32>, 
         for (watch, value, itm) in between.iter().filter_map(|item| sample(item, watches)) {
             match itm {
                 Some(itm) => segment.samples.push((watch, value, at(itm))),
-                None => ticked.dropped += 1,
+                None => dropped.push((watch, Some(ticked.segments.len()), from)),
             }
         }
         for (number, function, itm) in between.iter().filter_map(exception) {
@@ -487,6 +514,12 @@ pub fn tick(bytes: &[u8], reads: &[Read], watches: &[Watch], ctrl: Option<u32>, 
     }
     ticked.segments.extend(segment.map(|(segment, _)| segment));
     place(&mut ticked, period, &points, clock);
+    let origin = |segment: Option<usize>| segment.map_or(0, |n: usize| ticked.segments[n].origin);
+    let dropped = dropped
+        .iter()
+        .map(|&(watch, segment, cycles)| (watch, origin(segment) + cycles))
+        .collect();
+    ticked.dropped = dropped;
     ticked
 }
 
@@ -599,10 +632,11 @@ pub struct Ticked {
     /// The segments, in the order of the stream, each with an origin of its
     /// own.
     pub segments: Vec<Segment>,
-    /// The stretches not dated, and the samples and exception packets they
+    /// The stretches not dated; the samples dropped, the index of their
+    /// watch and the cycles of the tick before them; the exception packets
     /// dropped.
     pub gaps: usize,
-    pub dropped: usize,
+    pub dropped: Vec<(usize, i64)>,
     pub exceptions_dropped: usize,
     /// The samples and exception packets before the first tick kept, after
     /// the last one, or without a timestamp after them.
@@ -687,11 +721,31 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
         .iter()
         .find(|watch| u64::from(watch.address) == anchor_address && watch.size == 4)
     else {
+        let ticks = read(bytes)
+            .0
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    Item::Dated {
+                        what: What::Tick { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        let mut refused = format!(
+            "no DWT comparator sends the anchor, the writes to {anchor_address:#010x}: \
+             the program did not call kymo::dwt::start, or its comparator was taken over"
+        );
+        if ticks > 0 {
+            refused += &format!(
+                "; the stream holds {ticks} ticks of the DWT, which date only a capture of SWO alone \
+                 (kymo record --swo-only)"
+            );
+        }
         return Watched {
-            refused: Some(format!(
-                "no DWT comparator sends the anchor, the writes to {anchor_address:#010x}: \
-                 the program did not call kymo::dwt::start, or its comparator was taken over"
-            )),
+            refused: Some(refused),
             ..Watched::default()
         };
     };
@@ -700,22 +754,7 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
         .filter(|watch| watch.comparator != anchor.comparator)
         .copied()
         .collect();
-    let readings: Vec<(Curve, Reading)> = variables
-        .iter()
-        .map(|watch| {
-            let address = u64::from(watch.address);
-            let subject = catalogue
-                .symbols
-                .name(&Pointee::Other, address)
-                .unwrap_or_else(|| format!("{address:#010x}"));
-            let reading = catalogue
-                .symbols
-                .number(address)
-                .filter(|reading| reading.size() == usize::from(watch.size))
-                .unwrap_or(Reading::Unsigned(usize::from(watch.size)));
-            (Curve { subject, field: None }, reading)
-        })
-        .collect();
+    let readings = readings(catalogue, &variables);
 
     let events: Vec<(usize, i64)> = elements
         .iter()
@@ -775,7 +814,125 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
         exceptions: dated.exceptions,
         exceptions_dropped: dated.exceptions_dropped,
         exceptions_undated: dated.exceptions_undated,
+        ticks: None,
     }
+}
+
+/// The variables of `dwt` watched in a capture of SWO alone, and their
+/// samples in the stream `bytes`, dated by the DWT's tick and placed by the
+/// host time of the `reads` (`tick`); `clock`, when given, is the cycle
+/// counter's frequency in hertz. The comparators on the timestamp word of a
+/// ring's slot 0 send anchors, not a variable.
+pub fn alone(catalogue: &Catalogue, dwt: &Dwt, bytes: &[u8], reads: &[Read], clock: Option<u64>) -> Watched {
+    let anchors: Vec<u64> = catalogue
+        .rings
+        .iter()
+        .map(|ring| ring.address + ring.slots_offset + 4)
+        .collect();
+    let variables: Vec<Watch> = watches(dwt)
+        .into_iter()
+        .filter(|watch| !(watch.size == 4 && anchors.contains(&u64::from(watch.address))))
+        .collect();
+    let readings = readings(catalogue, &variables);
+    let ticked = tick(bytes, reads, &variables, Some(dwt.ctrl), clock);
+    if let Some(refused) = ticked.refused {
+        return Watched {
+            refused: Some(refused),
+            ..Watched::default()
+        };
+    }
+    let at = |cycles: i64| Edge {
+        element: 0,
+        cycles,
+        lost: false,
+    };
+    let samples = ticked
+        .segments
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .samples
+                .iter()
+                .map(move |&(watch, value, cycles)| (watch, value, segment.origin + cycles))
+        })
+        .filter_map(|(watch, value, cycles)| {
+            let (curve, reading) = &readings[watch];
+            Some(Sampled {
+                curve: curve.clone(),
+                value: reading.read(&value.to_le_bytes())?,
+                at: at(cycles),
+            })
+        })
+        .collect();
+    let exceptions = ticked
+        .segments
+        .iter()
+        .flat_map(|segment| {
+            segment.exceptions.iter().map(|exception| Exception {
+                cycles: segment.origin + exception.cycles,
+                ..*exception
+            })
+        })
+        .collect();
+    let ends = |segment: &Segment| (segment.origin, segment.origin + segment.cycles);
+    let span = ticked
+        .segments
+        .first()
+        .zip(ticked.segments.last())
+        .map(|(first, last)| (ends(first).0, ends(last).1));
+    let gaps = ticked
+        .segments
+        .windows(2)
+        .map(|pair| (ends(&pair[0]).1, ends(&pair[1]).0))
+        .collect();
+    Watched {
+        refused: None,
+        curves: readings.iter().map(|(curve, _)| curve.clone()).collect(),
+        samples,
+        span,
+        gaps,
+        anchors: 0,
+        set_aside: ticked.set_aside,
+        overflows: ticked.overflows,
+        dropped: ticked
+            .dropped
+            .iter()
+            .map(|&(watch, cycles)| (readings[watch].0.clone(), cycles))
+            .collect(),
+        undated: ticked.undated,
+        exceptions,
+        exceptions_dropped: ticked.exceptions_dropped,
+        exceptions_undated: ticked.exceptions_undated,
+        ticks: Some(Ticks {
+            period: ticked.period.expect("a stream the ticks date has their period"),
+            kept: ticked.ticks,
+            segments: ticked.segments.len(),
+            uncertainty: ticked.uncertainty,
+            frequency: ticked.frequency,
+            counted: ticked.counted,
+        }),
+    }
+}
+
+/// The curve of each of `variables`, and how its samples read: as the ELF
+/// says at its address, else unsigned and named by the address.
+fn readings(catalogue: &Catalogue, variables: &[Watch]) -> Vec<(Curve, Reading)> {
+    variables
+        .iter()
+        .map(|watch| {
+            let address = u64::from(watch.address);
+            let subject = catalogue
+                .symbols
+                .name(&Pointee::Other, address)
+                .unwrap_or_else(|| format!("{address:#010x}"));
+            let reading = catalogue
+                .symbols
+                .number(address)
+                .filter(|reading| reading.size() == usize::from(watch.size))
+                .unwrap_or(Reading::Unsigned(usize::from(watch.size)));
+            (Curve { subject, field: None }, reading)
+        })
+        .collect()
 }
 
 /// What came of the SWO stream, for a summary: a warning when its samples
@@ -785,15 +942,24 @@ pub fn summary(watched: &Watched) -> String {
         return format!("warning: the DWT's samples are not dated: {refused}");
     }
     let mut line = format!(
-        "{} samples of {} watched variables, {} anchors",
+        "{} samples of {} watched variables, ",
         watched.samples.len(),
-        watched.curves.len(),
-        watched.anchors
+        watched.curves.len()
     );
+    let references = match &watched.ticks {
+        Some(ticks) => {
+            line += &format!("{} ticks every {} cycles", ticks.kept, ticks.period);
+            "ticks"
+        }
+        None => {
+            line += &format!("{} anchors", watched.anchors);
+            "anchors"
+        }
+    };
     if watched.set_aside > 0 {
         line += &format!(" ({} set aside: their timestamp delayed or shared)", watched.set_aside);
     }
-    if !watched.gaps.is_empty() {
+    if !watched.gaps.is_empty() || !watched.dropped.is_empty() {
         line += &format!(
             ", {} gaps dropping {} samples ({} overflows)",
             watched.gaps.len(),
@@ -801,8 +967,21 @@ pub fn summary(watched: &Watched) -> String {
             watched.overflows
         );
     }
+    if let Some(ticks) = &watched.ticks {
+        match (ticks.counted, ticks.uncertainty) {
+            _ if ticks.segments < 2 => {}
+            (true, _) => line += ", the periods they lost counted",
+            (false, Some(uncertainty)) => {
+                line += &format!(", placed by host time within {:.1} ms", uncertainty / 1e6);
+            }
+            (false, None) => line += ", placed a period apart: no host time",
+        }
+        if let Some(frequency) = ticks.frequency {
+            line += &format!(", the cycle counter at {frequency:.0} Hz");
+        }
+    }
     if watched.undated > 0 {
-        line += &format!(", {} undated outside the anchors", watched.undated);
+        line += &format!(", {} undated outside the {references}", watched.undated);
     }
     if !watched.exceptions.is_empty() || watched.exceptions_dropped > 0 || watched.exceptions_undated > 0 {
         line += &format!("; {} exception packets", watched.exceptions.len());
@@ -810,7 +989,7 @@ pub fn summary(watched: &Watched) -> String {
             line += &format!(", {} dropped in the gaps", watched.exceptions_dropped);
         }
         if watched.exceptions_undated > 0 {
-            line += &format!(", {} undated outside the anchors", watched.exceptions_undated);
+            line += &format!(", {} undated outside the {references}", watched.exceptions_undated);
         }
     }
     line

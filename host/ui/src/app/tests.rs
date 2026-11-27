@@ -37,7 +37,7 @@ fn capture(path: &Path, elf: Elf) {
     let header = Header {
         first: 0,
         clock: None,
-        channel: "os".to_owned(),
+        channel: Some("os".to_owned()),
         elf,
     };
     Writer::create(path, &header).unwrap().finish().unwrap();
