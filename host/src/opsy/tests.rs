@@ -1665,6 +1665,45 @@ fn the_adapter_handler_has_no_period_across_the_swo_coverage() {
 }
 
 #[test]
+fn the_adapter_cost_is_the_swo_span_around_its_own() {
+    // The adapter traces H at 0, 120 and 210; the SWO sees TIM2 from 115 to
+    // 134 around the adapter's 120 to 130, and nothing outside 100 to 200.
+    let mut steps: Vec<(&str, &[u32])> = vec![("isr_enter", &[H, 16 + 45]), ("isr_exit", &[H])];
+    steps.extend([("tick", &[] as &[u32]); 10]);
+    steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
+    steps.extend([("tick", &[] as &[u32]); 7]);
+    steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
+    let packets = [
+        (0, RETURNED, 105),
+        (61, ENTERED, 115),
+        (61, EXITED, 134),
+        (0, RETURNED, 134),
+    ];
+    let catalogue = catalogue();
+    let (trace, _) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
+    assert_eq!(
+        group(&report, "handler TIM2 (0x08000401) adapter_entry"),
+        (1, 0, 0, 0, vec![5])
+    );
+    assert_eq!(
+        group(&report, "handler TIM2 (0x08000401) adapter_exit"),
+        (1, 0, 0, 0, vec![4])
+    );
+    // A span of the SWO the adapter's run does not fit in gives no cost.
+    let packets = [
+        (0, RETURNED, 105),
+        (61, ENTERED, 115),
+        (61, EXITED, 128),
+        (0, RETURNED, 128),
+    ];
+    let (trace, _) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
+    let names = names(&report);
+    assert!(!names.iter().any(|name| name.contains("adapter_")), "{names:?}");
+}
+
+#[test]
 fn a_loss_of_the_ring_hides_nothing_the_swo_dates() {
     // TIM2 runs across a loss of the ring, and at the end of the coverage.
     let steps: [(&str, &[u32]); 4] = [("tick", &[]), ("lost", &[]), ("tick", &[]), ("tick", &[])];

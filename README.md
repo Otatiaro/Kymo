@@ -266,7 +266,10 @@ and nest as entries, exits and returns say; within SWO's coverage only, from
 the first anchor to the last less the gaps, where a handler still open ends
 lost. A ring loss hides nothing SWO dates. Where the adapter traces the same
 handler, its spans that touch SWO's coverage give way to SWO's, and a warning
-says the handler is traced twice, at a cost in slots and cycles.
+says the handler is traced twice, at a cost in slots and cycles. `stats`
+measures that cost on SWO's handler: `adapter_entry`, from SWO's entry to
+`isr_enter`, and `adapter_exit`, from `isr_exit` to SWO's exit, for each run
+of the adapter held whole in a span of SWO.
 
 SWO is read on every pass, between two reads of the ring, so the ring is
 drained less often: on an ST-Link V3 at 24 MHz SWD, a read takes about 160 µs
