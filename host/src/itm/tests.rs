@@ -71,7 +71,7 @@ fn reads_sync_and_overflow() {
 fn reads_past_other_packets() {
     let bytes = [
         0x01, 0xaa, // instrumentation port 0, one byte
-        0x0e, 0x01, 0x00, // hardware source 1 (exception trace), two bytes
+        0x05, 0x20, // hardware source 0 (event counter), one byte
         0x94, 0x81, 0x01, // global timestamp 1
         0xb4, 0x01, // global timestamp 2
         0x08, // extension, one byte
@@ -83,6 +83,26 @@ fn reads_past_other_packets() {
     assert_eq!(
         packets,
         [[Packet::Source; 2].as_slice(), &[Packet::Other; 4], &[value(2, 1, 4)]].concat()
+    );
+}
+
+#[test]
+fn reads_exception_trace_packets() {
+    // Hardware source 1, two bytes: the number's low eight bits, then its
+    // ninth in bit 0 and the function in bits 5:4.
+    let bytes = [0x0e, 0x2d, 0x10, 0x0e, 0x0f, 0x21, 0x0e, 0x00, 0x30, 0x0e, 0x2d, 0x00];
+    let exception = |number, function| Packet::Exception { number, function };
+    assert_eq!(
+        packets(&bytes),
+        (
+            vec![
+                exception(45, Function::Entered),
+                exception(271, Function::Exited),
+                exception(0, Function::Returned),
+                Packet::Malformed,
+            ],
+            false
+        )
     );
 }
 

@@ -31,10 +31,14 @@
 //! A stretch that is not dated is a gap: its samples are dropped, and the
 //! curves' values are unknown over it. The samples before the first anchor
 //! and after the last one cannot be dated: they are counted, not kept.
+//!
+//! The exception packets the DWT sends when its exception trace is on
+//! (ADR-102) are dated the same way: between two anchors, by the timestamp
+//! after them. Those of a gap are dropped, never decoded.
 
 use crate::capture::Dwt;
 use crate::events::{Catalogue, Pointee, Ring};
-use crate::itm::{self, Packet};
+use crate::itm::{self, Function, Packet};
 use crate::model::{Edge, Element};
 use crate::values::{Curve, Reading, Sampled};
 use std::collections::HashMap;
@@ -124,6 +128,12 @@ pub struct Watched {
     /// The samples before the first anchor, after the last one, or without
     /// a timestamp after them at the end of the stream.
     pub undated: usize,
+    /// The exception packets dated, in the order of the stream.
+    pub exceptions: Vec<Exception>,
+    /// The exception packets in a gap: dropped, not decoded.
+    pub exceptions_dropped: usize,
+    /// The exception packets outside the anchors.
+    pub exceptions_undated: usize,
 }
 
 /// An event of the trace that starts at slot 0: its element, its cycles and
@@ -147,27 +157,32 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     // The packets the next timestamp dates, those read past included.
     let mut since = 0usize;
     for packet in packets {
-        match packet {
+        let what = match packet {
             Packet::DataValue {
                 comparator,
                 write: true,
                 value,
                 ..
-            } => {
-                since += 1;
-                waiting.push(stream.len());
-                stream.push(Item::Value {
-                    comparator,
-                    value,
-                    itm: None,
-                    alone: false,
-                });
-            }
+            } => Some(What::Value { comparator, value }),
+            Packet::Exception { number, function } => Some(What::Exception { number, function }),
+            _ => None,
+        };
+        if let Some(what) = what {
+            since += 1;
+            waiting.push(stream.len());
+            stream.push(Item::Dated {
+                what,
+                itm: None,
+                alone: false,
+            });
+            continue;
+        }
+        match packet {
             Packet::DataValue { write: false, .. } | Packet::Source => since += 1,
             Packet::Timestamp { delta, control } => {
                 clock += u64::from(delta) + 1;
                 for &item in &waiting {
-                    if let Item::Value { itm, alone, .. } = &mut stream[item] {
+                    if let Item::Dated { itm, alone, .. } = &mut stream[item] {
                         *itm = Some(clock);
                         *alone = control == 0 && since == 1;
                     }
@@ -179,16 +194,15 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
                 overflows += usize::from(packet == Packet::Overflow);
                 stream.push(Item::Broken);
             }
-            Packet::Sync | Packet::Other => {}
+            Packet::Sync | Packet::Other | Packet::DataValue { write: true, .. } | Packet::Exception { .. } => {}
         }
     }
 
     // The anchors received, by timestamp: their places in the stream.
     let mut received: HashMap<u32, Vec<usize>> = HashMap::new();
     for (at, item) in stream.iter().enumerate() {
-        if let Item::Value {
-            comparator,
-            value,
+        if let Item::Dated {
+            what: What::Value { comparator, value },
             itm: Some(_),
             ..
         } = *item
@@ -210,14 +224,14 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
         .collect();
 
     let itm_of = |at: usize| match stream[at] {
-        Item::Value { itm: Some(itm), .. } => itm as i64,
+        Item::Dated { itm: Some(itm), .. } => itm as i64,
         _ => unreachable!("a matched anchor is dated"),
     };
     let mut dated = Dated {
         overflows,
         ..Dated::default()
     };
-    let alone = |at: usize| matches!(stream[at], Item::Value { alone: true, .. });
+    let alone = |at: usize| matches!(stream[at], Item::Dated { alone: true, .. });
     let anchors: Vec<(usize, &Expected, usize)> = matched
         .iter()
         .enumerate()
@@ -227,21 +241,29 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     dated.anchors = anchors.len();
     dated.set_aside = matched.iter().flatten().count() - anchors.len();
     let sample = |item: &Item| match *item {
-        Item::Value {
-            comparator, value, itm, ..
+        Item::Dated {
+            what: What::Value { comparator, value },
+            itm,
+            ..
         } if comparator != anchor => watches
             .iter()
             .position(|watch| watch.comparator == comparator)
             .map(|watch| (watch, value, itm)),
         _ => None,
     };
+    let exception = |item: &Item| match *item {
+        Item::Dated {
+            what: What::Exception { number, function },
+            itm,
+            ..
+        } => Some((number, function, itm)),
+        _ => None,
+    };
     let first = anchors.first().map_or(stream.len(), |&(.., at)| at);
     let last = anchors.last().map_or(stream.len(), |&(.., at)| at);
-    dated.undated = stream[..first]
-        .iter()
-        .chain(stream.get(last..).unwrap_or_default())
-        .filter(|item| sample(item).is_some())
-        .count();
+    let outside = || stream[..first].iter().chain(stream.get(last..).unwrap_or_default());
+    dated.undated = outside().filter(|item| sample(item).is_some()).count();
+    dated.exceptions_undated = outside().filter(|item| exception(item).is_some()).count();
     for pair in anchors.windows(2) {
         let [(n, from, start), (m, to, end)] = [pair[0], pair[1]];
         let between = &stream[start + 1..end];
@@ -259,6 +281,16 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
                 _ => dated.dropped.push((watch, from.cycles)),
             }
         }
+        for (number, function, itm) in between.iter().filter_map(exception) {
+            match itm {
+                Some(itm) if sound => dated.exceptions.push(Exception {
+                    number,
+                    function,
+                    cycles: from.cycles + itm as i64 - itm_of(start),
+                }),
+                _ => dated.exceptions_dropped += 1,
+            }
+        }
     }
     if let (Some(&(_, first, _)), Some(&(_, last, _))) = (anchors.first(), anchors.last())
         && anchors.len() > 1
@@ -271,16 +303,27 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
 /// What the stream holds that dating reads.
 #[derive(Clone, Copy, Debug)]
 enum Item {
-    /// A data value written, the ITM's clock at the timestamp after it, and
-    /// whether that timestamp is synchronous and dates it alone.
-    Value {
-        comparator: u8,
-        value: u32,
-        itm: Option<u64>,
-        alone: bool,
-    },
+    /// A packet the timestamp after it dates, the ITM's clock at that
+    /// timestamp, and whether it is synchronous and dates this packet alone.
+    Dated { what: What, itm: Option<u64>, alone: bool },
     /// An overflow or a malformed packet: packets may be missing.
     Broken,
+}
+
+/// A packet dating reads: a data value written, or an exception packet.
+#[derive(Clone, Copy, Debug)]
+enum What {
+    Value { comparator: u8, value: u32 },
+    Exception { number: u16, function: Function },
+}
+
+/// An exception packet, dated: the exception's number, what the core did with
+/// it, and its cycles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exception {
+    pub number: u16,
+    pub function: Function,
+    pub cycles: i64,
 }
 
 /// The samples of a stream, dated.
@@ -297,6 +340,9 @@ pub struct Dated {
     /// The index of its watch and the cycles of the anchor before.
     pub dropped: Vec<(usize, i64)>,
     pub undated: usize,
+    pub exceptions: Vec<Exception>,
+    pub exceptions_dropped: usize,
+    pub exceptions_undated: usize,
 }
 
 /// The variables of `dwt` watched in a trace's `elements`, read from `ring`,
@@ -393,6 +439,9 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
             .map(|&(watch, cycles)| (readings[watch].0.clone(), cycles))
             .collect(),
         undated: dated.undated,
+        exceptions: dated.exceptions,
+        exceptions_dropped: dated.exceptions_dropped,
+        exceptions_undated: dated.exceptions_undated,
     }
 }
 
@@ -421,6 +470,15 @@ pub fn summary(watched: &Watched) -> String {
     }
     if watched.undated > 0 {
         line += &format!(", {} undated outside the anchors", watched.undated);
+    }
+    if !watched.exceptions.is_empty() || watched.exceptions_dropped > 0 || watched.exceptions_undated > 0 {
+        line += &format!("; {} exception packets", watched.exceptions.len());
+        if watched.exceptions_dropped > 0 {
+            line += &format!(", {} dropped in the gaps", watched.exceptions_dropped);
+        }
+        if watched.exceptions_undated > 0 {
+            line += &format!(", {} undated outside the anchors", watched.exceptions_undated);
+        }
     }
     line
 }
