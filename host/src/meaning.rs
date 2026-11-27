@@ -843,7 +843,7 @@ impl<'a> Meaning<'a> {
     /// the image's vector table otherwise. An edge falls after the last event
     /// at or before its cycles. A handler both channels trace keeps the
     /// adapter's spans that touch no stretch of the SWO's coverage alone.
-    /// A trace without events takes in none.
+    /// In a trace without events, of SWO alone, every edge is at element 0.
     pub fn exceptions(&mut self, watched: &Watched, elements: &[Element]) {
         let events: Vec<(i64, usize)> = elements
             .iter()
@@ -853,7 +853,7 @@ impl<'a> Meaning<'a> {
                 _ => None,
             })
             .collect();
-        if watched.exceptions.is_empty() || events.is_empty() {
+        if watched.exceptions.is_empty() {
             return;
         }
         let coverage = exceptions::coverage(watched);
