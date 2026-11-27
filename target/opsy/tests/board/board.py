@@ -173,7 +173,7 @@ def read_words(probe_rs: str, probe: str, address: int, count: int) -> list[int]
 
 
 def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
-    """What kymo::dwt::start() and watch() configured, read from the registers."""
+    """What kymo::dwt::start(), anchor() and watch() configured, read from the registers."""
     symbols = {}
     for line in subprocess.run([nm, "-C", image], capture_output=True, text=True, encoding="utf-8",
                                check=True).stdout.splitlines():
@@ -182,7 +182,7 @@ def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
     anchor = symbols["trace_ring"] + 12  # write_index, lapped, then slot 0's header: its timestamp word
     position = symbols["app::(anonymous namespace)::g_position"]
     if read_words(probe_rs, probe, symbols["app::(anonymous namespace)::g_dwt_started"], 1) != [1]:
-        return ["kymo::dwt::start() or watch() failed"]
+        return ["kymo::dwt::anchor() or watch() failed, or anchor() took a comparator before start()"]
     words = read_words(probe_rs, probe, 0xE0001020, 16)
     comparators = [(words[4 * n], words[4 * n + 2]) for n in range(4)]
     # A data value on write (MATCH 0b1101, ACTION 0b10) of 4 bytes (DATAVSIZE 2).
