@@ -118,6 +118,16 @@ pub struct Interrupt {
     pub span: Span,
 }
 
+/// The adapter's cost on a run of a handler both channels trace: from the
+/// SWO's entry to the adapter's, and from the adapter's exit to the SWO's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cost {
+    /// The SWO's handler.
+    pub handler: usize,
+    pub entry: Span,
+    pub exit: Span,
+}
+
 /// A mutex held by a task, or waited for by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hold {
@@ -701,6 +711,9 @@ pub struct Meaning<'a> {
     replaced: Vec<(i64, i64)>,
     /// The exception packets that contradict the nesting, placed in the trace.
     pub exception_contradictions: Vec<Edge>,
+    /// The adapter's cost on each of its runs the SWO replaces, closed and
+    /// held whole in a span of the SWO with no lost edge, in its order.
+    pub costs: Vec<Cost>,
 }
 
 impl<'a> Meaning<'a> {
@@ -779,6 +792,7 @@ impl<'a> Meaning<'a> {
             doubly: BTreeSet::new(),
             replaced: Vec::new(),
             exception_contradictions: Vec::new(),
+            costs: Vec::new(),
         })
     }
 
@@ -868,21 +882,62 @@ impl<'a> Meaning<'a> {
             .chain(shared)
             .collect();
         self.replaced = coverage;
-        let mut interrupts = std::mem::take(&mut self.closed.interrupts);
-        interrupts.retain(|interrupt| !self.replaces(interrupt.handler, interrupt.span));
+        let (replaced, mut interrupts): (Vec<Interrupt>, Vec<Interrupt>) = std::mem::take(&mut self.closed.interrupts)
+            .into_iter()
+            .partition(|interrupt| self.replaces(interrupt.handler, interrupt.span));
+        // By exception and entry: the SWO's spans with no lost edge.
+        let mut whole: BTreeMap<(u16, i64), Interrupt> = BTreeMap::new();
         for line in nested.lines {
-            let handler = self.hardware(line.exception);
-            interrupts.push(Interrupt {
-                handler,
+            let interrupt = Interrupt {
+                handler: self.hardware(line.exception),
                 depth: line.depth,
                 span: Span {
                     from: edge(line.from),
                     to: edge(line.to),
                 },
-            });
+            };
+            if !line.from.lost && !line.to.lost {
+                whole.insert((line.exception, line.from.cycles), interrupt);
+            }
+            interrupts.push(interrupt);
         }
         interrupts.sort_by_key(|interrupt| interrupt.span.to.at());
         self.closed.interrupts = interrupts;
+        let mut of_handler: BTreeMap<usize, u16> = BTreeMap::new();
+        for (&exception, &(handler, _)) in &self.traced {
+            of_handler.entry(handler).or_insert(exception);
+        }
+        let mut of_address: BTreeMap<u64, u16> = BTreeMap::new();
+        for (&handler, &exception) in &of_handler {
+            if !self.handlers.is_named(handler) {
+                of_address
+                    .entry(self.handlers.list[handler].address)
+                    .or_insert(exception);
+            }
+        }
+        self.costs = replaced
+            .iter()
+            .filter(|run| !run.span.from.lost && !run.span.to.lost)
+            .filter_map(|run| {
+                let exception = of_handler.get(&run.handler).or_else(|| {
+                    (!self.handlers.is_named(run.handler))
+                        .then(|| of_address.get(&self.handlers.list[run.handler].address))
+                        .flatten()
+                })?;
+                let (&(of, _), swo) = whole.range(..=(*exception, run.span.from.cycles)).next_back()?;
+                (of == *exception && swo.span.to.cycles >= run.span.to.cycles).then_some(Cost {
+                    handler: swo.handler,
+                    entry: Span {
+                        from: swo.span.from,
+                        to: run.span.from,
+                    },
+                    exit: Span {
+                        from: run.span.to,
+                        to: swo.span.to,
+                    },
+                })
+            })
+            .collect();
         self.exception_contradictions = nested
             .contradictions
             .iter()
@@ -1644,6 +1699,9 @@ pub const RESPONSE: Metric = metric("response", false, false);
 pub const PERIOD: Metric = metric("period", false, true);
 pub const HOLD: Metric = metric("hold", false, false);
 pub const WAIT: Metric = metric("wait", false, false);
+/// A handler's, the adapter's cost where the SWO traces it too.
+pub const ADAPTER_ENTRY: Metric = metric("adapter_entry", false, false);
+pub const ADAPTER_EXIT: Metric = metric("adapter_exit", false, false);
 
 const TASK_METRICS: [Metric; 7] = [
     WAKE_LATENCY,
@@ -1654,7 +1712,7 @@ const TASK_METRICS: [Metric; 7] = [
     RESPONSE,
     PERIOD,
 ];
-const HANDLER_METRICS: [Metric; 3] = [GROSS, NET, PERIOD];
+const HANDLER_METRICS: [Metric; 5] = [GROSS, NET, PERIOD, ADAPTER_ENTRY, ADAPTER_EXIT];
 const MUTEX_METRICS: [Metric; 2] = [HOLD, WAIT];
 
 /// The time `spans`, sorted and apart, take of `from..to`.
@@ -1775,7 +1833,10 @@ pub fn ready(meaning: &Meaning) -> Vec<Ready> {
 ///   the end. An activation in which the task never runs has only a
 ///   response time. And the period, from a task_ready to the task's next;
 /// - a handler's: gross, from entry to exit; net, less the handlers nested
-///   one level within it; the period, from an entry to the next;
+///   one level within it; the period, from an entry to the next; and for a
+///   handler of the SWO that the adapter traces too, the adapter's cost:
+///   from the SWO's entry to the adapter's, from the adapter's exit to the
+///   SWO's;
 /// - a mutex's: each hold and each wait, by task and in total.
 ///
 /// Each instance spans its activation, its handler's run, its period, its
@@ -1806,8 +1867,11 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
     // At most 8 instances per activation, 3 per handler run, 2 per hold
     // and 1 per wake: reserved at once, the vector is never copied to grow.
     let holds = meaning.closed.holds.len() + open.holds.len();
-    let most =
-        8 * (meaning.activations.len() + still_open.len()) + 3 * interrupts.len() + 2 * holds + meaning.wakes.len();
+    let most = 8 * (meaning.activations.len() + still_open.len())
+        + 3 * interrupts.len()
+        + 2 * meaning.costs.len()
+        + 2 * holds
+        + meaning.wakes.len();
     let mut out: Vec<(Order, Instance)> = Vec::with_capacity(most);
     let mut push = |kind: (u8, &'static str),
                     subject: usize,
@@ -1951,6 +2015,21 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
             span,
             false,
         );
+    }
+    for cost in &meaning.costs {
+        for (metric, span) in [(ADAPTER_ENTRY, cost.entry), (ADAPTER_EXIT, cost.exit)] {
+            let value = span.to.cycles - span.from.cycles;
+            push(
+                HANDLER,
+                cost.handler,
+                &HANDLER_METRICS,
+                metric,
+                None,
+                value,
+                span,
+                false,
+            );
+        }
     }
 
     let holds = meaning
