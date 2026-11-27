@@ -32,7 +32,6 @@
 use crate::events::{self, Catalogue};
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
-use crate::swo::Watched;
 use crate::target::Result;
 use crate::values::{self, Curve, Number, Values};
 use crate::{durations, meaning};
@@ -76,12 +75,13 @@ pub struct Range {
     pub to: Option<i64>,
 }
 
-/// A value and where its instance starts: an event's index and instant.
+/// A value and where its instance starts: an event's index, none in a
+/// trace of SWO alone, and instant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Point<V = i64> {
     pub value: V,
     pub element: usize,
-    pub index: u32,
+    pub index: Option<u32>,
     pub cycles: i64,
     pub seconds: Option<f64>,
 }
@@ -350,9 +350,12 @@ struct Places {
     /// The suspects' indexes `from..to`.
     suspects: Vec<(u32, u32)>,
     /// The cycles of the first event, where the seconds start, and their
-    /// frequency.
+    /// frequency; without events, of the SWO's first tick.
     origin: i64,
     frequency: Option<f64>,
+    /// Whether the trace has events: without, of SWO alone, no instance
+    /// starts at one.
+    events: bool,
 }
 
 impl Places {
@@ -362,14 +365,16 @@ impl Places {
             _ => None,
         });
         let (mut cycles_before, mut index_before) = first.unwrap_or((0, trace.first));
+        let span = trace.watched.as_ref().and_then(|watched| watched.span);
         let mut places = Self {
             cycles: Vec::new(),
             index: Vec::new(),
             seconds: Vec::new(),
             losses: Vec::new(),
             suspects: Vec::new(),
-            origin: cycles_before,
+            origin: first.map_or(span.map_or(0, |(first, _)| first), |(cycles, _)| cycles),
             frequency: trace.frequency,
+            events: first.is_some(),
         };
         for (n, element) in trace.elements.iter().enumerate() {
             let mut seconds = None;
@@ -418,7 +423,7 @@ impl Places {
         Point {
             value,
             element: edge.element,
-            index: self.index[edge.element],
+            index: self.events.then(|| self.index[edge.element]),
             cycles: edge.cycles,
             seconds: self.seconds[edge.element],
         }
@@ -459,10 +464,7 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
     contradictions.extend(durations.contradictions);
     contradictions.extend(kernel.exception_contradictions.iter().map(|edge| edge.element));
     let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
-    let known = match &trace.watched {
-        Some(watched) if !has_events(trace) => segments(watched),
-        _ => kernel.known(),
-    };
+    let known = kernel.handled();
     let found = Found {
         instances: &instances,
         contradictions: &contradictions,
@@ -474,27 +476,6 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
     report.curves = values.curves;
     report.warnings.extend(kernel.double_trace());
     Ok(report)
-}
-
-fn has_events(trace: &Trace) -> bool {
-    trace
-        .elements
-        .iter()
-        .any(|element| matches!(element, Element::Event { .. }))
-}
-
-/// The time a trace of SWO alone is known: its span less its gaps.
-fn segments(watched: &Watched) -> Covered {
-    let mut known = Covered::default();
-    if let Some((first, last)) = watched.span {
-        let mut from = first;
-        for &(start, end) in &watched.gaps {
-            known.push(from, start);
-            from = end;
-        }
-        known.push(from, last);
-    }
-    known
 }
 
 /// The statistics of what the adapter `found` over `range` of `trace`, the
@@ -652,11 +633,14 @@ pub fn duration(cycles: i64, frequency: Option<f64>) -> String {
     format!("{value:.digits$} {unit}")
 }
 
-/// Where an instance starts: its event's index, and its instant.
+/// Where an instance starts: its event's index, and its instant; in a trace
+/// of SWO alone, its instant, or its cycles without a frequency.
 fn at<V>(point: &Point<V>) -> String {
-    match point.seconds {
-        Some(seconds) => format!("#{} ({seconds:.6} s)", point.index),
-        None => format!("#{}", point.index),
+    match (point.index, point.seconds) {
+        (Some(index), Some(seconds)) => format!("#{index} ({seconds:.6} s)"),
+        (Some(index), None) => format!("#{index}"),
+        (None, Some(seconds)) => format!("{seconds:.6} s"),
+        (None, None) => format!("{} cycles", point.cycles),
     }
 }
 

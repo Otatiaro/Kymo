@@ -581,9 +581,11 @@ fn relation(
 }
 
 fn place<V>(point: &Point<V>) -> String {
-    match point.seconds {
-        Some(seconds) => format!(", at {seconds:.6} s (event {})", point.index),
-        None => format!(", at event {}", point.index),
+    match (point.index, point.seconds) {
+        (Some(index), Some(seconds)) => format!(", at {seconds:.6} s (event {index})"),
+        (Some(index), None) => format!(", at event {index}"),
+        (None, Some(seconds)) => format!(", at {seconds:.6} s"),
+        (None, None) => format!(", at {} cycles", point.cycles),
     }
 }
 

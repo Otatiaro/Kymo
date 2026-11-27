@@ -709,6 +709,8 @@ pub struct Meaning<'a> {
     /// SWO's coverage: where their spans are the SWO's.
     doubly: BTreeSet<usize>,
     replaced: Vec<(i64, i64)>,
+    /// In a trace without events, of SWO alone, the time the stream covers.
+    alone: Option<Covered>,
     /// The exception packets that contradict the nesting, placed in the trace.
     pub exception_contradictions: Vec<Edge>,
     /// The adapter's cost on each of its runs the SWO replaces, closed and
@@ -791,6 +793,7 @@ impl<'a> Meaning<'a> {
             traced: BTreeMap::new(),
             doubly: BTreeSet::new(),
             replaced: Vec::new(),
+            alone: None,
             exception_contradictions: Vec::new(),
             costs: Vec::new(),
         })
@@ -843,7 +846,8 @@ impl<'a> Meaning<'a> {
     /// the image's vector table otherwise. An edge falls after the last event
     /// at or before its cycles. A handler both channels trace keeps the
     /// adapter's spans that touch no stretch of the SWO's coverage alone.
-    /// In a trace without events, of SWO alone, every edge is at element 0.
+    /// In a trace without events, of SWO alone, every edge is at element 0,
+    /// and the time the stream covers is the time the handlers are known.
     pub fn exceptions(&mut self, watched: &Watched, elements: &[Element]) {
         let events: Vec<(i64, usize)> = elements
             .iter()
@@ -853,6 +857,9 @@ impl<'a> Meaning<'a> {
                 _ => None,
             })
             .collect();
+        if events.is_empty() {
+            self.alone = Some(watched.covered());
+        }
         if watched.exceptions.is_empty() {
             return;
         }
@@ -1613,8 +1620,15 @@ impl<'a> Meaning<'a> {
         known
     }
 
-    /// The CPU row: handlers at any depth and tasks other than idle, within
-    /// the time known, and each task where no handler runs. A handler still
+    /// The time the handlers running are known: the time the task on the
+    /// core is, or in a trace of SWO alone, the time the stream covers.
+    pub fn handled(&self) -> Covered {
+        self.alone.clone().unwrap_or_else(|| self.known())
+    }
+
+    /// The CPU row: handlers at any depth, within the time they are known,
+    /// and tasks other than idle, within the time the task on the core is,
+    /// and each task where no handler runs. A handler still
     /// open runs to the end of the capture.
     pub fn cpu(&self) -> Cpu {
         let span = |span: &Span| (span.from.cycles, span.to.cycles);
@@ -1633,7 +1647,8 @@ impl<'a> Meaning<'a> {
             .min();
         let task_open = self.running.and_then(|(task, from)| task.map(|_| from.cycles));
         let known = self.known();
-        let handlers_known = Covered::union(handlers.clone(), handler_open).within(&known);
+        let handled = self.handled();
+        let handlers_known = Covered::union(handlers.clone(), handler_open).within(&handled);
         let mut runs = vec![Vec::new(); self.tasks.list.len()];
         for run in &self.closed.runs {
             if let Some(task) = run.task {
@@ -1655,6 +1670,7 @@ impl<'a> Meaning<'a> {
             handlers: handlers_known,
             tasks: each,
             known,
+            handled,
         }
     }
 

@@ -101,16 +101,31 @@ fn shown(
 #[test]
 fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
     let mut state = 0x2545_f491_4f6c_dd1d;
-    let (mut kept, mut edges, mut several, mut picked) = (0, 0, 0, [0; 4]);
+    let (mut kept, mut edges, mut several, mut unknowns, mut picked) = (0, 0, 0, 0, [0; 4]);
     for _ in 0..300 {
         let length = 200 + (random(&mut state) % 20_000) as usize;
         let origin = 1_000_000_007;
         let first = origin + (random(&mut state) % 500) as i64;
         let capture = (first, first + length as i64);
         let open = random(&mut state).is_multiple_of(2);
-        let known = cycles(&mut state, length, None);
+        // The handlers are known where the task is, and in a trace of SWO
+        // alone, where it never is, where the stream covers.
+        let (known, handled) = match random(&mut state) % 3 {
+            0 => {
+                let known = cycles(&mut state, length, None);
+                (known.clone(), known)
+            }
+            1 => (vec![false; length], cycles(&mut state, length, None)),
+            _ => {
+                let known = cycles(&mut state, length, None);
+                let more = cycles(&mut state, length, None);
+                let handled = known.iter().zip(&more).map(|(known, more)| known | more).collect();
+                (known, handled)
+            }
+        };
         let set = cycles(&mut state, length, Some(&known));
-        let handlers = cycles(&mut state, length, Some(&known));
+        let handlers = cycles(&mut state, length, Some(&handled));
+        let unknown: Vec<bool> = (0..length).map(|n| handled[n] && !known[n] && !handlers[n]).collect();
         // A task other than idle runs: a few tasks, switching every fifty
         // cycles on average.
         let running = cycles(&mut state, length, Some(&known));
@@ -138,6 +153,7 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
         let row_covered = covered(&set, first, open);
         let cpu_row = Cpu {
             known: covered(&known, first, open),
+            handled: covered(&handled, first, open),
             handlers: covered(&handlers, first, open),
             busy: covered(&busy, first, open),
             tasks: tasks.iter().map(|task| covered(task, first, open)).collect(),
@@ -165,9 +181,10 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
             (view.origin + view.start.floor() as i64).max(capture.0),
             (view.origin + (view.start + view.span).ceil() as i64).min(capture.1),
         );
-        let subs = Subs::new(&view, binning, capture, &cpu_row.known);
+        let subs = Subs::new(&view, binning, capture, &cpu_row);
         let drawn = row(&view, &subs, &row_covered);
-        let drawn_cpu = cpu(&view, &subs, &cpu_row, &order);
+        let drawn_handler = handler(&view, &subs, &cpu_row.handlers);
+        let drawn_cpu = cpu(&view, &subs, &cpu_row, &covered(&unknown, first, open), &order);
         for bin in &drawn_cpu {
             let (low, high) = bin.counted;
             let each: Vec<i64> = order
@@ -175,13 +192,19 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
                 .map(|&task| count(&tasks[task], first, low, high))
                 .collect();
             assert_eq!(bin.stack[1..], each, "{capture:?} {bin:?}");
-            assert!(bin.covered() <= high - low, "{capture:?} {bin:?}");
+            assert_eq!(bin.unknown, count(&unknown, first, low, high), "{capture:?} {bin:?}");
+            assert!(bin.covered() + bin.unknown <= high - low, "{capture:?} {bin:?}");
             several += usize::from(each.iter().filter(|&&each| each > 0).count() > 1);
+            unknowns += usize::from(bin.unknown > 0);
+        }
+        for bin in drawn.iter().chain(&drawn_handler) {
+            assert_eq!(bin.unknown, 0, "{capture:?} {bin:?}");
         }
         // The CPU's stack is the whole bin's, whatever the statistic.
-        for (bins, layers, statistic) in [
-            (&drawn, [&set, &set], statistic),
-            (&drawn_cpu, [&handlers, &busy], Statistic::Mean),
+        for (bins, layers, statistic, known) in [
+            (&drawn, [&set, &set], statistic, &known),
+            (&drawn_handler, [&handlers, &handlers], statistic, &handled),
+            (&drawn_cpu, [&handlers, &busy], Statistic::Mean, &handled),
         ] {
             let context = format!("{capture:?} {} {} {} {binning:?}", view.start, view.span, view.width);
             if in_view.0 < in_view.1 {
@@ -196,11 +219,11 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
                 if bin.from > capture.0 && bin.to < capture.1 {
                     assert_eq!(bin.to - bin.from, width, "{context}");
                 }
-                let counted = shown(statistic, layers[1], &known, first, origin, sub, (bin.from, bin.to));
+                let counted = shown(statistic, layers[1], known, first, origin, sub, (bin.from, bin.to));
                 assert_eq!(bin.counted, counted, "{context}");
                 picked[statistic as usize] += usize::from(counted != (bin.from, bin.to));
                 let (low, high) = counted;
-                assert_eq!(bin.known, count(&known, first, low, high), "{context}");
+                assert_eq!(bin.known, count(known, first, low, high), "{context}");
                 assert_eq!(bin.stack[0], count(layers[0], first, low, high), "{context}");
                 assert_eq!(bin.covered(), count(layers[1], first, low, high), "{context}");
                 assert_eq!(
@@ -223,11 +246,7 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
             start: view.start + (random(&mut state) % 1001) as f64 / 1000.0 * view.span - view.span / 2.0,
             ..view
         };
-        for bin in row(
-            &panned,
-            &Subs::new(&panned, binning, capture, &cpu_row.known),
-            &row_covered,
-        ) {
+        for bin in row(&panned, &Subs::new(&panned, binning, capture, &cpu_row), &row_covered) {
             // The edge bins hold only the part of the capture they cover.
             if let Some(same) = drawn.iter().find(|same| same.from == bin.from && same.to == bin.to) {
                 assert_eq!(
@@ -239,8 +258,9 @@ fn the_bins_drawn_are_counted_cycle_by_cycle_and_read_under_the_pointer() {
         }
     }
     assert!(
-        kept > 10_000 && edges > 10_000 && several > 200 && picked[1..].iter().all(|&n| n > 1_000),
-        "{kept} kept, {edges} edges, {several} CPU bins with several tasks, {picked:?} sub-bins picked"
+        kept > 10_000 && edges > 10_000 && several > 200 && unknowns > 200 && picked[1..].iter().all(|&n| n > 1_000),
+        "{kept} kept, {edges} edges, {several} CPU bins with several tasks, {unknowns} with the task unknown, \
+         {picked:?} sub-bins picked"
     );
 }
 
@@ -300,6 +320,7 @@ fn bin<const N: usize>(known: i64, stack: [i64; N]) -> Drawn {
         counted: (0, 1_000_000),
         known,
         stack: stack.to_vec(),
+        unknown: 0,
     }
 }
 
@@ -324,6 +345,14 @@ fn the_cpus_bar_stacks_its_layers_then_the_time_unknown() {
     // Half unknown, a quarter idle.
     assert_eq!(heights(bin(all / 2, [all / 4, 0])), expect(&[3.0, 3.0], 9.0));
     assert_eq!(heights(bin(0, [0, 0])), expect(&[0.0, 0.0], 12.0));
+    // Of SWO alone: handlers, the task unknown where none runs, then the
+    // time beyond the stream's.
+    let alone = |known, handlers, unknown| Drawn {
+        unknown,
+        ..bin(known, [handlers])
+    };
+    assert_eq!(heights(alone(all / 2, all / 4, all / 4)), expect(&[3.0], 12.0));
+    assert_eq!(heights(alone(all, all / 4, all / 2)), expect(&[3.0], 9.0));
     // Handlers, then tasks: each layer with a cycle a pixel high, an empty
     // one none.
     assert_eq!(

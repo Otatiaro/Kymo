@@ -1244,15 +1244,15 @@ fn the_period_jitter_and_worst_instances_point_at_their_start() {
     };
     let period = find("period", None);
     let distribution = period.distribution.as_ref().unwrap();
-    assert_eq!((distribution.min.value, distribution.min.index), (40, 1));
+    assert_eq!((distribution.min.value, distribution.min.index), (40, Some(1)));
     assert_eq!(
         (distribution.max.value, distribution.max.index, distribution.max.cycles),
-        (50, 5, 50)
+        (50, Some(5), 50)
     );
     assert_eq!(period.jitter(), Some(10));
     let response = find("response", None).distribution.as_ref().unwrap();
-    let worst: Vec<(i64, u32)> = response.worst.iter().map(|point| (point.value, point.index)).collect();
-    assert_eq!(worst, [(20, 1), (20, 5), (20, 10)]);
+    let worst: Vec<(i64, Option<u32>)> = response.worst.iter().map(|point| (point.value, point.index)).collect();
+    assert_eq!(worst, [(20, Some(1)), (20, Some(5)), (20, Some(10))]);
     assert_eq!(find("wake_latency", Some("notified")).count, 2);
     assert_eq!(find("wake_latency", Some("timed_out")).count, 1);
     assert_eq!(find("response", None).jitter(), None);

@@ -114,6 +114,142 @@ fn tasks_are_by_namespace_then_by_priority() {
     assert_eq!(order, ["g_e", "app::g_b", "app::g_a", "app::imu::g_d", "drv::g_c"]);
 }
 
+/// An image whose kernel adapter is `isr_enter` and `isr_exit` alone, their
+/// ids 1 and 2.
+fn adapted() -> &'static kymo::events::Catalogue {
+    use kymo::events::{Catalogue, Event, Field, Kind, Pointee, Type};
+    let field = |name: &str, offset, kind| Field {
+        name: name.to_owned(),
+        offset,
+        ty: Type {
+            name: name.to_owned(),
+            size: Some(4),
+            kind,
+        },
+    };
+    let handler = || field("handler", 0, Kind::Pointer(Pointee::Function));
+    let exception = field("exception", 4, Kind::Base(gimli::DwAte(gimli::DW_ATE_unsigned.0)));
+    let event = |id, hook: &str, fields: Vec<Field>| Event {
+        id,
+        name: format!("kymo::opsy::{hook}"),
+        size: 4 * fields.len() as u64,
+        fields,
+        text: None,
+    };
+    let enter = event(1, "isr_enter", vec![handler(), exception]);
+    let exit = event(2, "isr_exit", vec![handler()]);
+    Box::leak(Box::new(Catalogue {
+        events: [(1, enter), (2, exit)].into_iter().collect(),
+        rings: Vec::new(),
+        symbols: Default::default(),
+        interrupts: Default::default(),
+        lines: Default::default(),
+        code: Default::default(),
+        warnings: Vec::new(),
+    }))
+}
+
+/// A trace of SWO alone spans its ticks, its exceptions on their handler's
+/// line, the rest of the time the task unknown.
+#[test]
+fn a_trace_of_swo_alone_shows_its_exceptions_within_its_ticks() {
+    use kymo::itm::Function;
+    use kymo::swo::{Exception, Watched};
+    let exception = |function, cycles| Exception {
+        number: 15,
+        function,
+        cycles,
+    };
+    let watched = Watched {
+        span: Some((1_000, 5_000)),
+        exceptions: vec![
+            exception(Function::Entered, 2_000),
+            exception(Function::Exited, 2_100),
+            exception(Function::Entered, 3_000),
+            exception(Function::Exited, 3_300),
+        ],
+        ..Watched::default()
+    };
+    let trace = kymo::model::Trace {
+        first: 0,
+        elements: Vec::new(),
+        end: None,
+        cut: None,
+        watched: Some(watched),
+        frequency: None,
+        measured: None,
+    };
+    let timeline = Timeline::new("swo.kcap".to_owned(), adapted(), trace, false).unwrap();
+    assert_eq!((timeline.origin, timeline.bounds), (Some(1_000), Some((1_000, 5_000))));
+    let meaning = timeline.meaning.as_ref().expect("a kernel adapter");
+    let handler = meaning
+        .interrupts
+        .iter()
+        .position(|depths| !depths.is_empty())
+        .expect("a handler");
+    assert!(timeline.lines().contains(&Line::Handler(handler)));
+    let total = |covered: &kymo::load::Covered| covered.until(i64::MAX);
+    assert_eq!(total(&meaning.load.handlers[handler]), 400);
+    assert_eq!(total(&meaning.load.unknown), 3_600);
+}
+
+/// The exceptions replace the handlers' spans the events gave: each span of
+/// the kernel on its row once.
+#[test]
+fn the_exceptions_replace_the_spans_of_the_events() {
+    use kymo::decode::Decoded;
+    use kymo::itm::Function;
+    use kymo::model::Element;
+    use kymo::swo::{Exception, Watched};
+    let catalogue = adapted();
+    let element = |index: u32, id: u16, payload: &[u32], cycles| Element::Event {
+        event: Decoded {
+            index,
+            timestamp: 0,
+            event: &catalogue.events[&id],
+            payload: payload.iter().flat_map(|word| word.to_le_bytes()).collect(),
+        },
+        cycles,
+        seconds: None,
+    };
+    const HANDLER: u32 = 0x0800_0101;
+    let elements = vec![
+        element(0, 1, &[HANDLER, 15], 100),
+        element(1, 2, &[HANDLER], 300),
+        element(2, 1, &[HANDLER, 15], 2_000),
+        element(3, 2, &[HANDLER], 2_200),
+    ];
+    let exception = |function, cycles| Exception {
+        number: 15,
+        function,
+        cycles,
+    };
+    let watched = Watched {
+        span: Some((1_000, 5_000)),
+        exceptions: vec![exception(Function::Entered, 2_000), exception(Function::Exited, 2_100)],
+        ..Watched::default()
+    };
+    let trace = kymo::model::Trace {
+        first: 0,
+        elements,
+        end: None,
+        cut: None,
+        watched: Some(watched),
+        frequency: None,
+        measured: None,
+    };
+    let timeline = Timeline::new("both.kcap".to_owned(), catalogue, trace, false).unwrap();
+    let meaning = timeline.meaning.as_ref().expect("a kernel adapter");
+    let placed: usize = meaning
+        .interrupts
+        .iter()
+        .flatten()
+        .map(|spans| spans.starts().len())
+        .sum();
+    assert_eq!(placed, meaning.kernel.closed.interrupts.len());
+    assert!(placed > 0);
+}
+
 /// A wake's arrow joins two lines shown, never one hidden.
 #[test]
 fn no_arrow_to_a_line_hidden() {

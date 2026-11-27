@@ -238,6 +238,7 @@ impl Timeline {
             glide: None,
         };
         timeline.add(0);
+        timeline.exceptions();
         timeline.panel = timeline.meaning.as_ref().map(|meaning| {
             let (instances, full) = meaning.shorten(kymo::meaning::instances(&meaning.kernel));
             Panel::named(instances, full)

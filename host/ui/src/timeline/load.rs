@@ -109,6 +109,9 @@ pub(super) struct Drawn {
     /// The cycles covered, from the bottom: a row's; or the CPU's handlers,
     /// then each task other than idle, in the order `cpu` is given.
     pub stack: Vec<i64>,
+    /// On the CPU's line, the cycles known in which no handler runs and the
+    /// task is unknown: in a trace of SWO alone, all of them. A row has none.
+    pub unknown: i64,
 }
 
 impl Drawn {
@@ -169,9 +172,10 @@ fn pick(subs: impl Iterator<Item = (i64, i64)>, statistic: Statistic) -> Option<
     Some(n)
 }
 
-/// The sub-bins of a view, the same on every row, and the time known in
-/// each: counted once a frame. The mean counts the bins themselves; the
-/// other statistics, sub-bins that divide them and share their origin.
+/// The sub-bins of a view, the same on every row, and in each the time the
+/// task on the core is known and the time the handlers are: counted once a
+/// frame. The mean counts the bins themselves; the other statistics,
+/// sub-bins that divide them and share their origin.
 pub(super) struct Subs {
     origin: i64,
     /// The bins' width, in cycles.
@@ -180,12 +184,13 @@ pub(super) struct Subs {
     /// The first sub-bin's start, then each one's end.
     edges: Vec<i64>,
     known: Vec<i64>,
+    handled: Vec<i64>,
 }
 
 impl Subs {
     /// The sub-bins of `view` binned as `binning` asks, in a capture from
-    /// `capture.0` to `capture.1` cycles of which `known` is known.
-    pub(super) fn new(view: &View, binning: Binning, capture: (i64, i64), known: &Covered) -> Subs {
+    /// `capture.0` to `capture.1` cycles, of which `cpu` gives the time known.
+    pub(super) fn new(view: &View, binning: Binning, capture: (i64, i64), cpu: &Cpu) -> Subs {
         let per_pixel = view.span / view.width;
         let width = load::width(f64::from(binning.pixels) * per_pixel);
         let sub = match binning.statistic {
@@ -197,17 +202,27 @@ impl Subs {
             origin: view.origin,
             width,
             statistic: binning.statistic,
-            known: known.counts(&edges),
+            known: cpu.known.counts(&edges),
+            handled: cpu.handled.counts(&edges),
             edges,
         }
     }
 }
 
-/// The bins of `view` from its sub-bins `subs` and the cycles each layer of
-/// the stack covers in them, from the bottom: each bin with its columns and
-/// the counts of the cycles it shows for `statistic`.
-fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>], statistic: Statistic) -> Vec<Drawn> {
+/// The bins of `view` from its sub-bins `subs`, the cycles `known` in them
+/// and those each layer of the stack covers, from the bottom, then those
+/// `unknown`: each bin with its columns and the counts of the cycles it
+/// shows for `statistic`.
+fn drawn(
+    view: &View,
+    subs: &Subs,
+    known: &[i64],
+    layers: &[Vec<i64>],
+    unknown: Option<&[i64]>,
+    statistic: Statistic,
+) -> Vec<Drawn> {
     let stack = |n: usize| layers.iter().map(move |layer| layer[n]);
+    let unknown = |held: std::ops::Range<usize>| unknown.map_or(0, |unknown| unknown[held].iter().sum());
     let bin = |cycles: i64| (cycles - subs.origin).div_euclid(subs.width);
     let mut first = 0;
     subs.edges
@@ -218,16 +233,22 @@ fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>], statistic: Statistic) ->
             let held = first..first + edges.len();
             first = held.end;
             let (from, to) = (edges[0][0], edges[edges.len() - 1][1]);
-            let shares = held.clone().map(|n| (subs.known[n], stack(n).sum()));
-            let (counted, known, stack) = match pick(shares, statistic) {
+            let shares = held.clone().map(|n| (known[n], stack(n).sum()));
+            let (counted, known, stack, unknown) = match pick(shares, statistic) {
                 Some(n) => {
                     let n = held.start + n;
-                    ((subs.edges[n], subs.edges[n + 1]), subs.known[n], stack(n).collect())
+                    (
+                        (subs.edges[n], subs.edges[n + 1]),
+                        known[n],
+                        stack(n).collect(),
+                        unknown(n..n + 1),
+                    )
                 }
                 None => (
                     (from, to),
-                    subs.known[held.clone()].iter().sum(),
+                    known[held.clone()].iter().sum(),
                     layers.iter().map(|layer| layer[held.clone()].iter().sum()).collect(),
+                    unknown(held),
                 ),
             };
             Drawn {
@@ -238,15 +259,36 @@ fn drawn(view: &View, subs: &Subs, layers: &[Vec<i64>], statistic: Statistic) ->
                 counted,
                 known,
                 stack,
+                unknown,
             }
         })
         .collect()
 }
 
-/// The bins of a row covering `covered`, within the time known, in `view`
-/// cut in `subs`.
+/// The bins of a row covering `covered`, within the time the task on the
+/// core is known, in `view` cut in `subs`.
 pub(super) fn row(view: &View, subs: &Subs, covered: &Covered) -> Vec<Drawn> {
-    drawn(view, subs, &[covered.counts(&subs.edges)], subs.statistic)
+    drawn(
+        view,
+        subs,
+        &subs.known,
+        &[covered.counts(&subs.edges)],
+        None,
+        subs.statistic,
+    )
+}
+
+/// The bins of a handler's row covering `covered`, within the time the
+/// handlers are known, in `view` cut in `subs`.
+pub(super) fn handler(view: &View, subs: &Subs, covered: &Covered) -> Vec<Drawn> {
+    drawn(
+        view,
+        subs,
+        &subs.handled,
+        &[covered.counts(&subs.edges)],
+        None,
+        subs.statistic,
+    )
 }
 
 /// The statistic `line` shows when the bins show `statistic`: the CPU's,
@@ -255,14 +297,24 @@ pub(super) fn statistic(cpu: bool, statistic: Statistic) -> Statistic {
     if cpu { Statistic::Mean } else { statistic }
 }
 
-/// The bins of the CPU row: handlers, then the tasks in `order`, every task
-/// other than idle once, each with the cycles it covers in the whole bin.
-pub(super) fn cpu(view: &View, subs: &Subs, cpu: &Cpu, order: &[usize]) -> Vec<Drawn> {
+/// The bins of the CPU row, within the time the handlers are known:
+/// handlers, then the tasks in `order`, every task other than idle once,
+/// each with the cycles it covers in the whole bin, then the time `unknown`
+/// in which no handler runs and the task is unknown.
+pub(super) fn cpu(view: &View, subs: &Subs, cpu: &Cpu, unknown: &Covered, order: &[usize]) -> Vec<Drawn> {
     let layers: Vec<Vec<i64>> = std::iter::once(&cpu.handlers)
         .chain(order.iter().map(|&task| &cpu.tasks[task]))
         .map(|covered| covered.counts(&subs.edges))
         .collect();
-    drawn(view, subs, &layers, statistic(true, subs.statistic))
+    let unknown = unknown.counts(&subs.edges);
+    drawn(
+        view,
+        subs,
+        &subs.handled,
+        &layers,
+        Some(&unknown),
+        statistic(true, subs.statistic),
+    )
 }
 
 /// The bin drawn at pixel `x`: from its left column to before its right.
@@ -273,8 +325,9 @@ pub(super) fn at(bins: &[Drawn], x: f32) -> Option<&Drawn> {
 
 /// A drawn bin's heights in pixels, from the bottom of a bar `height`
 /// pixels high that stands for `whole` cycles: the top of each layer of its
-/// stack, then of the time unknown above it, which a row's bar has none of;
-/// the rest, idle, stays empty.
+/// stack, then of the time unknown above it, the task's and the bin's
+/// beyond the time known, which a row's bar has none of; the rest, idle,
+/// stays empty.
 #[derive(Debug, PartialEq)]
 pub(super) struct Heights {
     pub stack: Vec<f32>,
@@ -301,7 +354,7 @@ pub(super) fn heights(bin: &Drawn, height: f32, whole: i64) -> Heights {
         top
     };
     let stack: Vec<f32> = bin.stack.iter().map(|&cycles| layer(cycles)).collect();
-    let unknown = layer(whole - bin.known);
+    let unknown = layer(bin.unknown + whole - bin.known);
     Heights { stack, unknown }
 }
 
