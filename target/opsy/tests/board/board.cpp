@@ -20,7 +20,7 @@
  * repeated. Its `position` is a curve the host reads. `sampler` also writes
  * it to `g_position`, which the DWT watches: each write goes out on SWO (PB3,
  * 8 MBd), dated by the anchor on the ring's slot 0. The DWT also sends every
- * exception's entry and exit on SWO.
+ * exception's entry and exit on SWO, and a tick every 16384 cycles.
  *
  * Built without NDEBUG: the idle task spins on NOP, and the probe can read
  * the ring while nothing runs.
@@ -292,7 +292,8 @@ std::uint32_t volatile g_dwt_started = 0; ///< 1 once the DWT sends g_position, 
 
 /**
  * @brief SWO on PB3, which is TRACESWO (AF0) from reset, g_position watched
- *        and every exception traced: 8 MBd, which their load needs
+ *        every exception traced and a tick every 16384 cycles: 8 MBd, which
+ *        their load needs
  */
 void start_swo()
 {
@@ -300,6 +301,7 @@ void start_swo()
 	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 8'000'000}) && kymo::dwt::watch(g_position))
 	{
 		kymo::dwt::exceptions();
+		kymo::dwt::ticks<16'384>();
 		g_dwt_started = 1;
 	}
 }
