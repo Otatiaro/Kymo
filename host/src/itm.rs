@@ -69,13 +69,20 @@ pub const CYC: u8 = 1 << 5;
 /// The packets of `bytes` in order, and whether the last one is cut short at
 /// the end of the bytes, then left out.
 pub fn packets(bytes: &[u8]) -> (Vec<Packet>, bool) {
+    let (packets, cut) = placed(bytes);
+    (packets.into_iter().map(|(_, packet)| packet).collect(), cut)
+}
+
+/// The packets of `bytes` in order, each with the offset of its header, and
+/// whether the last one is cut short at the end of the bytes, then left out.
+pub fn placed(bytes: &[u8]) -> (Vec<(usize, Packet)>, bool) {
     let mut packets = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
         let Some((packet, length)) = packet(&bytes[at..]) else {
             return (packets, true);
         };
-        packets.push(packet);
+        packets.push((at, packet));
         at += length;
     }
     (packets, false)
