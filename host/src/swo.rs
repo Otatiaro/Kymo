@@ -13,7 +13,13 @@
 //! cycles since the one before it, plus one; a data value takes the time of
 //! the timestamp after it. A sample between two anchors is dated from the
 //! one before it: its cycles are the anchor event's, plus the ITM's cycles
-//! since the anchor. The stretch between two anchors is dated only when:
+//! since the anchor.
+//!
+//! An anchor whose timestamp is delayed (its control not 0), or dates other
+//! packets too, is matched but dates nothing: such a timestamp is late by up
+//! to hundreds of cycles for some of its packets. The stretch then runs from
+//! the anchor before it to the one after. The stretch between two anchors is
+//! dated only when:
 //!
 //! - the ITM's cycles between them are those of their events, within
 //!   `TOLERANCE`;
@@ -105,8 +111,11 @@ pub struct Watched {
     /// The stretches between two anchors, in cycles, whose samples are
     /// dropped and the curves' values unknown.
     pub gaps: Vec<(i64, i64)>,
-    /// The anchors matched with an event of the trace.
+    /// The anchors matched with an event of the trace that date the samples.
     pub anchors: usize,
+    /// The anchors matched whose timestamp is delayed or dates other packets
+    /// too: they date nothing.
+    pub set_aside: usize,
     /// The overflows the stream reports: packets the ITM could not send.
     pub overflows: usize,
     /// The samples dropped in a gap: their curve, and the cycles of the
@@ -135,6 +144,8 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
     let mut waiting = Vec::new();
     let mut clock = 0u64;
     let mut overflows = 0;
+    // The packets the next timestamp dates, those read past included.
+    let mut since = 0usize;
     for packet in packets {
         match packet {
             Packet::DataValue {
@@ -143,27 +154,32 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
                 value,
                 ..
             } => {
+                since += 1;
                 waiting.push(stream.len());
                 stream.push(Item::Value {
                     comparator,
                     value,
                     itm: None,
+                    alone: false,
                 });
             }
-            Packet::Timestamp { delta, .. } => {
+            Packet::DataValue { write: false, .. } | Packet::Source => since += 1,
+            Packet::Timestamp { delta, control } => {
                 clock += u64::from(delta) + 1;
                 for &item in &waiting {
-                    if let Item::Value { itm, .. } = &mut stream[item] {
+                    if let Item::Value { itm, alone, .. } = &mut stream[item] {
                         *itm = Some(clock);
+                        *alone = control == 0 && since == 1;
                     }
                 }
                 waiting.clear();
+                since = 0;
             }
             Packet::Overflow | Packet::Malformed => {
                 overflows += usize::from(packet == Packet::Overflow);
                 stream.push(Item::Broken);
             }
-            Packet::Sync | Packet::Other | Packet::DataValue { write: false, .. } => {}
+            Packet::Sync | Packet::Other => {}
         }
     }
 
@@ -174,6 +190,7 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
             comparator,
             value,
             itm: Some(_),
+            ..
         } = *item
             && comparator == anchor
         {
@@ -200,14 +217,19 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
         overflows,
         ..Dated::default()
     };
+    let alone = |at: usize| matches!(stream[at], Item::Value { alone: true, .. });
     let anchors: Vec<(usize, &Expected, usize)> = matched
         .iter()
         .enumerate()
         .filter_map(|(n, at)| Some((n, &expected[n], (*at)?)))
+        .filter(|&(.., at)| alone(at))
         .collect();
     dated.anchors = anchors.len();
+    dated.set_aside = matched.iter().flatten().count() - anchors.len();
     let sample = |item: &Item| match *item {
-        Item::Value { comparator, value, itm } if comparator != anchor => watches
+        Item::Value {
+            comparator, value, itm, ..
+        } if comparator != anchor => watches
             .iter()
             .position(|watch| watch.comparator == comparator)
             .map(|watch| (watch, value, itm)),
@@ -225,7 +247,7 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
         let between = &stream[start + 1..end];
         let sound = ((itm_of(end) - itm_of(start)) - (to.cycles - from.cycles)).abs() <= TOLERANCE
             && !between.iter().any(|item| matches!(item, Item::Broken))
-            && m == n + 1;
+            && matched[n + 1..m].iter().all(Option::is_some);
         if !sound {
             dated.gaps.push((from.cycles, to.cycles));
         }
@@ -249,11 +271,13 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
 /// What the stream holds that dating reads.
 #[derive(Clone, Copy, Debug)]
 enum Item {
-    /// A data value written, and the ITM's clock at the timestamp after it.
+    /// A data value written, the ITM's clock at the timestamp after it, and
+    /// whether that timestamp is synchronous and dates it alone.
     Value {
         comparator: u8,
         value: u32,
         itm: Option<u64>,
+        alone: bool,
     },
     /// An overflow or a malformed packet: packets may be missing.
     Broken,
@@ -267,6 +291,8 @@ pub struct Dated {
     pub span: Option<(i64, i64)>,
     pub gaps: Vec<(i64, i64)>,
     pub anchors: usize,
+    /// The anchors matched whose timestamp is delayed or shared.
+    pub set_aside: usize,
     pub overflows: usize,
     /// The index of its watch and the cycles of the anchor before.
     pub dropped: Vec<(usize, i64)>,
@@ -359,6 +385,7 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
         span: dated.span,
         gaps: dated.gaps,
         anchors: dated.anchors,
+        set_aside: dated.set_aside,
         overflows: dated.overflows,
         dropped: dated
             .dropped
@@ -381,6 +408,9 @@ pub fn summary(watched: &Watched) -> String {
         watched.curves.len(),
         watched.anchors
     );
+    if watched.set_aside > 0 {
+        line += &format!(" ({} set aside: their timestamp delayed or shared)", watched.set_aside);
+    }
     if !watched.gaps.is_empty() {
         line += &format!(
             ", {} gaps dropping {} samples ({} overflows)",
