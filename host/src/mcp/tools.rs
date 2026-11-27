@@ -1095,10 +1095,11 @@ fn intervals(captures: &mut Captures, arguments: &Arguments) -> Result<String, S
         return Ok(lines.join("\n"));
     };
     let value = |value| time(&loaded, value);
+    let index = |point: &stats::Point| point.index.expect("an interval starts at an event");
     lines.push(format!(
         "min {} at #{}",
         value(distribution.min.value),
-        distribution.min.index
+        index(&distribution.min)
     ));
     lines.push(format!("p50 {}", value(distribution.p50)));
     lines.push(format!("p90 {}", value(distribution.p90)));
@@ -1106,7 +1107,7 @@ fn intervals(captures: &mut Captures, arguments: &Arguments) -> Result<String, S
     lines.push(format!(
         "max {} at #{}",
         value(distribution.max.value),
-        distribution.max.index
+        index(&distribution.max)
     ));
     lines.push(format!(
         "mean {:.1} cycles{}",
@@ -1120,7 +1121,7 @@ fn intervals(captures: &mut Captures, arguments: &Arguments) -> Result<String, S
     for point in &distribution.worst {
         lines.push(format!(
             "  #{} to #{}: {}",
-            point.index,
+            index(point),
             found.ends[&point.element],
             value(point.value)
         ));

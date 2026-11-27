@@ -214,7 +214,7 @@ fn stats_count_the_samples_nan_apart_and_exclude_a_suspect() {
     assert_eq!((x.count, x.excluded_suspect, x.nan), (4, 1, 0));
     let spread = x.spread.as_ref().expect("a spread");
     assert_eq!(spread.min.value, Number::Integer(-3));
-    assert_eq!(spread.min.index, 1, "the earliest of equal minima");
+    assert_eq!(spread.min.index, Some(1), "the earliest of equal minima");
     assert_eq!(spread.max.value, Number::Integer(9));
     assert_eq!((spread.p50, spread.p90), (Number::Integer(-3), Number::Integer(9)));
     assert_eq!(spread.mean, (5.0 - 3.0 - 3.0 + 9.0) / 4.0);
@@ -229,7 +229,7 @@ fn stats_count_the_samples_nan_apart_and_exclude_a_suspect() {
         (spread.min.value, spread.max.value),
         (Number::Float(1.0), Number::Float(4.0))
     );
-    assert_eq!(spread.min.index, 4, "the earliest of equal minima");
+    assert_eq!(spread.min.index, Some(4), "the earliest of equal minima");
     assert!((spread.mean - 7.0 / 3.0).abs() < 1e-12);
 }
 

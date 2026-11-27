@@ -1155,6 +1155,14 @@ fn the_exceptions_of_swo_alone_have_their_statistics() {
             .map(|group| (group.count, group.excluded_loss))
     };
     assert_eq!(group("gross"), Some((3, 0)));
+    // No event to place an instance by its index: its seconds do.
+    let gross = report
+        .groups
+        .iter()
+        .find(|group| group.kind == "handler" && group.metric.name == "gross")
+        .and_then(|group| group.distribution.as_ref())
+        .expect("a distribution");
+    assert_eq!((gross.min.index, gross.min.seconds.is_some()), (None, true));
     // The period across the gap may miss an entry dropped in it.
     assert_eq!(group("period"), Some((1, 1)));
 }

@@ -413,11 +413,14 @@ fn metric(group: &Group) -> String {
     }
 }
 
-/// Where an instance starts: its event's index, and its instant.
+/// Where an instance starts: its event's index, and its instant; in a trace
+/// of SWO alone, its instant, or its cycles without a frequency.
 fn at(point: &Point) -> String {
-    match point.seconds {
-        Some(seconds) => format!("#{} at {seconds:.6} s", point.index),
-        None => format!("#{}", point.index),
+    match (point.index, point.seconds) {
+        (Some(index), Some(seconds)) => format!("#{index} at {seconds:.6} s"),
+        (Some(index), None) => format!("#{index}"),
+        (None, Some(seconds)) => format!("at {seconds:.6} s"),
+        (None, None) => format!("at {} cycles", point.cycles),
     }
 }
 

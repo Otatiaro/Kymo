@@ -662,8 +662,12 @@ impl Timeline {
         }
         if line == Line::Cpu && bin.known > 0 {
             card.facts.push(("handlers", percent(bin.stack[0], bin.known)));
-            card.facts
-                .push(("other tasks", percent(bin.covered() - bin.stack[0], bin.known)));
+            if bin.unknown > 0 {
+                card.facts.push(("task unknown", percent(bin.unknown, bin.known)));
+            } else {
+                card.facts
+                    .push(("other tasks", percent(bin.covered() - bin.stack[0], bin.known)));
+            }
         }
         if let Some((who, span, still)) = self.longest(meaning, line, bin.from, bin.to, open) {
             let extent = self.extent(span, still);

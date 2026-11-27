@@ -11,7 +11,7 @@
 
 /// The spans of a row, which do not overlap, in order, and the one still
 /// open at the end of the capture, if any.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Covered {
     from: Vec<i64>,
     to: Vec<i64>,
@@ -241,16 +241,19 @@ pub fn bins(
         .collect()
 }
 
-/// The CPU row: the time known and, within it, the time handlers run, at
-/// any depth, and the time busy, handlers or a task other than idle. Idle
-/// interrupted by a handler is busy. By task other than idle, the time it
-/// runs and no handler does: their sum is busy less handlers.
+/// The CPU row: the time the task on the core is known and, within it, the
+/// time busy, handlers or a task other than idle. Idle interrupted by a
+/// handler is busy. By task other than idle, the time it runs and no handler
+/// does: their sum is busy less handlers. The time the handlers running are
+/// known, the same but in a trace of SWO alone, where the task never is,
+/// and within it the time handlers run, at any depth.
 #[derive(Default)]
 pub struct Cpu {
     pub known: Covered,
     pub handlers: Covered,
     pub busy: Covered,
     pub tasks: Vec<Covered>,
+    pub handled: Covered,
 }
 
 /// A bin of the CPU row, from `from` to `to` cycles. Its stack, from the

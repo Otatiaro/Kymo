@@ -124,7 +124,7 @@ fn an_interval_runs_from_an_a_to_its_first_b() {
     assert_eq!((found.excluded_loss, found.excluded_suspect), (0, 0));
     let distribution = found.distribution.as_ref().unwrap();
     assert_eq!((distribution.min.value, distribution.max.value), (1, 20));
-    assert_eq!(distribution.max.index, 4);
+    assert_eq!(distribution.max.index, Some(4));
     assert_eq!(found.ends[&distribution.max.element], 5);
 }
 

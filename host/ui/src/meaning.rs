@@ -14,6 +14,7 @@ use kymo::load::{Covered, Cpu};
 use kymo::meaning::{Context, Edge, Instant, Meaning as Kernel, Ready, Span, Subject};
 use kymo::model::Element;
 use kymo::stats::Instance;
+use kymo::swo::Watched;
 use kymo::target::Result;
 use std::collections::HashMap;
 
@@ -43,7 +44,8 @@ pub struct Meaning {
     pub load: Load,
     /// The CPU's line in bars: what holds the core.
     pub band: Band,
-    /// The capture's first event and its last.
+    /// The capture's first event and its last; in a trace of SWO alone, the
+    /// span of its ticks.
     start: Option<Edge>,
     end: Option<Edge>,
     /// The application's events by the context that emitted them, in the
@@ -81,6 +83,45 @@ impl Meaning {
         let instants = self.kernel.instants.len();
         self.kernel.add(elements, from);
         by_context(&mut self.instants, &self.kernel.instants[instants..]);
+        self.place();
+        let event = |(element, at): (usize, &Element)| match at {
+            Element::Event { cycles, .. } => Some(Edge {
+                element,
+                cycles: *cycles,
+                lost: false,
+            }),
+            _ => None,
+        };
+        if self.start.is_none() {
+            self.start = elements.iter().enumerate().skip(from).find_map(event);
+        }
+        let end = elements.iter().enumerate().skip(from).rev().find_map(event);
+        self.end = end.or(self.end);
+        self.refresh();
+    }
+
+    /// Takes in the exceptions the SWO traced (`kymo::meaning::exceptions`),
+    /// once `elements` are all in: they replace the handlers' spans. In a
+    /// trace without events, of SWO alone, the capture spans the ticks.
+    pub fn exceptions(&mut self, watched: &Watched, elements: &[Element]) {
+        self.kernel.exceptions(watched, elements);
+        self.interrupts.clear();
+        self.placed[1] = 0;
+        self.place();
+        if let (None, Some((first, last))) = (self.start, watched.span) {
+            let edge = |cycles| Edge {
+                element: 0,
+                cycles,
+                lost: false,
+            };
+            self.start = Some(edge(first));
+            self.end = Some(edge(last));
+        }
+        self.refresh();
+    }
+
+    /// Places in their rows the closed spans not yet in one.
+    fn place(&mut self) {
         let closed = &self.kernel.closed;
         for (n, run) in closed.runs.iter().enumerate().skip(self.placed[0]) {
             let row = match run.task {
@@ -109,6 +150,11 @@ impl Meaning {
             }
         }
         self.placed = [closed.runs.len(), closed.interrupts.len(), closed.holds.len()];
+    }
+
+    /// What the whole kernel gives again: the time ready, the names, the
+    /// load and the band.
+    fn refresh(&mut self) {
         let kernel = &self.kernel;
         // Whole again: the time ready of an activation still open grows.
         self.readies = kymo::meaning::ready(kernel);
@@ -122,19 +168,6 @@ impl Meaning {
             self.shades.push(shade);
         }
         self.load = Load::of(kernel);
-        let event = |(element, at): (usize, &Element)| match at {
-            Element::Event { cycles, .. } => Some(Edge {
-                element,
-                cycles: *cycles,
-                lost: false,
-            }),
-            _ => None,
-        };
-        if self.start.is_none() {
-            self.start = elements.iter().enumerate().skip(from).find_map(event);
-        }
-        let end = elements.iter().enumerate().skip(from).rev().find_map(event);
-        self.end = end.or(self.end);
         // Whole again, as the load: the spans still open grow.
         let open = kernel.open();
         let closed = &kernel.closed;
@@ -245,11 +278,15 @@ fn shorten(named: &Named, instances: Vec<Instance>) -> (Vec<Instance>, Full) {
     (instances, full)
 }
 
-/// The cycles each row covers, cut to the time known, and the CPU row: what
-/// the load view draws (ADR-061).
+/// The cycles each row covers, cut to the time its state is known, the
+/// handlers' to the time they are, and the CPU row: what the load view
+/// draws (ADR-061).
 #[derive(Default)]
 pub struct Load {
     pub cpu: Cpu,
+    /// The time the handlers are known in which none runs and the task on
+    /// the core is unknown: in a trace of SWO alone, all of it.
+    pub unknown: Covered,
     /// By task.
     pub tasks: Vec<Covered>,
     pub idle: Covered,
@@ -296,13 +333,14 @@ impl Load {
         for hold in open.holds.iter().filter(|hold| !hold.waiting) {
             start(grown(&mut holds, hold.mutex), hold.span.from.cycles);
         }
-        let known = &cpu.known;
-        let cut = |row: Row| Covered::union(row.0, row.1).within(known);
+        let known = |row: Row| Covered::union(row.0, row.1).within(&cpu.known);
+        let handled = |row: Row| Covered::union(row.0, row.1).within(&cpu.handled);
         Self {
-            tasks: tasks.into_iter().map(cut).collect(),
-            idle: cut(idle),
-            handlers: handlers.into_iter().map(cut).collect(),
-            holds: holds.into_iter().map(cut).collect(),
+            tasks: tasks.into_iter().map(known).collect(),
+            idle: known(idle),
+            handlers: handlers.into_iter().map(handled).collect(),
+            holds: holds.into_iter().map(known).collect(),
+            unknown: cpu.handled.without(&cpu.known).without(&cpu.handlers),
             cpu,
         }
     }

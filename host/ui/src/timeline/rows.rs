@@ -286,6 +286,21 @@ impl Timeline {
         }
     }
 
+    /// Takes in the exceptions the SWO traced, once the trace is all in. A
+    /// trace without events, of SWO alone, spans its ticks.
+    pub(super) fn exceptions(&mut self) {
+        let Some(watched) = &self.trace.watched else {
+            return;
+        };
+        if let Some(meaning) = &mut self.meaning {
+            meaning.exceptions(watched, &self.trace.elements);
+        }
+        if let (None, Some((first, last))) = (self.bounds, watched.span) {
+            self.origin = Some(first);
+            self.bounds = Some((first, last));
+        }
+    }
+
     /// The lines the namespace filter shows: the CPU's load, the kernel's
     /// sections, the tasks by priority, highest first, the handlers and the
     /// mutexes by namespace (names.rs); the rows of event types without a

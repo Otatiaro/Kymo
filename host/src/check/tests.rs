@@ -17,7 +17,7 @@ fn group(kind: &'static str, subject: &str, metric: Metric, values: &[i64], excl
         .map(|(n, &value)| Point {
             value,
             element: n,
-            index: 10 * (n as u32 + 1),
+            index: Some(10 * (n as u32 + 1)),
             cycles: 1_000 * (n as i64 + 1),
             seconds: Some(n as f64 + 1.0),
         })
@@ -405,7 +405,7 @@ fn curve(subject: &str, field: &str, values: &[Number], suspect: usize) -> Sampl
         .map(|(n, &value)| Point {
             value,
             element: n,
-            index: 10 * (n as u32 + 1),
+            index: Some(10 * (n as u32 + 1)),
             cycles: 1_000 * (n as i64 + 1),
             seconds: Some(n as f64 + 1.0),
         })

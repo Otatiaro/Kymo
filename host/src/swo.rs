@@ -43,6 +43,7 @@
 use crate::capture::Dwt;
 use crate::events::{Catalogue, Pointee, Ring};
 use crate::itm::{self, Function, Packet};
+use crate::load::Covered;
 use crate::model::{Edge, Element};
 use crate::values::{Curve, Reading, Sampled};
 use std::collections::HashMap;
@@ -141,6 +142,22 @@ pub struct Watched {
     /// How the DWT's tick dated the stream, in a capture of SWO alone: none
     /// when the anchors did.
     pub ticks: Option<Ticks>,
+}
+
+impl Watched {
+    /// The time the stream covers: its span less its gaps.
+    pub fn covered(&self) -> Covered {
+        let mut covered = Covered::default();
+        if let Some((first, last)) = self.span {
+            let mut from = first;
+            for &(start, end) in &self.gaps {
+                covered.push(from, start);
+                from = end;
+            }
+            covered.push(from, last);
+        }
+        covered
+    }
 }
 
 /// How the DWT's tick dated a stream (`tick`): its period, the ticks kept

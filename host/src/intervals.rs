@@ -143,7 +143,7 @@ pub fn of(trace: &Trace, symbols: &Symbols, a: &Words, b: &Words, range: Range, 
             points.push(Point {
                 value: end - start,
                 element: raw.from.element,
-                index: raw.from.index,
+                index: Some(raw.from.index),
                 cycles: start,
                 seconds: raw.from.seconds,
             });

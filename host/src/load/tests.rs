@@ -398,6 +398,7 @@ fn cpu_bins_stack_handlers_then_tasks_within_the_time_known() {
                 .map(|task| task.covered().within(&known_covered).without(&handlers_covered))
                 .collect(),
             handlers: handlers_covered,
+            handled: known_covered.clone(),
             known: known_covered,
         };
         let width = 1 + (random(&mut state) % 200) as i64;

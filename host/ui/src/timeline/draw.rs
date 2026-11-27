@@ -180,7 +180,7 @@ impl Timeline {
         let subs = self
             .meaning
             .as_ref()
-            .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu.known));
+            .map(|meaning| load::Subs::new(&view, self.binning, capture, &meaning.load.cpu));
         let open_durations = self.durations.as_ref().map(Durations::open).unwrap_or_default();
         // The curves' samples, zoomed in, and the bounds of each curve's line:
         // its top and height, its highest and lowest value.
@@ -246,13 +246,20 @@ impl Timeline {
                         let colors = std::iter::once(palette.interrupt)
                             .chain(order.iter().map(|&task| meaning.task_color(Some(task), &palette)))
                             .collect();
-                        Some((load::cpu(&view, subs, &rows.cpu, &order), colors, Some(lost)))
+                        Some((
+                            load::cpu(&view, subs, &rows.cpu, &rows.unknown, &order),
+                            colors,
+                            Some(lost),
+                        ))
                     }
                     Line::Task(task) if loaded => row(
                         task.map_or(Some(&rows.idle), |task| rows.tasks.get(task)),
                         meaning.task_color(task, &palette),
                     ),
-                    Line::Handler(handler) if loaded => row(rows.handlers.get(handler), palette.interrupt),
+                    Line::Handler(handler) if loaded => rows
+                        .handlers
+                        .get(handler)
+                        .map(|covered| (load::handler(&view, subs, covered), vec![palette.interrupt], None)),
                     Line::Mutex(mutex) if loaded => row(rows.holds.get(mutex), palette.hold),
                     _ => None,
                 };
