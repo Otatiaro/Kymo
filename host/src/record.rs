@@ -638,7 +638,8 @@ struct Pass<'a> {
     host_ns: u64,
     write_index: Option<u32>,
     items: Vec<Item<'a>>,
-    swo: Vec<u8>,
+    /// The host time of the SWO read, and its bytes.
+    swo: (u64, Vec<u8>),
 }
 
 /// The variable the target sets to its SWO baud rate once its DWT is set to
@@ -683,20 +684,103 @@ pub fn read_dwt(target: &mut dyn Target, baud: u32) -> Result<capture::Dwt> {
 /// sends on it: none when its ELF has no `kymo::dwt::swo_baud`. What keeps
 /// SWO from being read is warned of: the recording goes on without it.
 fn start_swo(target: &mut dyn Target, catalogue: &Catalogue) -> Option<capture::Dwt> {
-    let address = u32::try_from(catalogue.symbols.object(SWO_BAUD)?).ok()?;
-    let mut start = || -> Result<Option<capture::Dwt>> {
-        let baud = target.read_word(address)?;
-        if baud == 0 {
-            return Err("the program has not called kymo::dwt::start yet".into());
+    catalogue.symbols.object(SWO_BAUD)?;
+    begin_swo(target, catalogue)
+        .inspect_err(|error| eprintln!("warning: SWO not read: {error}"))
+        .ok()
+}
+
+/// The DWT's configuration, with the probe receiving SWO at the baud rate
+/// the program set.
+fn begin_swo(target: &mut dyn Target, catalogue: &Catalogue) -> Result<capture::Dwt> {
+    let address = catalogue
+        .symbols
+        .object(SWO_BAUD)
+        .and_then(|address| u32::try_from(address).ok())
+        .ok_or("the image has no kymo::dwt::swo_baud: it does not send on SWO")?;
+    let baud = target.read_word(address)?;
+    if baud == 0 {
+        return Err("the program has not called kymo::dwt::start yet".into());
+    }
+    let dwt = read_dwt(target, baud)?;
+    target.start_swo(baud)?;
+    Ok(dwt)
+}
+
+/// The host time, in nanoseconds since the Unix epoch.
+fn now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos() as u64)
+}
+
+/// `kymo record --swo-only`: reads SWO alone, not the ring, until Enter is
+/// pressed on the standard input or `duration` has passed, and keeps each
+/// read with its host time in the capture file `out`: the DWT's tick dates
+/// the stream (ADR-104). The cycle counter runs at `clock` hertz, when given.
+pub fn run_swo(
+    target: &mut dyn Target,
+    catalogue: &Catalogue,
+    duration: Option<Duration>,
+    out: Option<(PathBuf, capture::Elf)>,
+    clock: Option<u64>,
+) -> Result<()> {
+    let stop = stop_on_enter();
+    raise_priority();
+    let started = Instant::now();
+    let dwt = begin_swo(target, catalogue)?;
+    let mut capture = out
+        .map(|(out, elf)| {
+            let header = capture::Header {
+                first: 0,
+                clock,
+                channel: None,
+                elf,
+            };
+            let mut capture = Writer::create(&out, &header)?;
+            capture.write(&Record::Dwt(dwt.clone()))?;
+            Ok::<_, Box<dyn std::error::Error>>(capture)
+        })
+        .transpose()?;
+    println!("record SWO at {} baud", dwt.baud);
+    let (mut reads, mut received) = (0u64, 0u64);
+    loop {
+        let done = stop.load(Ordering::Relaxed) || duration.is_some_and(|duration| started.elapsed() >= duration);
+        let bytes = target.read_swo()?;
+        let host_ns = now_ns();
+        if bytes.is_empty() {
+            std::thread::sleep(Duration::from_millis(1));
+        } else {
+            reads += 1;
+            received += bytes.len() as u64;
+            if let Some(capture) = &mut capture {
+                capture.write(&Record::Swo { host_ns, bytes: &bytes })?;
+                capture.flush()?;
+            }
         }
-        let dwt = read_dwt(target, baud)?;
-        target.start_swo(baud)?;
-        Ok(Some(dwt))
-    };
-    start().unwrap_or_else(|error| {
-        eprintln!("warning: SWO not read: {error}");
-        None
-    })
+        if done {
+            break;
+        }
+    }
+    if let Some(mut capture) = capture {
+        capture.write(&Record::End { next: 0 })?;
+        capture.finish()?;
+    }
+    eprintln!("{received} SWO bytes in {reads} reads{}", target::speed_text(target));
+    Ok(())
+}
+
+/// A flag set once Enter is pressed on the standard input.
+fn stop_on_enter() -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let set = stop.clone();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_ok_and(|read| read > 0) {
+            set.store(true, Ordering::Relaxed);
+        }
+    });
+    stop
 }
 
 /// `kymo record` of `ring`: prints the events as they come, until Enter is
@@ -716,16 +800,7 @@ pub fn run(
     out: Option<(PathBuf, capture::Elf)>,
     clock: Option<u64>,
 ) -> Result<()> {
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = stop.clone();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            if std::io::stdin().lock().read_line(&mut line).is_ok_and(|read| read > 0) {
-                stop.store(true, Ordering::Relaxed);
-            }
-        });
-    }
+    let stop = stop_on_enter();
     raise_priority();
     let started = Instant::now();
     let dwt = start_swo(target, catalogue);
@@ -738,7 +813,7 @@ pub fn run(
             let header = capture::Header {
                 first,
                 clock,
-                channel: ring.name.clone(),
+                channel: Some(ring.name.clone()),
                 elf,
             };
             let mut capture = Writer::create(&out, &header)?;
@@ -754,9 +829,7 @@ pub fn run(
         let mut count = 0u64;
         let drained = loop {
             let done = stop.load(Ordering::Relaxed) || duration.is_some_and(|duration| started.elapsed() >= duration);
-            let host_ns = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |time| time.as_nanos() as u64);
+            let host_ns = now_ns();
             let zeros = recorder.zeros();
             let mut items = Vec::new();
             let write_index = match if done {
@@ -771,15 +844,18 @@ pub fn run(
             if zeros == 0 && recorder.zeros() > 0 {
                 eprintln!("warning: {}", ASLEEP);
             }
-            let bytes = if swo {
-                target.read_swo().unwrap_or_else(|error| {
-                    eprintln!("warning: SWO no longer read: {error}");
-                    swo = false;
+            let bytes = (
+                now_ns(),
+                if swo {
+                    target.read_swo().unwrap_or_else(|error| {
+                        eprintln!("warning: SWO no longer read: {error}");
+                        swo = false;
+                        Vec::new()
+                    })
+                } else {
                     Vec::new()
-                })
-            } else {
-                Vec::new()
-            };
+                },
+            );
             let pass = Pass {
                 host_ns,
                 write_index,
@@ -911,8 +987,12 @@ fn write(
             }
         }
         if let Some(capture) = &mut capture {
-            if !pass.swo.is_empty() {
-                capture.write(&Record::Swo(&pass.swo))?;
+            let (host_ns, bytes) = &pass.swo;
+            if !bytes.is_empty() {
+                capture.write(&Record::Swo {
+                    host_ns: *host_ns,
+                    bytes,
+                })?;
             }
             capture.flush()?;
         }

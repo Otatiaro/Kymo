@@ -732,7 +732,7 @@ fn a_segment_after_a_gap_has_its_own_origin() {
         .stamp(1_024);
     let ticked = tick(&stream.0, &[], &[LEVEL], None, None);
     assert_eq!(ticked.gaps, 1);
-    assert_eq!(ticked.dropped, 1);
+    assert_eq!(ticked.dropped.len(), 1);
     let samples: Vec<_> = ticked.segments.iter().map(|segment| segment.samples.clone()).collect();
     assert_eq!(samples, [vec![], vec![(0, 2, 100)]]);
 }
@@ -870,6 +870,214 @@ fn the_periods_a_gap_lost_are_counted() {
     assert_eq!(ticked.uncertainty.map(f64::round), Some(200.0));
     let origins: Vec<i64> = ticked.segments.iter().map(|segment| segment.origin).collect();
     assert_eq!(origins, [0, 5_120]);
+}
+
+/// DWT_CTRL with a tick every 1 024 cycles and `comparators` comparators.
+fn ticking(comparators: &[(u32, u32, u32)]) -> Dwt {
+    let mut dwt = dwt(0x4770_1a02, comparators);
+    dwt.ctrl |= 1 << 22 | 1 << 9;
+    dwt
+}
+
+/// The catalogue, with the ring whose slot 0 the anchor watches.
+fn with_ring() -> Catalogue {
+    Catalogue {
+        rings: vec![ring()],
+        ..catalogue()
+    }
+}
+
+#[test]
+fn ticks_date_a_capture_of_swo_alone() {
+    let catalogue = with_ring();
+    let anchor = (RING + SLOTS_OFFSET + 4) as u32;
+    let dwt = ticking(&[(anchor, 0, v8(2)), (0x2000_0100, 0, v8(1))]);
+    // A tick lost between the second and the third.
+    let stream = Stream::default()
+        .tick()
+        .stamp(1)
+        .value(1, 0xfffe, 2)
+        .stamp(100)
+        .value(0, 0x1234, 4)
+        .stamp(10)
+        .tick()
+        .stamp(914)
+        .tick()
+        .stamp(2_048)
+        .value(1, 7, 2)
+        .stamp(10)
+        .exception(16, 1)
+        .stamp(20)
+        .tick()
+        .stamp(994)
+        .tick()
+        .stamp(1_024);
+    let watched = alone(&catalogue, &dwt, &stream.0, &[], None);
+    let level = Curve {
+        subject: "app::level".to_owned(),
+        field: None,
+    };
+    let at = |cycles| Edge {
+        element: 0,
+        cycles,
+        lost: false,
+    };
+    assert_eq!(watched.refused, None);
+    assert_eq!(watched.curves, std::slice::from_ref(&level));
+    // Without host time, the segment after the gap starts a period after the
+    // one before ends.
+    assert_eq!(
+        watched.samples,
+        [
+            Sampled {
+                curve: level.clone(),
+                value: Number::Integer(-2),
+                at: at(100),
+            },
+            Sampled {
+                curve: level,
+                value: Number::Integer(7),
+                at: at(2_058),
+            },
+        ]
+    );
+    assert_eq!(
+        watched.exceptions,
+        [Exception {
+            number: 16,
+            function: Function::Entered,
+            cycles: 2_078,
+        }]
+    );
+    assert_eq!(watched.span, Some((0, 4_096)));
+    assert_eq!(watched.gaps, [(1_024, 2_048)]);
+    assert_eq!(
+        watched.ticks,
+        Some(Ticks {
+            period: 1_024,
+            kept: 5,
+            segments: 2,
+            uncertainty: None,
+            frequency: None,
+            counted: false,
+        })
+    );
+    assert_eq!(
+        summary(&watched),
+        "2 samples of 1 watched variables, 5 ticks every 1024 cycles, 1 gaps dropping 0 samples (0 overflows), \
+         placed a period apart: no host time; 1 exception packets"
+    );
+}
+
+#[test]
+fn a_capture_of_swo_alone_without_ticks_is_refused() {
+    let watched = alone(
+        &with_ring(),
+        &dwt(0x4770_1a02, &[(0x2000_0100, 0, v8(1))]),
+        &Stream::default().ticks(&[1_024; 2]).0,
+        &[],
+        None,
+    );
+    assert_eq!(
+        watched.refused.as_deref(),
+        Some("the ticks come every 1024 cycles, DWT_CTRL sets none")
+    );
+    assert_eq!((watched.curves, watched.ticks), (vec![], None));
+}
+
+#[test]
+fn the_refusal_of_a_ring_without_anchor_tells_the_ticks() {
+    let catalogue = with_ring();
+    let dwt = ticking(&[(0x2000_0100, 0, v8(1))]);
+    let ticks = Stream::default().ticks(&[1_024; 2]);
+    let refused = watched(&catalogue, &ring(), &dwt, &ticks.0, &[])
+        .refused
+        .expect("refused");
+    assert!(
+        refused.ends_with(
+            "; the stream holds 3 ticks of the DWT, which date only a capture of SWO alone (kymo record --swo-only)"
+        ),
+        "{refused}"
+    );
+    let refused = watched(&catalogue, &ring(), &dwt, &[], &[]).refused.expect("refused");
+    assert!(!refused.contains("ticks"), "{refused}");
+}
+
+#[test]
+fn the_summary_of_swo_alone_tells_what_placed_the_segments() {
+    let catalogue = with_ring();
+    let dwt = ticking(&[]);
+    let clock = Some(1_000_000_000);
+    let spacings = [1_024, 1_024, 3_072, 1_024, 1_024];
+    let (bytes, reads) = read_ticks(&spacings, &[100, -200, 100, 150, 150, 150]);
+    assert_eq!(
+        summary(&alone(&catalogue, &dwt, &bytes, &reads, clock)),
+        "0 samples of 0 watched variables, 6 ticks every 1024 cycles, 1 gaps dropping 0 samples (0 overflows), \
+         the periods they lost counted, the cycle counter at 1000000000 Hz"
+    );
+    let (bytes, reads) = read_ticks(&spacings, &[0, 400_000, -400_000, 400_000, 0, 0]);
+    let line = summary(&alone(&catalogue, &dwt, &bytes, &reads, clock));
+    assert!(line.contains(", placed by host time within 0.4 ms, "), "{line}");
+}
+
+/// A capture of SWO alone, its stream brought by `reads`, with an event when
+/// `event` says so.
+fn swo_alone(name: &str, bytes: &[u8], reads: &[Read], event: bool) -> Vec<u8> {
+    use crate::capture::{Elf, Header, Record, Writer};
+    let path = std::env::temp_dir().join(format!("kymo-swo-{name}-{}.kcap", std::process::id()));
+    let header = Header {
+        first: 0,
+        clock: None,
+        channel: None,
+        elf: Elf::Reference("/image.elf".to_owned()),
+    };
+    let mut writer = Writer::create(&path, &header).unwrap();
+    writer.write(&Record::Dwt(ticking(&[(0x2000_0100, 0, v8(1))]))).unwrap();
+    let mut start = 0;
+    for read in reads {
+        writer
+            .write(&Record::Swo {
+                host_ns: read.host_ns,
+                bytes: &bytes[start..read.end],
+            })
+            .unwrap();
+        start = read.end;
+    }
+    if event {
+        writer
+            .write(&Record::Event {
+                index: 0,
+                slots: &[0; 16],
+            })
+            .unwrap();
+    }
+    writer.write(&Record::End { next: 0 }).unwrap();
+    writer.finish().unwrap();
+    let capture = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    capture
+}
+
+#[test]
+fn a_capture_of_swo_alone_reads_back_dated_by_its_ticks() {
+    let catalogue = with_ring();
+    let (bytes, reads) = read_ticks(&[1_024, 1_024, 3_072, 1_024, 1_024], &[100, -200, 100, 150, 150, 150]);
+    let capture = swo_alone("ticks", &bytes, &reads, false);
+    let trace = crate::model::Trace::read(&catalogue, &capture, None).unwrap();
+    assert_eq!(trace.elements.len(), 0);
+    let watched = trace.watched.expect("watched");
+    assert_eq!(watched.refused, None);
+    assert_eq!(watched.gaps, [(2_048, 5_120)]);
+    assert!((trace.frequency.unwrap() - 1e9).abs() < 1.0);
+    // The clock given sets the frequency.
+    let trace = crate::model::Trace::read(&catalogue, &capture, Some(2_000_000_000)).unwrap();
+    assert_eq!(trace.frequency, Some(2e9));
+
+    let capture = swo_alone("event", &bytes, &reads, true);
+    let refused = crate::model::Trace::read(&catalogue, &capture, None)
+        .err()
+        .expect("refused");
+    assert_eq!(refused.to_string(), "the capture holds events but names no ring");
 }
 
 #[test]

@@ -7,7 +7,7 @@
 //! header  "KYMOCAP\0", u32 version (1), u32 first index recorded,
 //!         u64 cycle counter frequency in hertz given to the recording (0: none),
 //!         u16 length and UTF-8 bytes of the channel: the qualified name of
-//!         the ring recorded, then the image's ELF:
+//!         the ring recorded, empty when none is, then the image's ELF:
 //!         u8 1, u32 length and bytes of the ELF itself, or
 //!         u8 2, u16 length and UTF-8 bytes of where it is: an absolute
 //!         path or an http(s) URL
@@ -19,14 +19,15 @@
 //!         them, u32 writers lapped meanwhile that no danger accounts for
 //! 6 dwt   u32 DWT_DEVARCH, u32 DWT_CTRL, u32 SWO baud rate, u8 comparator
 //!         count, then for each u32 DWT_COMPn, u32 DWT_MASKn, u32 DWT_FUNCTIONn
-//! 7 swo   u32 length and the bytes read from SWO
+//! 7 swo   u64 host time of the read, u32 length and the bytes it read from SWO
 //! ```
 //!
 //! A pass record comes before the events and losses that pass settled.
 //! Events keep their raw slots: decoding is the reader's, with the catalogue.
 //! A capture of variables watched by the DWT (swo.rs) holds one dwt record,
 //! read at the start, and swo records whose bytes, put end to end, are the
-//! stream as SWO carried it.
+//! stream as SWO carried it. A capture of SWO alone has no channel, and no
+//! pass, event or loss record.
 //!
 //! A recording stopped short of its end record (killed, crashed, probe
 //! unplugged) leaves a capture without one, perhaps ending inside a record:
@@ -45,7 +46,8 @@ const SLOT_BYTES: usize = 16;
 pub struct Header {
     pub first: u32,
     pub clock: Option<u64>,
-    pub channel: String,
+    /// The ring recorded: none when SWO alone is.
+    pub channel: Option<String>,
     pub elf: Elf,
 }
 
@@ -81,7 +83,7 @@ pub enum Record<'a> {
     Suspect { from: u32, to: u32, writers: u32 },
     End { next: u32 },
     Dwt(Dwt),
-    Swo(&'a [u8]),
+    Swo { host_ns: u64, bytes: &'a [u8] },
 }
 
 /// The DWT's configuration, as the debug port reads it.
@@ -116,9 +118,10 @@ impl Writer {
         writer.file.write_all(&VERSION.to_le_bytes())?;
         writer.file.write_all(&header.first.to_le_bytes())?;
         writer.file.write_all(&header.clock.unwrap_or(0).to_le_bytes())?;
-        let length = u16::try_from(header.channel.len()).map_err(|_| "channel name of more than 65535 bytes")?;
+        let channel = header.channel.as_deref().unwrap_or_default();
+        let length = u16::try_from(channel.len()).map_err(|_| "channel name of more than 65535 bytes")?;
         writer.file.write_all(&length.to_le_bytes())?;
-        writer.file.write_all(header.channel.as_bytes())?;
+        writer.file.write_all(channel.as_bytes())?;
         match &header.elf {
             Elf::Embedded(bytes) => {
                 let length = u32::try_from(bytes.len()).map_err(|_| "ELF of more than 4 GiB")?;
@@ -178,9 +181,10 @@ impl Writer {
                     }
                 }
             }
-            Record::Swo(bytes) => {
+            Record::Swo { host_ns, bytes } => {
                 let length = u32::try_from(bytes.len()).map_err(|_| "SWO bytes of more than 4 GiB")?;
                 self.file.write_all(&[7])?;
+                self.file.write_all(&host_ns.to_le_bytes())?;
                 self.file.write_all(&length.to_le_bytes())?;
                 self.file.write_all(bytes)?;
             }
@@ -300,7 +304,7 @@ fn read_header(cursor: &mut Cursor) -> Result<Header> {
     Ok(Header {
         first,
         clock: (clock != 0).then_some(clock),
-        channel: channel.to_owned(),
+        channel: (!channel.is_empty()).then(|| channel.to_owned()),
         elf,
     })
 }
@@ -345,7 +349,7 @@ pub fn read(bytes: &[u8]) -> Result<Capture<'_>> {
                     cut: None,
                 });
             }
-            Record::Pass { .. } | Record::Suspect { .. } | Record::Dwt(_) | Record::Swo(_) => {}
+            Record::Pass { .. } | Record::Suspect { .. } | Record::Dwt(_) | Record::Swo { .. } => {}
         }
         records.push(record);
     }
@@ -423,8 +427,12 @@ impl<'a> Cursor<'a> {
                 })
             }
             _ => {
+                let host_ns = self.u64()?;
                 let length = self.u32()? as usize;
-                Record::Swo(self.take(length)?)
+                Record::Swo {
+                    host_ns,
+                    bytes: self.take(length)?,
+                }
             }
         })
     }

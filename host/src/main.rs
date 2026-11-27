@@ -77,6 +77,9 @@ written into events the probe read: events recorded near it may be wrong.
 
 record options:
   --channel <ring>   the kymo::ring object to drain, as for decode
+  --swo-only         read SWO alone, not the ring: the DWT's tick, which
+                     kymo::dwt::ticks sets, dates the stream, and the host
+                     time of each read places it across losses
   --probe-id <id>    probe-rs: VID:PID[:SERIAL]; jlink, stlink: serial number;
                      qemu: <host>:<port>, QEMU's monitor started with
                      -qmp tcp:<host>:<port>,server=on,wait=off
@@ -410,7 +413,12 @@ fn run() -> Result<ExitCode> {
     let mut out = None;
     let mut clock = None;
     let mut channel = None;
+    let mut swo_only = false;
     while let Some(option) = arguments.next() {
+        if option == "--swo-only" {
+            swo_only = true;
+            continue;
+        }
         let value = arguments.next();
         let given = || -> Result<String> { parsed(&option, value.clone()) };
         match option.as_str() {
@@ -438,7 +446,10 @@ fn run() -> Result<ExitCode> {
     };
     let elf_path = elf.ok_or_else(|| usage(USAGE))?;
     let catalogue = catalogue(&elf_path, None)?;
-    let ring = catalogue.ring(channel.as_deref())?;
+    if swo_only && channel.is_some() {
+        return Err(usage("--channel names the ring to drain; --swo-only drains none"));
+    }
+    let ring = (!swo_only).then(|| catalogue.ring(channel.as_deref())).transpose()?;
     let out = match (out, elf_ref) {
         (None, None) => None,
         (None, Some(_)) => return Err(usage("--elf-ref names the ELF in the capture --out writes")),
@@ -449,6 +460,9 @@ fn run() -> Result<ExitCode> {
         }
     };
     let mut target = target::open(&connection)?;
-    record::run(target.as_mut(), &catalogue, ring, duration, out, clock)?;
+    match ring {
+        Some(ring) => record::run(target.as_mut(), &catalogue, ring, duration, out, clock)?,
+        None => record::run_swo(target.as_mut(), &catalogue, duration, out, clock)?,
+    }
     Ok(ExitCode::SUCCESS)
 }
