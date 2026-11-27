@@ -33,7 +33,7 @@ constexpr unsigned irq = 0;
 
 using vector = std::uintptr_t;
 
-/// Address of a word of the System Control Space.
+/// A memory-mapped register: of the System Control Space, or of a peripheral.
 inline std::uint32_t volatile& scs(std::uintptr_t address)
 {
 	return *reinterpret_cast<std::uint32_t volatile*>(address); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr): a register
@@ -62,7 +62,7 @@ inline void port_systick()
  */
 inline void prepare(void (*systick)(), void (*device)())
 {
-#ifdef __ARM_ARCH_7EM__
+#ifdef __ARM_FP
 	scs(0xE000ED88) |= 0xFU << 20;   // CPACR: CP10 and CP11
 	asm volatile("dsb\n\tisb" ::: "memory");
 #endif
@@ -111,5 +111,50 @@ inline void wait(std::uint32_t milliseconds, std::uint32_t core_clock)
 			++elapsed;
 	scs(0xE000E010) = 0;
 }
+
+#ifdef KYMO_BENCH_BOARD
+/**
+ * @brief STM32H563 to 250 MHz: VOS0, flash at 5 wait states, PLL1 from the
+ *        32 MHz HSI (/8, x125, /2), instruction cache on. OpSy's bench image
+ *        sets the same, so that the kernels are timed on the same memory
+ *        system.
+ */
+inline void clock_250mhz()
+{
+	constexpr std::uintptr_t pwr_voscr = 0x44020810, pwr_vossr = 0x44020814;
+	constexpr std::uintptr_t flash_acr = 0x40022000;
+	constexpr std::uintptr_t rcc_cr = 0x44020C00, rcc_cfgr1 = 0x44020C1C, rcc_cfgr2 = 0x44020C20;
+	constexpr std::uintptr_t rcc_pll1cfgr = 0x44020C28, rcc_pll1divr = 0x44020C34;
+	constexpr std::uintptr_t icache_cr = 0x40030400, icache_sr = 0x40030404;
+
+	scs(pwr_voscr) = 3U << 4;                                 // VOS0
+	while ((scs(pwr_vossr) & (1U << 3)) == 0) {}              // VOSRDY
+	scs(flash_acr) = 5U | (2U << 4) | (1U << 8);              // LATENCY 5, WRHIGHFREQ 2, PRFTEN
+	while ((scs(flash_acr) & 0xFU) != 5U) {}                  // the write lands before the clock rises
+	scs(rcc_pll1cfgr) = 0b01U | (0b10U << 2) | (8U << 8) | (1U << 16);   // HSI, 4-8 MHz in, M 8, P out
+	scs(rcc_pll1divr) = 124U | (1U << 9);                     // N 125, P 2: 32 / 8 * 125 / 2 = 250 MHz
+	scs(rcc_cr) |= 1U << 24;                                  // PLL1ON
+	while ((scs(rcc_cr) & (1U << 25)) == 0) {}                // PLL1RDY
+	scs(rcc_cfgr2) = 0;                                       // every prescaler at 1
+	scs(rcc_cfgr1) = 0b011U;                                  // SW: PLL1
+	while (((scs(rcc_cfgr1) >> 3) & 0b11U) != 0b011U) {}      // SWS
+	while ((scs(icache_sr) & 1U) != 0) {}                     // BUSYF
+	scs(icache_cr) |= 1U;                                     // EN
+}
+
+/// Starts the DWT cycle counter.
+inline void start_cycle_count()
+{
+	scs(0xE000EDFC) |= 1U << 24;   // DEMCR: TRCENA
+	scs(0xE0001004) = 0;           // DWT_CYCCNT
+	scs(0xE0001000) |= 1U;         // DWT_CTRL: CYCCNTENA
+}
+
+/// The core cycles since the counter started, modulo 2^32.
+inline std::uint32_t cycle_count()
+{
+	return scs(0xE0001004);   // DWT_CYCCNT
+}
+#endif
 
 } // namespace platform

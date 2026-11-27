@@ -37,7 +37,7 @@ set(machine_cortex-m33 mps2-an505)
 set(script_cortex-m33 ${qemu_dir}/armv8m.ld)
 set(port_cortex-m33 ${portable}/ARM_CM33_NTZ/non_secure)
 set(port_sources_cortex-m33 ${port_cortex-m33}/port.c ${port_cortex-m33}/portasm.c)
-set(float_cortex-m33 -mfloat-abi=soft)
+set(float_cortex-m33 -mfloat-abi=hard -mfpu=fpv5-sp-d16)
 
 find_program(KYMO_QEMU qemu-system-arm HINTS "C:/Program Files/qemu")
 find_program(KYMO_HOST kymo HINTS ${target_dir}/../host/target/release)
@@ -85,6 +85,22 @@ function(kymo_freertos_image image cpu script kernel)
 		-L${qemu_dir} -T ${script})
 endfunction()
 
+# The bench's two images, `<prefix>-untraced` and `<prefix>-traced`, each on
+# a kernel of its own, with `definitions` on both.
+function(kymo_freertos_bench prefix cpu script definitions)
+	kymo_freertos_kernel(${prefix}-kernel-untraced ${cpu} ON)
+	kymo_freertos_kernel(${prefix}-kernel-traced ${cpu} OFF)
+	foreach(variant untraced traced)
+		target_compile_definitions(${prefix}-kernel-${variant} PUBLIC ${definitions})
+	endforeach()
+	kymo_freertos_image(${prefix}-untraced ${cpu} ${script} ${prefix}-kernel-untraced bench/bench.cpp)
+	kymo_freertos_image(${prefix}-traced ${cpu} ${script} ${prefix}-kernel-traced
+		${target_dir}/freertos/kymo_freertos.cpp bench/bench.cpp)
+	foreach(variant untraced traced)
+		target_include_directories(${prefix}-${variant} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+	endforeach()
+endfunction()
+
 foreach(cpu cortex-m4 cortex-m33)
 	set(kernel freertos-${cpu})
 	kymo_freertos_kernel(${kernel} ${cpu} OFF)
@@ -92,13 +108,9 @@ foreach(cpu cortex-m4 cortex-m33)
 	kymo_freertos_image(${image} ${cpu} ${script_${cpu}} ${kernel}
 		${target_dir}/freertos/kymo_freertos.cpp application.cpp)
 
-	# The cost bench, untraced and traced: bench/bench.cpp.
-	kymo_freertos_kernel(${kernel}-untraced ${cpu} ON)
-	kymo_freertos_image(freertos-bench-${cpu}-untraced ${cpu} ${script_${cpu}} ${kernel}-untraced bench/bench.cpp)
-	target_include_directories(freertos-bench-${cpu}-untraced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-	kymo_freertos_image(freertos-bench-${cpu}-traced ${cpu} ${script_${cpu}} ${kernel}
-		${target_dir}/freertos/kymo_freertos.cpp bench/bench.cpp)
-	target_include_directories(freertos-bench-${cpu}-traced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+	# The cost bench, untraced and traced: bench/bench.cpp, on kernels of
+	# their own built with KYMO_BENCH, which leaves the assertions out.
+	kymo_freertos_bench(freertos-bench-${cpu} ${cpu} ${script_${cpu}} "KYMO_BENCH")
 
 	# The fault event and its call levels: fault/fault.cpp checks what the
 	# adapter wrote to the ring, so only QEMU runs it.
@@ -139,4 +151,10 @@ if(KYMO_FREERTOS_BOARD)
 			--image $<TARGET_FILE:freertos-h563-Os> --host ${KYMO_HOST}
 			--probe-rs ${KYMO_PROBE_RS} --probe-id ${KYMO_FREERTOS_BOARD} --nm ${CMAKE_NM})
 	set_tests_properties(freertos_board_h563 PROPERTIES TIMEOUT 120)
+
+	# The bench on the board, at 250 MHz, timed in cycles: what OpSy's and
+	# Zephyr's bench images print on the same board, for the comparison.
+	#   probe-rs run --chip STM32H563ZITx freertos-bench-h563-untraced.elf
+	kymo_freertos_bench(freertos-bench-h563 cortex-m33 ${CMAKE_CURRENT_SOURCE_DIR}/board/h563.ld
+		"KYMO_BENCH;KYMO_BENCH_BOARD")
 endif()

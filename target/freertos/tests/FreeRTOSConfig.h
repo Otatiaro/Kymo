@@ -17,7 +17,9 @@ void application_assert(char const* file, int line);
 }
 #endif
 
-#ifdef KYMO_BOARD
+#if defined(KYMO_BENCH_BOARD)
+#define configCPU_CLOCK_HZ 250000000UL  /* the bench's PLL1: platform::clock_250mhz() */
+#elif defined(KYMO_BOARD)
 #define configCPU_CLOCK_HZ 32000000UL   /* the STM32H563's reset clock: HSI, 64 MHz divided by 2 */
 #else
 #define configCPU_CLOCK_HZ 25000000UL
@@ -56,20 +58,24 @@ void application_assert(char const* file, int line);
 #define configKERNEL_INTERRUPT_PRIORITY 0xE0
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY 0x20
 
-/* ARM_CM33_NTZ: no TrustZone split, no MPU, no FPU (the M33 image is built
- * soft-float). */
+/* ARM_CM33_NTZ: no TrustZone split, no MPU; the FPU on, its context saved
+ * lazily, as the M4's port does. */
 #define configENABLE_TRUSTZONE 0
 #define configRUN_FREERTOS_SECURE_ONLY 1
 #define configENABLE_MPU 0
-#define configENABLE_FPU 0
+#define configENABLE_FPU 1
 #define configENABLE_MVE 0
 
+/* The bench (KYMO_BENCH) times the kernel as a release ships it: without
+ * assertions, as OpSy's and Zephyr's are timed. */
+#ifndef KYMO_BENCH
 #define configASSERT(condition)                          \
 	do                                                   \
 	{                                                    \
 		if (!(condition))                                \
 			application_assert(__FILE__, __LINE__);      \
 	} while (0)
+#endif
 
 /* The bench's untraced build, the reference its traced build is measured
  * against, defines KYMO_UNTRACED. */

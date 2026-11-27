@@ -15,6 +15,11 @@
  * that gets woken; `other`, the lower one, is the side that wakes it,
  * directly or by pending the interrupt whose handler does. Nothing else
  * runs: SysTick, and the idle task when both wait.
+ *
+ * Built with KYMO_BENCH_BOARD for a NUCLEO-H563ZI: the clock goes to 250 MHz,
+ * the markers read the DWT cycle counter, and the image prints each
+ * scenario's minimum, median and maximum in cycles over semihosting, as
+ * OpSy's bench image does on the same board.
  */
 #include "platform.hpp"
 #include "qemu.hpp"
@@ -23,6 +28,7 @@
 #include <semphr.h>
 #include <task.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -54,15 +60,29 @@ constexpr std::size_t iterations = 8;
 /// bodies apart, so no two are merged into one address.
 scenario volatile measuring = scenario::count;
 
+#ifdef KYMO_BENCH_BOARD
+/// Cycles per scenario and iteration.
+std::array<std::array<std::uint32_t, iterations>, static_cast<std::size_t>(scenario::count)> results{};
+std::uint32_t begun = 0;
+std::size_t iteration = 0;
+#endif
+
 template<scenario S>
 [[gnu::noinline]] void begin()
 {
 	measuring = S;
+#ifdef KYMO_BENCH_BOARD
+	begun = platform::cycle_count();
+#endif
 }
 
 template<scenario S>
 [[gnu::noinline]] void end()
 {
+#ifdef KYMO_BENCH_BOARD
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): iteration < iterations, run's loop
+	results[static_cast<std::size_t>(S)][iteration] = platform::cycle_count() - begun;
+#endif
 	measuring = scenario::count;
 }
 
@@ -149,8 +169,13 @@ template<scenario S, typename Once>
 void run(Once once)
 {
 	pending = S;
-	for (std::size_t iteration = 0; iteration < iterations; ++iteration)
+	for (std::size_t i = 0; i < iterations; ++i)
+	{
+#ifdef KYMO_BENCH_BOARD
+		iteration = i;
+#endif
 		once();
+	}
 	pending = scenario::count;
 }
 
@@ -211,6 +236,22 @@ void driver(void* /*unused*/)
 		vTaskDelay(1);   // and get back into its take: we preempted it inside its give
 	});
 
+#ifdef KYMO_BENCH_BOARD
+	for (std::size_t s = 0; s < names.size(); ++s)
+	{
+		auto& samples = results[s];   // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index): s < names.size()
+		std::sort(samples.begin(), samples.end());
+		qemu::write("BENCH ");
+		qemu::write(names[s]);        // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index): s < names.size()
+		qemu::write(" min=");
+		qemu::write_unsigned(samples.front());
+		qemu::write(" median=");
+		qemu::write_unsigned(samples[iterations / 2]);
+		qemu::write(" max=");
+		qemu::write_unsigned(samples.back());
+		qemu::write("\n");
+	}
+#else
 	// profile.py takes the scenarios' names from these lines, in enum order.
 	for (auto const* name : names)
 	{
@@ -218,6 +259,7 @@ void driver(void* /*unused*/)
 		qemu::write(name);
 		qemu::write(" done\n");
 	}
+#endif
 	qemu::finish(true);
 }
 
@@ -236,6 +278,10 @@ extern "C" void application_assert(char const* file, int line)
 void test_main()
 {
 	using namespace bench;
+#ifdef KYMO_BENCH_BOARD
+	platform::clock_250mhz();
+	platform::start_cycle_count();
+#endif
 	platform::prepare(&systick, &device_handler);
 
 	other_go = xSemaphoreCreateBinaryStatic(&other_go_storage);

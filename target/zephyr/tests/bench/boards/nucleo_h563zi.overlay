@@ -1,0 +1,13 @@
+/*
+ * The bench on a NUCLEO-H563ZI at 250 MHz, the clock OpSy's and FreeRTOS's
+ * bench images set on the same board: PLL1 from the ST-Link's 8 MHz HSE,
+ * 8 / 2 * 125 / 2. The clock driver sets the flash wait states from it.
+ */
+
+&pll {
+	mul-n = <125>;
+};
+
+&rcc {
+	clock-frequency = <DT_FREQ_M(250)>;
+};

@@ -16,6 +16,14 @@ target_sources(app PRIVATE bench.cpp)
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/qemu)
 target_compile_options(app PRIVATE -Wall -Wextra -Werror)
 
+# On a board (nucleo_h563zi), the markers read the cycle counter and the image
+# prints cycles over semihosting:
+#   west build -b nucleo_h563zi -d build/bench-h563 target/zephyr/tests/bench
+#   probe-rs run --chip STM32H563ZITx build/bench-h563/zephyr/zephyr.elf
+if(NOT CONFIG_QEMU_TARGET)
+	target_compile_definitions(app PRIVATE KYMO_BENCH_BOARD)
+endif()
+
 # The sleep scenario begins in the kernel's SysTick handler.
 zephyr_link_libraries(-Wl,--wrap=sys_clock_isr)
 

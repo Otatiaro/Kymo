@@ -18,6 +18,10 @@
  *
  * The scenarios are FreeRTOS's bench's (target/freertos/tests/bench), under
  * the same names, less the task notification, which Zephyr has not.
+ *
+ * Built for a board (KYMO_BENCH_BOARD), the markers read the DWT cycle
+ * counter and the image prints each scenario's minimum, median and maximum
+ * in cycles over semihosting, as OpSy's and FreeRTOS's bench images do.
  */
 #include "qemu.hpp"
 
@@ -26,6 +30,7 @@
 
 #include <cmsis_core.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -61,15 +66,29 @@ constexpr unsigned device_irq = CONFIG_NUM_IRQS - 1;
 /// bodies apart, so no two are merged into one address.
 scenario volatile measuring = scenario::count;
 
+#ifdef KYMO_BENCH_BOARD
+/// Cycles per scenario and iteration.
+std::array<std::array<std::uint32_t, iterations>, static_cast<std::size_t>(scenario::count)> results{};
+std::uint32_t begun = 0;
+std::size_t iteration = 0;
+#endif
+
 template<scenario S>
 [[gnu::noinline]] void begin()
 {
 	measuring = S;
+#ifdef KYMO_BENCH_BOARD
+	begun = DWT->CYCCNT;
+#endif
 }
 
 template<scenario S>
 [[gnu::noinline]] void end()
 {
+#ifdef KYMO_BENCH_BOARD
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): iteration < iterations, run's loop
+	results[static_cast<std::size_t>(S)][iteration] = DWT->CYCCNT - begun;
+#endif
 	measuring = scenario::count;
 }
 
@@ -134,8 +153,13 @@ template<scenario S, typename Once>
 void run(Once once)
 {
 	pending = S;
-	for (std::size_t iteration = 0; iteration < iterations; ++iteration)
+	for (std::size_t i = 0; i < iterations; ++i)
+	{
+#ifdef KYMO_BENCH_BOARD
+		iteration = i;
+#endif
 		once();
+	}
 	pending = scenario::count;
 }
 
@@ -190,6 +214,22 @@ void driver()
 		k_sleep(K_TICKS(1));                 // and get back into its take: we preempted it inside its give
 	});
 
+#ifdef KYMO_BENCH_BOARD
+	for (std::size_t s = 0; s < names.size(); ++s)
+	{
+		auto& samples = results[s];   // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index): s < names.size()
+		std::sort(samples.begin(), samples.end());
+		qemu::write("BENCH ");
+		qemu::write(names[s]);        // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index): s < names.size()
+		qemu::write(" min=");
+		qemu::write_unsigned(samples.front());
+		qemu::write(" median=");
+		qemu::write_unsigned(samples[iterations / 2]);
+		qemu::write(" max=");
+		qemu::write_unsigned(samples.back());
+		qemu::write("\n");
+	}
+#else
 	// profile.py takes the scenarios' names from these lines, in enum order.
 	for (auto const* name : names)
 	{
@@ -197,6 +237,7 @@ void driver()
 		qemu::write(name);
 		qemu::write(" done\n");
 	}
+#endif
 	qemu::finish(true);
 }
 
@@ -227,6 +268,11 @@ int main()
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast,misc-redundant-expression,bugprone-signed-bitwise,misc-const-correctness): the kernel's macro
 	IRQ_CONNECT(bench::device_irq, 1, device_handler, nullptr, 0);
 	irq_enable(bench::device_irq);
+#ifdef KYMO_BENCH_BOARD
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+#endif
 	bench::driver();
 	return 0;
 }
