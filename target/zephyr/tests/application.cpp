@@ -3,7 +3,10 @@
  * @brief   The Zephyr test application: the main thread, control, runs one
  *          scenario after another, each taking the kernel through trace
  *          points the adapter records, then exits through qemu::exit with its
- *          verdict. trace/trace.py records it and checks the recording.
+ *          verdict. trace/trace.py records it and checks the recording. With
+ *          KYMO_BOARD, off QEMU on a NUCLEO-H563ZI, it waits for the probe to
+ *          attach, and leaves its verdict in application::verdict for
+ *          board/board.py.
  *
  * Priorities, lower is higher: receiver 1, ping and pong 2, control 3,
  * ephemeral and writer 4, low 5, idle last.
@@ -22,8 +25,11 @@
  *    the slot to the writer, and does not block; then control sleeps a tick;
  * 8. a thread created, named and aborted before it runs.
  */
+#ifndef KYMO_BOARD
 #include "qemu.hpp"
+#endif
 
+#include <zephyr/init.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 
@@ -34,22 +40,74 @@
 #include <cstddef>
 #include <cstdint>
 
+#ifdef KYMO_BOARD
+namespace application
+{
+/// On the board, where board/board.py reads it through the probe: 0 while
+/// the application runs, 1 when it passed, 2 when it failed.
+std::uint32_t volatile verdict = 0;   // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): read by the probe
+
+/// The core's clock out of reset, HSI / 2, before the kernel's clock control
+/// starts the PLL.
+constexpr std::uint32_t reset_clock = 32'000'000;
+/// The time the probe takes to attach once the board is reset.
+constexpr std::uint32_t attach_milliseconds = 3000;
+
+/**
+ * @brief Spins on SysTick, polled, before the adapter's first event, so that
+ *        the recording starts with it: an EARLY initialisation, ahead of the
+ *        adapter's PRE_KERNEL_1 one. The kernel sets SysTick up again after.
+ */
+int wait_for_probe()
+{
+	SysTick->LOAD = (reset_clock / 1000) - 1;
+	SysTick->VAL = 0;
+	SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
+	for (std::uint32_t elapsed = 0; elapsed < attach_milliseconds;)
+		if ((SysTick->CTRL & SysTick_CTRL_COUNTFLAG_Msk) != 0)   // cleared by the read
+			++elapsed;
+	SysTick->CTRL = 0;
+	return 0;
+}
+
+// The kernel's macro pastes the name into a symbol's: unqualified, here.
+SYS_INIT(wait_for_probe, EARLY, 0);   // NOLINT(cppcoreguidelines-avoid-non-const-global-variables,cppcoreguidelines-pro-type-cstyle-cast,misc-use-anonymous-namespace): the kernel's definition macro
+} // namespace application
+#endif
+
 extern "C"
 {
-/** @brief The end of the test, where trace/trace.py halts the guest and reads
- *  the verdict from r0: out of line, whatever the optimisation. */
+/** @brief The end of the test. Under QEMU, where trace/trace.py halts the
+ *  guest and reads the verdict from r0: out of line, whatever the
+ *  optimisation. On the board, the verdict for the probe, and the core kept
+ *  running: no semihosting there, a breakpoint would halt it. */
 [[gnu::noinline]] void application_end(bool pass)
 {
+#ifdef KYMO_BOARD
+	application::verdict = pass ? 1 : 2;
+	// A thread blocks for good, which closes its activation in the trace.
+	if (!k_is_in_isr())
+		k_sleep(K_FOREVER);
+	for (;;)
+	{
+	}
+#else
 	qemu::finish(pass);
+#endif
 }
 
 void application_assert(char const* file, int line)
 {
+#ifndef KYMO_BOARD
 	qemu::write("assertion failed: ");
 	qemu::write(file);
 	qemu::write(":");
 	qemu::write_unsigned(static_cast<std::uint32_t>(line));
 	qemu::write("\n");
+#else
+	static_cast<void>(file);
+	static_cast<void>(line);
+#endif
 	application_end(false);
 }
 }
