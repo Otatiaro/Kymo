@@ -239,12 +239,14 @@ follows the program's interrupts, about 6 bytes per packet with its timestamp.
 19 packets a period overflow the ITM at 2 MBd, and 8 MBd keeps up. An
 overflowing ITM drops packets and says so; it never stalls the core.
 
-`kymo::dwt::ticks<Cycles>()`, called after `start()`, sends a tick on SWO
-every `Cycles` cycles, 64 or 1024 times 1 to 16: at most 16384, 2 ms at 8 MHz.
+`kymo::dwt::ticks()`, called after `start()`, sends a tick on SWO every 16384
+cycles, the longest period, which keeps the load lowest; `ticks<Cycles>()`
+takes another, 64 or 1024 times 1 to 16.
 The local timestamps between two ticks add up to the period, a reference that
 needs neither the ring nor the debug port: the host is to date and check SWO
 by the ticks alone when the probe cannot read the target. 40 bytes of flash, no
-stack; about 2 KB/s at 8 MHz and 16384 cycles.
+stack. A tick is about 4 bytes, so the load follows the core clock: 2 KB/s at
+8 MHz, 60 KB/s at 250 MHz.
 
 With the probe-rs backend, `kymo record` reads the DWT's configuration once
 `start()` has run, receives SWO beside the ring and keeps both in the capture;

@@ -301,7 +301,7 @@ void start_swo()
 	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 8'000'000}) && kymo::dwt::watch(g_position))
 	{
 		kymo::dwt::exceptions();
-		kymo::dwt::ticks<16'384>();
+		kymo::dwt::ticks();
 		g_dwt_started = 1;
 	}
 }

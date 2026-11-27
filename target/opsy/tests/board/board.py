@@ -214,7 +214,7 @@ def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
         errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::exceptions() left EXCTRCENA clear")
     # CYCEVTENA, CYCTAP on bit 10, POSTPRESET 15: a tick every 1024 x 16 cycles.
     if dwt_ctrl & TICK_FIELDS != TICK_FIELDS:
-        errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::ticks<16384>() did not set a tick every 16384 cycles")
+        errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::ticks() did not set a tick every 16384 cycles")
     return errors
 
 

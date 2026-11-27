@@ -136,7 +136,7 @@ std::uint32_t watched;
 
 [[gnu::noinline]] void dwt_ticks()
 {
-	kymo::dwt::ticks<16'384>();
+	kymo::dwt::ticks();
 }
 
 void test_main()
