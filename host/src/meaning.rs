@@ -709,6 +709,9 @@ pub struct Meaning<'a> {
     /// SWO's coverage: where their spans are the SWO's.
     doubly: BTreeSet<usize>,
     replaced: Vec<(i64, i64)>,
+    /// The SWO's subject of each of those handlers that keeps spans of the
+    /// adapter's.
+    merged: BTreeMap<usize, usize>,
     /// In a trace without events, of SWO alone, the time the stream covers.
     alone: Option<Covered>,
     /// The exception packets that contradict the nesting, placed in the trace.
@@ -793,6 +796,7 @@ impl<'a> Meaning<'a> {
             traced: BTreeMap::new(),
             doubly: BTreeSet::new(),
             replaced: Vec::new(),
+            merged: BTreeMap::new(),
             alone: None,
             exception_contradictions: Vec::new(),
             costs: Vec::new(),
@@ -845,7 +849,8 @@ impl<'a> Meaning<'a> {
     /// when the adapter traces that exception, supposed, with a `?`, from
     /// the image's vector table otherwise. An edge falls after the last event
     /// at or before its cycles. A handler both channels trace keeps the
-    /// adapter's spans that touch no stretch of the SWO's coverage alone.
+    /// adapter's spans that touch no stretch of the SWO's coverage, under
+    /// the SWO's subject: one subject per handler.
     /// In a trace without events, of SWO alone, every edge is at element 0,
     /// and the time the stream covers is the time the handlers are known.
     pub fn exceptions(&mut self, watched: &Watched, elements: &[Element]) {
@@ -922,15 +927,39 @@ impl<'a> Meaning<'a> {
                     .or_insert(exception);
             }
         }
+        let exception_of = |handlers: &Subjects, handler: usize| {
+            of_handler.get(&handler).copied().or_else(|| {
+                (!handlers.is_named(handler))
+                    .then(|| of_address.get(&handlers.list[handler].address).copied())
+                    .flatten()
+            })
+        };
+        // The adapter's spans the SWO's do not replace go to the SWO's
+        // subject for the same exception: one subject per handler.
+        let kept: BTreeSet<usize> = self
+            .closed
+            .interrupts
+            .iter()
+            .map(|interrupt| interrupt.handler)
+            .chain(self.entered.iter().map(|&(handler, ..)| handler))
+            .filter(|handler| self.doubly.contains(handler))
+            .collect();
+        for handler in kept {
+            if let Some(exception) = exception_of(&self.handlers, handler) {
+                let hardware = self.hardware(exception);
+                self.merged.insert(handler, hardware);
+            }
+        }
+        for interrupt in &mut self.closed.interrupts {
+            if let Some(&hardware) = self.merged.get(&interrupt.handler) {
+                interrupt.handler = hardware;
+            }
+        }
         self.costs = replaced
             .iter()
             .filter(|run| !run.span.from.lost && !run.span.to.lost)
             .filter_map(|run| {
-                let exception = of_handler.get(&run.handler).or_else(|| {
-                    (!self.handlers.is_named(run.handler))
-                        .then(|| of_address.get(&self.handlers.list[run.handler].address))
-                        .flatten()
-                })?;
+                let exception = &exception_of(&self.handlers, run.handler)?;
                 let (&(of, _), swo) = whole.range(..=(*exception, run.span.from.cycles)).next_back()?;
                 (of == *exception && swo.span.to.cycles >= run.span.to.cycles).then_some(Cost {
                     handler: swo.handler,
@@ -1571,6 +1600,14 @@ impl<'a> Meaning<'a> {
                     span: Span { from, to },
                 })
                 .filter(|interrupt| !self.replaces(interrupt.handler, interrupt.span))
+                .map(|interrupt| Interrupt {
+                    handler: self
+                        .merged
+                        .get(&interrupt.handler)
+                        .copied()
+                        .unwrap_or(interrupt.handler),
+                    ..interrupt
+                })
                 .collect(),
             holds: self
                 .held
