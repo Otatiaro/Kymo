@@ -3,7 +3,8 @@
 //!
 //! A packet starts with a header byte that tells its kind and its size. The
 //! packets Kymo reads are the DWT's data values, each sent when a comparator
-//! matches a write, and the local timestamps the ITM sends after them. Global
+//! matches a write, its exception trace packets, and the local timestamps the
+//! ITM sends after them. Global
 //! timestamps, extension packets and the instrumentation ports' packets are
 //! read past. A header the protocol reserves, or a synchronisation packet cut
 //! short, is malformed: the bytes that follow it may not start a packet.
@@ -27,6 +28,9 @@ pub enum Packet {
         value: u32,
         size: u8,
     },
+    /// An exception trace packet: the exception's number and what the core
+    /// did with it.
+    Exception { number: u16, function: Function },
     /// A packet read past that the next local timestamp dates too: one of an
     /// instrumentation port or of another hardware source.
     Source,
@@ -37,6 +41,22 @@ pub enum Packet {
     /// packet.
     Malformed,
 }
+
+/// What an exception trace packet says the core did with an exception.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Function {
+    /// It entered the exception.
+    Entered,
+    /// It left the exception.
+    Exited,
+    /// It went back to the exception, or to the thread when the number is 0,
+    /// that the exited one had interrupted.
+    Returned,
+}
+
+/// The hardware source of exception trace packets, and their payload's size.
+const EXCEPTION_TRACE: u8 = 1;
+const EXCEPTION_SIZE: usize = 2;
 
 /// The packets of `bytes` in order, and whether the last one is cut short at
 /// the end of the bytes, then left out.
@@ -87,6 +107,25 @@ fn packet(bytes: &[u8]) -> Option<(Packet, usize)> {
                 write: id & 1 != 0,
                 value,
                 size: length as u8,
+            }
+        } else if header & 0b100 != 0 && id == EXCEPTION_TRACE && length == EXCEPTION_SIZE {
+            // The number's low eight bits, then its ninth in bit 0 and the
+            // function in bits 5:4.
+            let number = (value & 0x1ff) as u16;
+            match (value >> 12) & 0b11 {
+                0b01 => Packet::Exception {
+                    number,
+                    function: Function::Entered,
+                },
+                0b10 => Packet::Exception {
+                    number,
+                    function: Function::Exited,
+                },
+                0b11 => Packet::Exception {
+                    number,
+                    function: Function::Returned,
+                },
+                _ => Packet::Malformed,
             }
         } else {
             Packet::Source

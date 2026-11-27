@@ -52,9 +52,11 @@ impl Stream {
         self
     }
 
-    /// An exception packet: hardware source 1, its number and its function.
-    fn exception(mut self) -> Self {
-        self.0.extend([0x0e, 0x2d, 0x10]);
+    /// An exception packet: hardware source 1, the exception's number and the
+    /// function's two bits.
+    fn exception(mut self, number: u16, function: u8) -> Self {
+        self.0
+            .extend([0x0e, number as u8, (function << 4) | (number >> 8) as u8]);
         self
     }
 
@@ -225,7 +227,9 @@ fn an_anchor_with_a_delayed_or_shared_timestamp_dates_nothing() {
             "delayed",
             (|stream: Stream| stream.delayed(400)) as fn(Stream) -> Stream,
         ),
-        ("shared with an exception", |stream| stream.exception().stamp(400)),
+        ("shared with an exception", |stream| {
+            stream.exception(45, 0b01).stamp(400)
+        }),
         ("shared with a sample", |stream| stream.value(1, 7, 2).stamp(400)),
     ] {
         let dated = around_a_misdated_anchor(middle);
@@ -302,6 +306,84 @@ fn samples_outside_the_anchors_are_undated() {
 
     let none = date(&stream.0, 0, &[LEVEL], &[]);
     assert_eq!((none.undated, none.anchors, none.span), (3, 0, None));
+}
+
+const ENTERED: u8 = 0b01;
+const EXITED: u8 = 0b10;
+const RETURNED: u8 = 0b11;
+
+fn exception(number: u16, function: Function, cycles: i64) -> Exception {
+    Exception {
+        number,
+        function,
+        cycles,
+    }
+}
+
+#[test]
+fn exceptions_are_dated_between_anchors() {
+    // TIM2 (exception 61) enters, exits and returns to the thread; the exit
+    // and the return share their timestamp, as the core sends them.
+    let stream = Stream::default()
+        .exception(15, ENTERED)
+        .stamp(5)
+        .anchor(0x100)
+        .stamp(10)
+        .exception(61, ENTERED)
+        .stamp(100)
+        .exception(61, EXITED)
+        .exception(0, RETURNED)
+        .stamp(200)
+        .anchor(0x200)
+        .stamp(700)
+        .exception(271, ENTERED)
+        .stamp(5);
+    let dated = date(&stream.0, 0, &[LEVEL], &expected(&[(1_000, 0x100), (2_000, 0x200)]));
+    assert_eq!(dated.gaps, []);
+    assert_eq!(
+        dated.exceptions,
+        [
+            exception(61, Function::Entered, 1_100),
+            exception(61, Function::Exited, 1_300),
+            exception(0, Function::Returned, 1_300),
+        ]
+    );
+    assert_eq!((dated.exceptions_dropped, dated.exceptions_undated), (0, 2));
+}
+
+#[test]
+fn exceptions_in_a_gap_are_dropped() {
+    let stream = Stream::default()
+        .anchor(0x100)
+        .stamp(10)
+        .exception(61, ENTERED)
+        .stamp(100)
+        .overflow()
+        .exception(61, EXITED)
+        .stamp(200)
+        .anchor(0x200)
+        .stamp(700);
+    let dated = date(&stream.0, 0, &[LEVEL], &expected(&[(1_000, 0x100), (2_000, 0x200)]));
+    assert_eq!(dated.gaps, [(1_000, 2_000)]);
+    assert_eq!(dated.exceptions, []);
+    assert_eq!(dated.exceptions_dropped, 2);
+}
+
+#[test]
+fn the_summary_counts_the_exceptions() {
+    let watched = Watched {
+        anchors: 2,
+        exceptions: vec![exception(61, Function::Entered, 1_100)],
+        exceptions_dropped: 3,
+        exceptions_undated: 1,
+        ..Watched::default()
+    };
+    assert_eq!(
+        summary(&watched),
+        "0 samples of 0 watched variables, 2 anchors; 1 exception packets, \
+         3 dropped in the gaps, 1 undated outside the anchors"
+    );
+    assert!(!summary(&Watched::default()).contains("exception"));
 }
 
 /// The function of an ARMv8-M comparator sending a data value of 2^`log2`
