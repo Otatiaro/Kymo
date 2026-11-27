@@ -1108,6 +1108,58 @@ fn the_samples_of_swo_alone_have_their_statistics() {
 }
 
 #[test]
+fn the_exceptions_of_swo_alone_have_their_statistics() {
+    let catalogue = with_ring();
+    // A tick lost between the second and the third: a gap from 1 024 to 2 048.
+    let stream = Stream::default()
+        .tick()
+        .stamp(1)
+        .exception(16, 1)
+        .stamp(100)
+        .exception(16, 2)
+        .stamp(50)
+        .exception(16, 1)
+        .stamp(300)
+        .exception(16, 2)
+        .stamp(50)
+        .tick()
+        .stamp(524)
+        .tick()
+        .stamp(2_048)
+        .exception(16, 1)
+        .stamp(100)
+        .exception(16, 2)
+        .stamp(50)
+        .tick()
+        .stamp(874)
+        .tick()
+        .stamp(1_024);
+    let read = Read {
+        end: stream.0.len(),
+        host_ns: 0,
+    };
+    let capture = swo_alone("exceptions", &stream.0, &[read], false);
+    let trace = crate::model::Trace::read(&catalogue, &capture, Some(1_000_000)).unwrap();
+    let range = crate::stats::Range { from: None, to: None };
+    let report = crate::stats::of_trace(&catalogue, &trace, range, 1).unwrap();
+    // The trace spans the ticks, known but in the gap, its one loss.
+    assert_eq!(
+        (report.from, report.to, report.known, report.losses),
+        (0, 4_096, 3_072, 1)
+    );
+    let group = |metric: &str| {
+        report
+            .groups
+            .iter()
+            .find(|group| group.kind == "handler" && group.metric.name == metric)
+            .map(|group| (group.count, group.excluded_loss))
+    };
+    assert_eq!(group("gross"), Some((3, 0)));
+    // The period across the gap may miss an entry dropped in it.
+    assert_eq!(group("period"), Some((1, 1)));
+}
+
+#[test]
 fn a_gap_past_a_quarter_of_a_period_is_placed_approximately() {
     // Off by 400 ns, between a quarter and a half of the period.
     let (bytes, reads) = read_ticks(&[1_024, 1_024, 3_072, 1_024, 1_024], &[0, 400, -400, 400, 400, 400]);

@@ -32,6 +32,7 @@
 use crate::events::{self, Catalogue};
 use crate::load::Covered;
 use crate::model::{Edge, Element, Trace};
+use crate::swo::Watched;
 use crate::target::Result;
 use crate::values::{self, Curve, Number, Values};
 use crate::{durations, meaning};
@@ -458,17 +459,42 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
     contradictions.extend(durations.contradictions);
     contradictions.extend(kernel.exception_contradictions.iter().map(|edge| edge.element));
     let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
+    let known = match &trace.watched {
+        Some(watched) if !has_events(trace) => segments(watched),
+        _ => kernel.known(),
+    };
     let found = Found {
         instances: &instances,
         contradictions: &contradictions,
         faults: &faults,
-        known: &kernel.known(),
+        known: &known,
     };
     let mut report = compute(trace, found, range, worst);
     report.values = sampled(trace, &values, range);
     report.curves = values.curves;
     report.warnings.extend(kernel.double_trace());
     Ok(report)
+}
+
+fn has_events(trace: &Trace) -> bool {
+    trace
+        .elements
+        .iter()
+        .any(|element| matches!(element, Element::Event { .. }))
+}
+
+/// The time a trace of SWO alone is known: its span less its gaps.
+fn segments(watched: &Watched) -> Covered {
+    let mut known = Covered::default();
+    if let Some((first, last)) = watched.span {
+        let mut from = first;
+        for &(start, end) in &watched.gaps {
+            known.push(from, start);
+            from = end;
+        }
+        known.push(from, last);
+    }
+    known
 }
 
 /// The statistics of what the adapter `found` over `range` of `trace`, the
@@ -489,17 +515,28 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
             _ => None,
         })
         .collect();
-    let origin = events.first().copied().unwrap_or(0);
-    let last = events.last().copied().unwrap_or(0);
+    // Without events, of SWO alone, the trace spans the ticks.
+    let span = trace.watched.as_ref().and_then(|watched| watched.span);
+    let gaps: &[(i64, i64)] = trace.watched.as_ref().map_or(&[], |watched| &watched.gaps);
+    let (origin, last) = match (events.first(), events.last(), span) {
+        (Some(&first), Some(&last), _) => (first, last),
+        (_, _, Some(span)) => span,
+        _ => (0, 0),
+    };
     let low = range.from.unwrap_or(i64::MIN);
     let high = range.to.unwrap_or(i64::MAX);
     let (from, to) = (low.max(origin), high.min(last).max(low.max(origin)));
     let inside = |cycles: i64| cycles >= low && cycles < high;
-    let losses = places
-        .losses
-        .iter()
-        .filter(|&&loss| inside(places.cycles[loss]))
-        .count();
+    // Without events, the losses are the SWO's gaps.
+    let losses = if events.is_empty() {
+        gaps.iter().filter(|&&(gap, _)| inside(gap)).count()
+    } else {
+        places
+            .losses
+            .iter()
+            .filter(|&&loss| inside(places.cycles[loss]))
+            .count()
+    };
     let suspects = trace
         .elements
         .iter()
@@ -549,7 +586,12 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         if !whole {
             counts.cut += 1;
         } else if instance.swo {
-            if instance.from.lost || instance.to.lost {
+            // A gap of the SWO dropped the packets in it: a span across one,
+            // a period, may miss an entry.
+            let across = gaps
+                .iter()
+                .any(|&(gap, _)| gap >= instance.from.cycles && gap < instance.to.cycles);
+            if instance.from.lost || instance.to.lost || across {
                 counts.excluded_loss += 1;
             } else {
                 counts.count += 1;
