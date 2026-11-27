@@ -6,23 +6,29 @@
  *          tick.
  *
  * The program configures the chip's SWO pin and trace clock, then calls
- * start(), which configures the ITM, the TPIU (asynchronous NRZ at the given
- * baud rate) and the time anchor, and watch() for each variable:
+ * start(), which configures the ITM and the TPIU (asynchronous NRZ at the
+ * given baud rate), and what it sends:
  *
  *     kymo::ring<1024> os;
  *     std::uint32_t speed;
  *
- *     kymo::dwt::start(os, {8'000'000, 2'000'000}); // trace clock, baud rate
+ *     kymo::dwt::start({8'000'000, 2'000'000}); // trace clock, baud rate
+ *     kymo::dwt::anchor(os);                    // with a ring read through SWD
  *     kymo::dwt::watch(speed);
- *     kymo::dwt::exceptions();                      // optional: every exception
- *     kymo::dwt::ticks();                           // optional: a tick every 16384 cycles
+ *     kymo::dwt::exceptions();                  // optional: every exception
+ *     kymo::dwt::ticks();                       // optional: a tick every 16384 cycles
  *
- * **The anchor.** start() puts a comparator on the timestamp word of the
+ * SWO needs no ring: without one, the ticks date the stream (the host's
+ * `kymo record --swo-only`).
+ *
+ * **The anchor.** anchor() puts a comparator on the timestamp word of the
  * ring's slot 0: each event that starts at slot 0, at most once a lap, sends
  * its timestamp on SWO, a point both streams share exactly. The host dates
  * the samples between two anchors by the ITM's local timestamps, and checks
- * that their sum matches the anchors' difference. **This comparator must stay
- * as start() configured it for as long as the trace runs**: a debugger or a
+ * that their sum matches the anchors' difference. anchor() comes before
+ * watch(), so that the variables keep the more capable comparators. **This
+ * comparator must stay as anchor() configured it for as long as the trace
+ * runs**: a debugger or a
  * program that takes it over cuts the synchronisation, and no sample can be
  * dated any more. It is the least capable comparator able to send data
  * values, so that those which match a value or the cycle counter stay free:
@@ -256,14 +262,11 @@ inline bool watch(std::uintptr_t address, std::size_t size)
 
 /**
  * @brief Sends the ITM, the DWT's data values with local timestamps, out of
- *        the TPIU as SWO, and puts the anchor on the timestamp word of
- *        @p ring's slot 0. False, with the ITM left off, when no comparator
- *        can send data values.
+ *        the TPIU as SWO, and frees the comparators that send trace packets.
  *
  * The program configures the SWO pin and the trace clock before.
  */
-template<std::size_t Slots>
-bool start(ring<Slots> const& ring, swo config)
+inline void start(swo config)
 {
 	using namespace detail;
 	reg(demcr) |= demcr_trcena;
@@ -282,12 +285,25 @@ bool start(ring<Slots> const& ring, swo config)
 	for (unsigned n = 0; n < (reg(dwt_ctrl) >> dwt_numcomp_shift); ++n)
 		if (sends_trace(reg(comparator(n) + function_offset)))
 			reg(comparator(n) + function_offset) = 0;
-	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the address a comparator matches
-	if (!detail::watch(reinterpret_cast<std::uintptr_t>(&ring.slots[0].words[0]), sizeof(std::uint32_t)))
-		return false;
 	reg(itm_tcr) = itm_itmena | itm_tsena | itm_txena;
 	swo_baud.store(config.baud, std::memory_order_relaxed);
-	return true;
+}
+
+/**
+ * @brief Puts the anchor on the timestamp word of @p ring's slot 0, after
+ *        start(). False, nothing set, before start() or when no comparator
+ *        can send data values.
+ *
+ * start() is known by swo_baud: ITM_TCR, like the comparators, outlives a
+ * system reset, and may hold what the program before it set.
+ */
+template<std::size_t Slots>
+bool anchor(ring<Slots> const& ring)
+{
+	if (swo_baud.load(std::memory_order_relaxed) == 0)
+		return false;
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the address a comparator matches
+	return detail::watch(reinterpret_cast<std::uintptr_t>(&ring.slots[0].words[0]), sizeof(std::uint32_t));
 }
 
 /**

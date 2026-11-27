@@ -298,7 +298,9 @@ std::uint32_t volatile g_dwt_started = 0; ///< 1 once the DWT sends g_position, 
 void start_swo()
 {
 	reg(dbgmcu_cr) |= (1u << 5) | (1u << 4); // TRACE_EN, TRACE_IOEN; TRACE_MODE 0: asynchronous
-	if (kymo::dwt::start(trace_ring, {.trace_clock = core_clock, .baud = 8'000'000}) && kymo::dwt::watch(g_position))
+	bool const early = kymo::dwt::anchor(trace_ring); // refused: SWO not started
+	kymo::dwt::start({.trace_clock = core_clock, .baud = 8'000'000});
+	if (!early && kymo::dwt::anchor(trace_ring) && kymo::dwt::watch(g_position))
 	{
 		kymo::dwt::exceptions();
 		kymo::dwt::ticks();

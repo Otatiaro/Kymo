@@ -753,7 +753,7 @@ pub fn watched(catalogue: &Catalogue, ring: &Ring, dwt: &Dwt, bytes: &[u8], elem
             .count();
         let mut refused = format!(
             "no DWT comparator sends the anchor, the writes to {anchor_address:#010x}: \
-             the program did not call kymo::dwt::start, or its comparator was taken over"
+             the program did not call kymo::dwt::anchor, or its comparator was taken over"
         );
         if ticks > 0 {
             refused += &format!(

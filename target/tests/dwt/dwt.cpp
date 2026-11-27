@@ -3,7 +3,7 @@
  * @brief   The comparators kymo::dwt takes: the least capable free one that
  *          sends data values, checked at compile time against the registers
  *          of real chips; and, under QEMU, which models no DWT comparator,
- *          start() and watch() refusing, start() publishing no baud rate.
+ *          anchor() and watch() refusing, start() publishing its baud rate.
  *
  * The data trace itself runs on hardware only: the NUCLEO-H563ZI's board
  * test (target/opsy/tests/board).
@@ -118,10 +118,15 @@ std::uint32_t watched;
 
 } // namespace
 
-/// What start() and watch() cost, each out of line for cost measures: their sizes in the image.
-[[gnu::noinline]] bool dwt_start()
+/// What each function costs, out of line for cost measures: their sizes in the image.
+[[gnu::noinline]] void dwt_start()
 {
-	return kymo::dwt::start(dwt_ring, {8'000'000, 2'000'000});
+	kymo::dwt::start({8'000'000, 2'000'000});
+}
+
+[[gnu::noinline]] bool dwt_anchor()
+{
+	return kymo::dwt::anchor(dwt_ring);
 }
 
 [[gnu::noinline]] bool dwt_watch()
@@ -141,10 +146,13 @@ std::uint32_t watched;
 
 void test_main()
 {
-	if (dwt_start())
-		fail("start() took a comparator QEMU does not model");
-	if (kymo::dwt::swo_baud.load(std::memory_order_relaxed) != 0)
-		fail("start() published a baud rate without an anchor");
+	if (dwt_anchor())
+		fail("anchor() before start()");
+	dwt_start();
+	if (kymo::dwt::swo_baud.load(std::memory_order_relaxed) != 2'000'000)
+		fail("start() did not publish its baud rate");
+	if (dwt_anchor())
+		fail("anchor() took a comparator QEMU does not model");
 	if (dwt_watch())
 		fail("watch() took a comparator QEMU does not model");
 	dwt_exceptions();

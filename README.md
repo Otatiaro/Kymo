@@ -200,8 +200,8 @@ http(s) URL is fetched, and `kymo-ui` opens a capture from its URL too.
 ## Variables on SWO
 
 > [!IMPORTANT]
-> `kymo::dwt::start()` puts a DWT comparator on the ring: the **anchor** that
-> dates SWO against the ring. **Leave it as `start()` configured it for as long
+> `kymo::dwt::anchor()` puts a DWT comparator on the ring: the **anchor** that
+> dates SWO against the ring. **Leave it as `anchor()` configured it for as long
 > as the trace runs.** A debugger or a program that takes it over cuts the
 > synchronisation, and no sample on SWO can be dated any more. It is the least
 > capable comparator able to send data values, so that those which match a
@@ -217,19 +217,25 @@ configures the chip's SWO pin and trace clock, then:
 
 std::int32_t position;   // a global of 1, 2 or 4 bytes, aligned on its size
 
-kymo::dwt::start(trace_ring, {8'000'000, 2'000'000});   // trace clock, baud rate
+kymo::dwt::start({8'000'000, 2'000'000});   // trace clock, baud rate
+kymo::dwt::anchor(trace_ring);              // with a ring read through SWD
 kymo::dwt::watch(position);
 ```
 
-`start()` configures the ITM and the TPIU (asynchronous NRZ, formatter off) and
-the anchor on the ring's slot 0; `watch()` takes one more comparator each, and
-returns false when none is left. A comparator keeps its function across a
-system reset: `start()` frees those that send trace packets, left by the
-program before the reset, and leaves a debugger's watchpoints and triggers. On
-ARMv8-M only the first four comparators send data values; on ARMv7-M the
-anchor takes the last one. Neither is in the path of an emit: in -Os, `start()`
-and `watch()` take 312 bytes of flash on a Cortex-M33 and 272 on a Cortex-M4,
-and 56 and 52 bytes of stack at most.
+SWO and SWD are two interfaces, used apart or together. `start()` configures
+the ITM and the TPIU (asynchronous NRZ, formatter off), and needs no ring: a
+program with SWO alone calls `kymo::dwt::ticks()` and the host dates the stream
+by them (`kymo record --swo-only`). With a ring read through SWD, `anchor()`,
+after `start()` and before the variables, puts the anchor on the ring's
+slot 0; it returns false before `start()` or when no comparator is left.
+`watch()` takes one more comparator each, and returns false when none is left.
+A comparator keeps its function across a system reset: `start()` frees those
+that send trace packets, left by the program before the reset, and leaves a
+debugger's watchpoints and triggers. On ARMv8-M only the first four
+comparators send data values; on ARMv7-M the anchor takes the last one. None
+is in the path of an emit: in -Os, `start()`, `anchor()` and `watch()` take
+332 bytes of flash on a Cortex-M33 and 284 on a Cortex-M4, and 32 bytes of
+stack at most.
 
 `kymo::dwt::exceptions()`, called after `start()`, also sends every
 exception's entry, exit and return on SWO, with no code in the handlers: 16
