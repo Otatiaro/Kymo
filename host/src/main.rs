@@ -277,7 +277,11 @@ fn report(copy: &str, window: &Window, worst: usize) -> Result<stats::Report> {
         from: cycles(from)?,
         to: cycles(to)?,
     };
-    stats::of_trace(&catalogue, &trace, range, worst)
+    let report = stats::of_trace(&catalogue, &trace, range, worst)?;
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(report)
 }
 
 /// The catalogue of the image at `path`, its warnings printed, the
@@ -358,6 +362,9 @@ fn run() -> Result<ExitCode> {
                 if spans {
                     let trace = Trace::read(&catalogue, &bytes, clock)?;
                     let kernel = meaning::Meaning::of_trace(&catalogue, &trace)?;
+                    if let Some(warning) = kernel.double_trace() {
+                        eprintln!("warning: {warning}");
+                    }
                     for line in meaning::lines(&trace, &kernel) {
                         println!("{line}");
                     }

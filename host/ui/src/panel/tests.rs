@@ -74,6 +74,7 @@ fn instance(trace: &Trace, subject: &str, value: i64, from: usize, to: usize) ->
         from: edge(from),
         to: edge(to),
         open: false,
+        swo: false,
     }
 }
 

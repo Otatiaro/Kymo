@@ -1529,3 +1529,159 @@ fn the_cpu_row_covers_each_cycle_as_the_oracle_does() {
         "{idle_interrupted} cycles of idle interrupted, {hidden} of a handler while unknown"
     );
 }
+
+/// What the SWO watched: the exception packets `packets`, anchored from
+/// `span.0` to `span.1`.
+fn watched(span: (i64, i64), packets: &[(u16, crate::itm::Function, i64)]) -> crate::swo::Watched {
+    crate::swo::Watched {
+        span: Some(span),
+        exceptions: packets
+            .iter()
+            .map(|&(number, function, cycles)| crate::swo::Exception {
+                number,
+                function,
+                cycles,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// The meaning of `steps` once the exceptions `watched` traced are taken in.
+fn with_exceptions<'a>(
+    catalogue: &'a Catalogue,
+    steps: &[(&str, &[u32])],
+    watched: crate::swo::Watched,
+) -> (Trace<'a>, Meaning<'a>) {
+    let mut trace = trace(catalogue, 0, steps);
+    trace.watched = Some(watched);
+    let meaning = Meaning::of_trace(catalogue, &trace).unwrap();
+    (trace, meaning)
+}
+
+const ENTERED: crate::itm::Function = crate::itm::Function::Entered;
+const EXITED: crate::itm::Function = crate::itm::Function::Exited;
+const RETURNED: crate::itm::Function = crate::itm::Function::Returned;
+const TICKS: [(&str, &[u32]); 6] = [("tick", &[]); 6];
+
+#[test]
+fn the_swo_traces_a_handler_named_by_its_interrupt() {
+    // TIM2 (16 + 45) at 12 and 25, then an exit of an exception not open.
+    let packets = [
+        (0, RETURNED, 5),
+        (61, ENTERED, 12),
+        (61, EXITED, 25),
+        (0, RETURNED, 25),
+        (62, EXITED, 40),
+    ];
+    let catalogue = catalogue();
+    let (trace, meaning) = with_exceptions(&catalogue, &TICKS, watched((0, 100), &packets));
+    assert_eq!(
+        lines(&trace, &meaning),
+        ["interrupt from=@12 to=@25 depth=0 handler=TIM2", "contradiction @40",]
+    );
+    assert_eq!(meaning.exception_contradictions[0].element, 4);
+    assert_eq!(meaning.double_trace(), None);
+    // The vector table supposes TIM2's handler.
+    let mut catalogue = catalogue;
+    catalogue.symbols = Symbols::with_vectors(&[(0x0800_0600, 0x20, "TIM2_IRQHandler")], {
+        let mut vectors = vec![0; 62];
+        vectors[61] = 0x0800_0601;
+        vectors
+    });
+    let (trace, meaning) = with_exceptions(&catalogue, &TICKS, watched((0, 100), &packets));
+    assert_eq!(
+        lines(&trace, &meaning)[0],
+        "interrupt from=@12 to=@25 depth=0 handler=TIM2 (TIM2_IRQHandler?)"
+    );
+}
+
+#[test]
+fn the_swo_replaces_the_adapter_where_it_covers_the_handler() {
+    // The adapter traces TIM2's handler H at 0, at 120, and from 140 to the
+    // end; the SWO covers from 100 to 200.
+    let mut steps: Vec<(&str, &[u32])> = vec![("isr_enter", &[H, 16 + 45]), ("isr_exit", &[H])];
+    steps.extend([("tick", &[] as &[u32]); 10]);
+    steps.extend([
+        ("isr_enter", &[H, 16 + 45] as &[u32]),
+        ("isr_exit", &[H]),
+        ("isr_enter", &[H, 16 + 45]),
+    ]);
+    let packets = [
+        (0, RETURNED, 105),
+        (61, ENTERED, 121),
+        (61, EXITED, 129),
+        (0, RETURNED, 129),
+        (61, ENTERED, 141),
+    ];
+    let catalogue = catalogue();
+    let (trace, meaning) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    assert_eq!(
+        lines(&trace, &meaning),
+        [
+            "interrupt from=0 to=1 depth=0 handler=0x08000401 (TIM2)",
+            "interrupt from=@121 to=@129 depth=0 handler=TIM2 (0x08000401)",
+            "interrupt from=@141 to=lost depth=0 handler=TIM2 (0x08000401)",
+        ]
+    );
+    assert_eq!(
+        meaning.double_trace().as_deref(),
+        Some(
+            "the SWO traces the exceptions of handlers the adapter traces too, at a cost in slots and cycles: \
+             0x08000401 (TIM2)"
+        )
+    );
+    let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
+    assert_eq!(report.warnings, [meaning.double_trace().unwrap()]);
+}
+
+#[test]
+fn the_adapter_handler_has_no_period_across_the_swo_coverage() {
+    // The adapter traces H at 0, 120 and 210; the SWO covers from 100 to
+    // 200, where it replaces the span at 120.
+    let mut steps: Vec<(&str, &[u32])> = vec![("isr_enter", &[H, 16 + 45]), ("isr_exit", &[H])];
+    steps.extend([("tick", &[] as &[u32]); 10]);
+    steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
+    steps.extend([("tick", &[] as &[u32]); 7]);
+    steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
+    let packets = [
+        (0, RETURNED, 105),
+        (61, ENTERED, 121),
+        (61, EXITED, 129),
+        (0, RETURNED, 129),
+    ];
+    let catalogue = catalogue();
+    let (trace, _) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
+    let names = names(&report);
+    assert_eq!(
+        group(&report, "handler 0x08000401 (TIM2) gross"),
+        (2, 0, 0, 0, vec![10, 10])
+    );
+    assert!(
+        !names.contains(&"handler 0x08000401 (TIM2) period".to_owned()),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn a_loss_of_the_ring_hides_nothing_the_swo_dates() {
+    // TIM2 runs across a loss of the ring, and at the end of the coverage.
+    let steps: [(&str, &[u32]); 4] = [("tick", &[]), ("lost", &[]), ("tick", &[]), ("tick", &[])];
+    let packets = [
+        (0, RETURNED, 1),
+        (61, ENTERED, 5),
+        (61, EXITED, 25),
+        (0, RETURNED, 25),
+        (61, ENTERED, 90),
+    ];
+    let catalogue = catalogue();
+    let (trace, _) = with_exceptions(&catalogue, &steps, watched((0, 100), &packets));
+    let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
+    let names = names(&report);
+    let name = names
+        .iter()
+        .find(|name| name.contains("TIM2"))
+        .unwrap_or_else(|| panic!("no TIM2 in {names:?}"));
+    assert_eq!(group(&report, name), (1, 1, 0, 0, vec![20]));
+}

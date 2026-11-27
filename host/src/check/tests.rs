@@ -50,6 +50,7 @@ fn report(groups: Vec<Group>, frequency: Option<f64>) -> Report {
         groups,
         curves: Vec::new(),
         values: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 

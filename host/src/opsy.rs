@@ -17,6 +17,10 @@ pub(crate) const PREFIX: &str = "kymo::opsy::";
 /// OpSy's wake reasons for a delay that ran out, given in SysTick.
 const ELAPSED: [&str; 2] = ["timed_out", "sleep_elapsed"];
 
+/// The exceptions of the kernel's handlers.
+const SVCALL: u16 = 11;
+const SYSTICK: u16 = 15;
+
 /// The hooks among the catalogue's events, by type id. An adapter event
 /// without a field the host reads is an error: host and adapter disagree.
 pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
@@ -48,10 +52,14 @@ pub(crate) fn dialect(catalogue: &Catalogue) -> Result<Dialect> {
                 wait: None,
                 timeout: None,
             },
-            "enter_systick" => Hook::KernelEnter { handler: "systick" },
+            "enter_systick" => Hook::KernelEnter {
+                handler: "systick",
+                exception: SYSTICK,
+            },
             "exit_systick" => Hook::KernelExit { handler: "systick" },
             "enter_service_call" => Hook::KernelEnter {
                 handler: "service_call",
+                exception: SVCALL,
             },
             "exit_service_call" => Hook::KernelExit {
                 handler: "service_call",

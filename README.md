@@ -257,6 +257,17 @@ stretch between two anchors whose SWO cycles disagree with the ring's, that
 holds an overflow, or that misses an anchor is a gap: its samples are dropped,
 and counted as excluded for loss.
 
+The exceptions SWO traces are handlers of their own in `decode --meaning`,
+`stats` and `check`, one per exception, named by the interrupt and then the
+handler: `TIM2 (TIM2_IRQHandler)` when the adapter traces it too,
+`TIM2 (TIM2_IRQHandler?)` when only the image's vector table points to it.
+Their edges are dated in cycles from SWO, `@<cycles>` in `decode --meaning`,
+and nest as entries, exits and returns say; within SWO's coverage only, from
+the first anchor to the last less the gaps, where a handler still open ends
+lost. A ring loss hides nothing SWO dates. Where the adapter traces the same
+handler, its spans that touch SWO's coverage give way to SWO's, and a warning
+says the handler is traced twice, at a cost in slots and cycles.
+
 SWO is read on every pass, between two reads of the ring, so the ring is
 drained less often: on an ST-Link V3 at 24 MHz SWD, a read takes about 160 µs
 and the passes drop by about 15 %. A ring that loses slots at the limit loses

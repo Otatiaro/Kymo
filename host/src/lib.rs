@@ -9,6 +9,7 @@ pub mod decode;
 pub mod durations;
 pub mod elf;
 pub mod events;
+pub mod exceptions;
 pub mod fault;
 pub mod format;
 mod freertos;

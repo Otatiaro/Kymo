@@ -111,6 +111,7 @@ fn instance(kind: &'static str, subject: &str, detail: Option<&str>) -> Instance
         from: edge(0, 0),
         to: edge(1, 1),
         open: false,
+        swo: false,
     }
 }
 
