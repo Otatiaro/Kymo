@@ -33,7 +33,7 @@ instances, the application's `sampling` durations among them, bounded by
 - that kymo::dwt configured the data trace, read from the registers after the
   reset: the anchor on slot 0's timestamp word through the least capable
   comparator, g_position on another, the ITM and the TPIU sending SWO at
-  8 MBd, and the exceptions traced. The comparators keep their functions
+  8 MBd, the exceptions traced and a tick every 16384 cycles. The comparators keep their functions
   across the reset: what the run before left is freed, and a debugger's
   watchpoint, written before the reset, is kept.
 """
@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from trace import SAMPLING, parse, check, check_rules, check_stats  # noqa: E402
 
 CHIP = "STM32H563ZITx"
+TICK_FIELDS = (1 << 22) | (1 << 9) | (0xF << 1)  # DWT_CTRL's CYCEVTENA, CYCTAP, POSTPRESET
 PERIOD = 1e-3  # seconds
 PERIOD_CYCLES = 8000  # of the core's 8 MHz
 TIMER = "app::(anonymous namespace)::timer_isr"
@@ -211,6 +212,9 @@ def check_dwt(probe_rs: str, probe: str, nm: str, image: str) -> list[str]:
     dwt_ctrl, = read_words(probe_rs, probe, 0xE0001000, 1)
     if dwt_ctrl & (1 << 16) == 0:
         errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::exceptions() left EXCTRCENA clear")
+    # CYCEVTENA, CYCTAP on bit 10, POSTPRESET 15: a tick every 1024 x 16 cycles.
+    if dwt_ctrl & TICK_FIELDS != TICK_FIELDS:
+        errors.append(f"DWT_CTRL {dwt_ctrl:#x}: kymo::dwt::ticks<16384>() did not set a tick every 16384 cycles")
     return errors
 
 
@@ -234,10 +238,11 @@ def main() -> int:
     probe = f"0483:374e:{args.probe_id}"
     for command in ("download", "write", "clear", "reset"):
         if command == "clear":
-            # DWT_CTRL keeps EXCTRCENA across the reset: cleared, so that only
-            # the image's kymo::dwt::exceptions() sets it.
+            # DWT_CTRL keeps EXCTRCENA and the tick across the reset: cleared,
+            # so that only the image's exceptions() and ticks() set them.
             dwt_ctrl, = read_words(args.probe_rs, probe, 0xE0001000, 1)
-            arguments = ["write", "--probe", probe, "--chip", CHIP, "b32", "0xE0001000", hex(dwt_ctrl & ~(1 << 16))]
+            cleared = dwt_ctrl & ~((1 << 16) | TICK_FIELDS | (0xF << 5))
+            arguments = ["write", "--probe", probe, "--chip", CHIP, "b32", "0xE0001000", hex(cleared)]
         else:
             arguments = [command, "--probe", probe, "--chip", CHIP] + {
                 "download": [args.image], "write": WATCHPOINT, "reset": []}[command]

@@ -95,6 +95,16 @@ static_assert(!sends_trace(0b0101) && !sends_trace(0b0110) && !sends_trace(0b011
 static_assert(!sends_trace(0b0100) && !sends_trace(0b1000) && !sends_trace(0b1011), "PC watchpoint and CMPMATCH");
 #endif
 
+// DWT_CTRL for a tick: CYCEVTENA (bit 22), CYCTAP (bit 9), POSTINIT (8:5) and
+// POSTPRESET (4:1) both the count less one.
+using kymo::dwt::detail::tick_fields;
+static_assert(tick_fields(64) == 0x400000, "64: bit 6, every count");
+static_assert(tick_fields(1024) == 0x4001FE, "1024: bit 6, sixteen counts, the finer tap first");
+static_assert(tick_fields(2048) == 0x400222, "2048: bit 10, two counts");
+static_assert(tick_fields(16384) == 0x4003FE, "16384: bit 10, sixteen counts");
+static_assert(tick_fields(0) == 0 && tick_fields(32) == 0 && tick_fields(1088) == 0 && tick_fields(17408) == 0,
+              "no tap and count give 0, 32, 17 x 64 or 17 x 1024");
+
 kymo::ring<16> dwt_ring;
 std::uint32_t watched;
 
@@ -124,6 +134,11 @@ std::uint32_t watched;
 	kymo::dwt::exceptions();
 }
 
+[[gnu::noinline]] void dwt_ticks()
+{
+	kymo::dwt::ticks<16'384>();
+}
+
 void test_main()
 {
 	if (dwt_start())
@@ -133,5 +148,6 @@ void test_main()
 	if (dwt_watch())
 		fail("watch() took a comparator QEMU does not model");
 	dwt_exceptions();
+	dwt_ticks();
 	qemu::finish(true);
 }

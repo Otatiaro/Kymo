@@ -2,7 +2,8 @@
  * @file    dwt.hpp
  * @brief   Variables watched by the DWT: each write to one is sent on SWO,
  *          its value and a local timestamp, without code where it is written;
- *          and, optionally, every exception's entry and exit.
+ *          and, optionally, every exception's entry and exit, and a periodic
+ *          tick.
  *
  * The program configures the chip's SWO pin and trace clock, then calls
  * start(), which configures the ITM, the TPIU (asynchronous NRZ at the given
@@ -14,6 +15,7 @@
  *     kymo::dwt::start(os, {8'000'000, 2'000'000}); // trace clock, baud rate
  *     kymo::dwt::watch(speed);
  *     kymo::dwt::exceptions();                      // optional: every exception
+ *     kymo::dwt::ticks<16'384>();                   // optional: a tick every 16384 cycles
  *
  * **The anchor.** start() puts a comparator on the timestamp word of the
  * ring's slot 0: each event that starts at slot 0, at most once a lap, sends
@@ -93,6 +95,13 @@ constexpr std::uint32_t tpiu_formatter_off = 0x100; ///< TrigIn kept, EnFCont cl
 constexpr std::uintptr_t dwt_ctrl = 0xE0001000;
 constexpr std::uint32_t dwt_cyccntena = 1U << 0;
 constexpr std::uint32_t dwt_exctrcena = 1U << 16;
+constexpr std::uint32_t dwt_cycevtena = 1U << 22;
+constexpr std::uint32_t dwt_cyctap = 1U << 9; ///< POSTCNT counts CYCCNT's bit 10, not bit 6
+constexpr unsigned dwt_postinit_shift = 5;
+constexpr unsigned dwt_postpreset_shift = 1;
+constexpr std::uint32_t dwt_post_mask = 0xF;
+constexpr std::uint32_t dwt_tick_fields =
+	dwt_cycevtena | dwt_cyctap | (dwt_post_mask << dwt_postinit_shift) | (dwt_post_mask << dwt_postpreset_shift);
 constexpr std::uint32_t dwt_notrcpkt = 1U << 27;
 constexpr unsigned dwt_numcomp_shift = 28;
 
@@ -115,6 +124,23 @@ constexpr unsigned datavsize_shift = 10;
 #else
 constexpr std::uint32_t function_write_value = 0b1101; ///< data value packet on write, EMITRANGE 0
 #endif
+
+/**
+ * @brief DWT_CTRL's CYCEVTENA, CYCTAP, POSTINIT and POSTPRESET for a tick
+ *        every @p cycles cycles; 0 when no tap and count give it.
+ */
+constexpr std::uint32_t tick_fields(std::uint32_t cycles)
+{
+	constexpr std::uint32_t taps[] = {64, 1024};
+	for (std::uint32_t const tap : taps)
+		if (cycles % tap == 0 && cycles / tap >= 1 && cycles / tap <= dwt_post_mask + 1)
+		{
+			std::uint32_t const post = (cycles / tap) - 1;
+			return dwt_cycevtena | (tap == 64 ? 0 : dwt_cyctap) | (post << dwt_postinit_shift) |
+			       (post << dwt_postpreset_shift);
+		}
+	return 0;
+}
 
 /** @brief The register at @p address. */
 inline std::uint32_t volatile& reg(std::uintptr_t address)
@@ -272,6 +298,28 @@ bool start(ring<Slots> const& ring, swo config)
 inline void exceptions()
 {
 	detail::reg(detail::dwt_ctrl) |= detail::dwt_exctrcena;
+}
+
+/**
+ * @brief Sends a tick on SWO every @p Cycles cycles, each with a local
+ *        timestamp, after start(): a reference that needs no ring.
+ *
+ * The local timestamps between two ticks add up to @p Cycles, which lets the
+ * host date and check SWO with neither the anchor nor the debug port.
+ * @p Cycles is 64 or 1024 times 1 to 16: at most 16384, 2 ms at 8 MHz. A tick
+ * takes about 4 bytes with its timestamp: 2 KB/s at 8 MHz and 16384.
+ */
+template<std::uint32_t Cycles>
+void ticks()
+{
+	using namespace detail;
+	constexpr std::uint32_t fields = tick_fields(Cycles);
+	static_assert(fields != 0, "a tick period is 64 or 1024 cycles times 1 to 16");
+	// The counter's fields are written with the tick off: POSTINIT takes only then.
+	std::uint32_t const ctrl = reg(dwt_ctrl) & ~dwt_tick_fields;
+	reg(dwt_ctrl) = ctrl;
+	reg(dwt_ctrl) = ctrl | (fields & ~dwt_cycevtena);
+	reg(dwt_ctrl) = ctrl | fields;
 }
 
 /**
