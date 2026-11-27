@@ -1043,6 +1043,31 @@ pub fn line(symbols: &Symbols, element: &Element) -> String {
     }
 }
 
+/// The lines `kymo decode` prints for the exceptions the SWO dates: the
+/// cycles of its first anchor and its last, `swo <first> <last>`, each gap
+/// between two anchors, `gap <from> <to>`, then each exception packet in
+/// the order of the stream, `exception <cycles> <number>
+/// entered|exited|returned`.
+pub fn swo_lines(watched: &crate::swo::Watched) -> Vec<String> {
+    if watched.exceptions.is_empty() {
+        return Vec::new();
+    }
+    let covered = watched
+        .span
+        .map(|(first, last)| format!("swo {first} {last}"))
+        .into_iter()
+        .chain(watched.gaps.iter().map(|(from, to)| format!("gap {from} {to}")));
+    let packets = watched.exceptions.iter().map(|packet| {
+        let function = match packet.function {
+            crate::itm::Function::Entered => "entered",
+            crate::itm::Function::Exited => "exited",
+            crate::itm::Function::Returned => "returned",
+        };
+        format!("exception {} {} {function}", packet.cycles, packet.number)
+    });
+    covered.chain(packets).collect()
+}
+
 /// `kymo decode` of a capture: the lines `kymo record` printed while making
 /// it, but for the seconds: they are at `clock` hertz, or the capture's, or
 /// else at the frequency measured over the whole capture.
@@ -1051,6 +1076,11 @@ pub fn print_capture(catalogue: &Catalogue, bytes: &[u8], clock: Option<u64>) ->
     println!("record {}", trace.first);
     for element in &trace.elements {
         println!("{}", line(&catalogue.symbols, element));
+    }
+    if let Some(watched) = &trace.watched {
+        for line in swo_lines(watched) {
+            println!("{line}");
+        }
     }
     if let Some(next) = trace.end {
         println!("end {next}");

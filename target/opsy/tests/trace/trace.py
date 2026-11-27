@@ -439,7 +439,7 @@ def check_stats(host: str, image: str, capture: str, durations: dict[str, int | 
         return done.stdout
 
     try:
-        names = oracle.interrupt_names(run("events", image))
+        names, vectors = oracle.interrupt_names(run("events", image)), oracle.vectors(image)
         # The whole capture without a frequency: no seconds.
         decoded = run("decode", capture)
         whole = json.loads(run("stats", capture, "--json", "--worst", str(WORST)))
@@ -460,8 +460,8 @@ def check_stats(host: str, image: str, capture: str, durations: dict[str, int | 
     except (RuntimeError, ValueError, KeyError, TypeError) as error:
         return [str(error)]
     errors = []
-    for name, got, expected in (("whole", whole, oracle.report(decoded, None, None, WORST, names)),
-                                ("middle", middle, oracle.report(clocked, low, high, WORST, names))):
+    for name, got, expected in (("whole", whole, oracle.report(decoded, None, None, WORST, names, vectors)),
+                                ("middle", middle, oracle.report(clocked, low, high, WORST, names, vectors))):
         errors += [f"stats {name}: {error}" for error in oracle.compare(expected, got)]
     kinds = {kind: sum(group["count"] for group in whole["groups"] if group["kind"] == kind)
              for kind in ("task", "handler", "mutex", "duration")}
@@ -525,7 +525,7 @@ def check_rules(host: str, image: str, capture: str) -> list[str]:
         names = interrupt_names(host, image)
     except subprocess.CalledProcessError as error:
         return [f"kymo {error.cmd[1]} failed: {error.stderr.strip()}"]
-    expected = oracle.report(decoded, None, None, WORST, names)
+    expected = oracle.report(decoded, None, None, WORST, names, oracle.vectors(image))
     groups = [{"kind": kind, "subject": subject, "metric": metric, "detail": detail} | group
               for (kind, subject, metric, detail), group in expected["groups"].items()]
     known = [group for group in groups if group["distribution"] and not group["lower_bound"]]
