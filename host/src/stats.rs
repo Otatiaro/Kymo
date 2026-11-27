@@ -388,6 +388,13 @@ impl Places {
             places.index.push(index_before);
             places.seconds.push(seconds);
         }
+        // The samples of a trace without elements, of SWO alone, are at
+        // element 0: the start.
+        if trace.elements.is_empty() {
+            places.cycles.push(cycles_before);
+            places.index.push(index_before);
+            places.seconds.push(None);
+        }
         places
     }
 
