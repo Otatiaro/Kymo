@@ -63,6 +63,9 @@ pub struct Instance {
     pub to: Edge,
     /// Still open at the end of the trace: `to` is the last event.
     pub open: bool,
+    /// Dated by the SWO: only a lost edge of its own excludes it, the ring's
+    /// losses and suspects hiding nothing of it.
+    pub swo: bool,
 }
 
 /// The range, in cycles: none for no bound.
@@ -196,6 +199,8 @@ pub struct Report {
     pub curves: Vec<Curve>,
     /// The curves sampled in the range, in order.
     pub values: Vec<Sampled>,
+    /// What the trace's reader should know of how it was traced.
+    pub warnings: Vec<String>,
 }
 
 /// The value of rank ceil(percent·n/100) among `sorted`, at least the first.
@@ -437,10 +442,14 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
         return Err("the image has no kernel adapter events, durations or values".into());
     }
     kernel.add(&trace.elements, 0);
+    if let Some(watched) = &trace.watched {
+        kernel.exceptions(watched, &trace.elements);
+    }
     let mut instances = meaning::instances(&kernel);
     instances.extend(durations.instances);
     let mut contradictions = kernel.contradictions.clone();
     contradictions.extend(durations.contradictions);
+    contradictions.extend(kernel.exception_contradictions.iter().map(|edge| edge.element));
     let faults: Vec<usize> = kernel.faults.iter().map(|faulted| faulted.edge.element).collect();
     let found = Found {
         instances: &instances,
@@ -451,6 +460,7 @@ pub fn of_trace(catalogue: &Catalogue, trace: &Trace, range: Range, worst: usize
     let mut report = compute(trace, found, range, worst);
     report.values = sampled(trace, &values, range);
     report.curves = values.curves;
+    report.warnings.extend(kernel.double_trace());
     Ok(report)
 }
 
@@ -531,6 +541,15 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         let counts = &mut groups[group];
         if !whole {
             counts.cut += 1;
+        } else if instance.swo {
+            if instance.from.lost || instance.to.lost {
+                counts.excluded_loss += 1;
+            } else {
+                counts.count += 1;
+                let mut point = places.point(instance.value, instance.from);
+                point.seconds = places.seconds(instance.from.cycles);
+                points[group].push(point);
+            }
         } else if places.touches_loss(instance.from, instance.to) {
             counts.excluded_loss += 1;
         } else if places.covers_suspect(instance.from, instance.to) {
@@ -557,6 +576,7 @@ pub fn compute(trace: &Trace, found: Found, range: Range, worst: usize) -> Repor
         groups,
         curves: Vec::new(),
         values: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 

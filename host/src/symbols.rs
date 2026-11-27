@@ -12,7 +12,7 @@
 
 use crate::events::Pointee;
 use crate::values::Reading;
-use object::{Object, ObjectSymbol, SymbolKind};
+use object::{Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// A function or an object of the image.
@@ -32,6 +32,10 @@ pub struct Symbols {
     objects: Vec<Symbol>,
     /// How each static variable of a numeric type reads, by address.
     numbers: BTreeMap<u64, Reading>,
+    /// The vector table the image starts from, by exception number: the
+    /// handler of each exception, with its Thumb bit, and the initial stack
+    /// pointer at 0.
+    vectors: Vec<u64>,
 }
 
 impl Symbols {
@@ -46,6 +50,7 @@ impl Symbols {
         let thumb = matches!(file.architecture(), object::Architecture::Arm);
         let mut symbols = Self {
             numbers,
+            vectors: vector_table(file),
             ..Self::default()
         };
         for symbol in file.symbols() {
@@ -168,6 +173,79 @@ impl Symbols {
             format!("{}+{offset:#x}", symbol.name)
         })
     }
+
+    /// The function the image's vector table gives for `exception`: what the
+    /// core runs for it, unless the firmware moves the table elsewhere.
+    pub fn vector(&self, exception: u16) -> Option<String> {
+        if exception == 0 {
+            return None;
+        }
+        let address = *self.vectors.get(usize::from(exception))?;
+        self.function(address)
+            .filter(|&start| start == address & !1)
+            .and_then(|start| self.name(&Pointee::Function, start))
+    }
+
+    /// Symbols of `functions` and the vector table `vectors`.
+    #[cfg(test)]
+    pub(crate) fn with_vectors(functions: &[(u64, u64, &str)], vectors: Vec<u64>) -> Self {
+        Self {
+            vectors,
+            ..Self::of_functions(functions)
+        }
+    }
+}
+
+/// The exceptions the architecture gives the vector table, and the most
+/// a device adds: ARMv7-M and ARMv8-M allow 496 interrupts.
+const VECTORS: usize = 16 + 496;
+
+/// The vector table of `file`, by exception number; empty without one.
+fn vector_table(file: &object::File) -> Vec<u64> {
+    let sections: Vec<(u64, &[u8])> = file
+        .sections()
+        .filter(|section| {
+            matches!(
+                section.kind(),
+                SectionKind::Text | SectionKind::ReadOnlyData | SectionKind::Data
+            )
+        })
+        .filter_map(|section| Some((section.address(), section.data().ok()?)))
+        .collect();
+    find_vectors(&sections, file.entry())
+}
+
+/// The vector table among `sections`, each its address and its bytes, of
+/// an image entered at `entry`: the first word aligned on 128 bytes, as a
+/// table must be, that is a stack pointer, non-zero and word-aligned,
+/// followed by the entry with its Thumb bit, the reset vector. The table
+/// runs to the end of its section, or to the most a table holds.
+fn find_vectors(sections: &[(u64, &[u8])], entry: u64) -> Vec<u64> {
+    let Ok(reset) = u32::try_from(entry | 1) else {
+        return Vec::new();
+    };
+    let word = |data: &[u8], at: usize| {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    for &(address, data) in sections {
+        let Ok(first) = usize::try_from(address.next_multiple_of(128) - address) else {
+            continue;
+        };
+        let table = (first..data.len()).step_by(128).find(|&at| {
+            word(data, at).is_some_and(|stack| stack != 0 && stack % 4 == 0) && word(data, at + 4) == Some(reset)
+        });
+        if let Some(at) = table {
+            return data[at..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .take(VECTORS)
+                .map(|&bytes| u64::from(u32::from_le_bytes(bytes)))
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 /// Names a symbol whose name others at other addresses share, statics of
@@ -217,6 +295,7 @@ mod tests {
                 symbol(0x2200, 8, "after_gap", &[]),
             ],
             numbers: BTreeMap::new(),
+            vectors: Vec::new(),
         }
     }
 
@@ -256,11 +335,57 @@ mod tests {
             functions: Vec::new(),
             objects: list,
             numbers: BTreeMap::new(),
+            vectors: Vec::new(),
         };
         assert_eq!(
             symbols.name(&Pointee::Other, 0x200a).as_deref(),
             Some("(anonymous namespace)::task@0x00002008+0x2")
         );
+    }
+
+    /// Words, little-endian.
+    fn bytes(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn the_vector_table_is_the_first_aligned_with_the_reset_vector() {
+        // The entry is 0x200; an aligned word before the table holds it but
+        // follows a zero, not a stack pointer, and one off alignment is skipped.
+        let mut data = bytes(&[0, 0x201]);
+        data.resize(0x84, 0);
+        data.extend(bytes(&[0x2000_1000, 0x201]));
+        data.resize(0x100, 0);
+        data.extend(bytes(&[0x2000_1000, 0x201, 0x301, 0x305]));
+        let vectors = find_vectors(&[(0x0800_0000, &data)], 0x200);
+        assert_eq!(vectors, [0x2000_1000, 0x201, 0x301, 0x305]);
+        assert!(find_vectors(&[(0x0800_0000, &data)], 0x400).is_empty());
+        // A section off alignment: the table is at the next multiple of 128.
+        let mut shifted = vec![0; 0x40];
+        shifted.extend(bytes(&[0x2000_1000, 0x201, 0x301]));
+        assert_eq!(
+            find_vectors(&[(0x0800_0040, &shifted)], 0x200),
+            [0x2000_1000, 0x201, 0x301]
+        );
+    }
+
+    #[test]
+    fn a_vector_names_the_function_it_starts() {
+        let symbols = Symbols::with_vectors(
+            &[
+                (0x200, 0x10, "reset"),
+                (0x300, 0x10, "timer"),
+                (0x400, 0x10, "spurious"),
+            ],
+            vec![0x2000_1000, 0x201, 0x301, 0x403, 0x601],
+        );
+        assert_eq!(symbols.vector(1).as_deref(), Some("reset"));
+        assert_eq!(symbols.vector(2).as_deref(), Some("timer"));
+        // Inside a function, outside every one, the stack pointer, past the table.
+        assert_eq!(symbols.vector(3), None);
+        assert_eq!(symbols.vector(4), None);
+        assert_eq!(symbols.vector(0), None);
+        assert_eq!(symbols.vector(5), None);
     }
 
     #[test]

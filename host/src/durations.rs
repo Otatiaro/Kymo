@@ -211,6 +211,7 @@ fn instance(of: String, from: Edge, to: Edge, open: bool) -> Instance {
         from,
         to,
         open,
+        swo: false,
     }
 }
 

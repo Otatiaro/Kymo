@@ -21,6 +21,15 @@ pub struct Edge {
     pub lost: bool,
 }
 
+impl Edge {
+    /// Where the edge falls in the trace, to compare edges by: its element,
+    /// then its cycles. An edge the SWO dates between two events falls at the
+    /// last event at or before it, and after that event.
+    pub fn at(&self) -> (usize, i64) {
+        (self.element, self.cycles)
+    }
+}
+
 /// A capture, read back.
 pub struct Trace<'a> {
     /// The first index recorded.

@@ -45,6 +45,11 @@
 //! that a handler several interrupts share is told apart. Its exit, which
 //! gives the handler alone, closes the innermost one entered.
 //!
+//! The handlers the SWO traces (exceptions.rs) are subjects of their own,
+//! one per exception, named by the interrupt; their spans are taken in once
+//! the trace is (`Meaning::exceptions`). Where the adapter traces the same
+//! handler, its spans that touch the SWO's coverage give way to the SWO's.
+//!
 //! The kernel's handlers the dialect names run as handlers of those names.
 //! PendSV has no exit event: it makes no span, and the task it puts on the
 //! core runs from the task_started it emits.
@@ -78,6 +83,7 @@
 
 use crate::code::Code;
 use crate::events::{Catalogue, Event, Kind, Pointee};
+use crate::exceptions;
 use crate::fault::{self, Fault};
 use crate::interrupts::Interrupts;
 use crate::lines::Lines;
@@ -85,6 +91,7 @@ use crate::load::{Covered, Cpu};
 pub use crate::model::Edge;
 use crate::model::{Element, Trace};
 use crate::stats::{Instance, Metric};
+use crate::swo::Watched;
 use crate::symbols::Symbols;
 use crate::target::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -233,6 +240,18 @@ pub struct Subjects {
     /// Handlers, by address and exception.
     by_interrupt: HashMap<(u64, Option<u16>), usize>,
     by_name: HashMap<&'static str, usize>,
+    /// Handlers the SWO traces, by exception.
+    by_exception: HashMap<u16, usize>,
+}
+
+/// The name of the handler at `address`, which `field` gives: from the
+/// image, or else the address.
+fn handler_name(symbols: &Symbols, field: &Field, address: u64) -> String {
+    field
+        .pointee
+        .as_ref()
+        .and_then(|pointee| symbols.name(pointee, address))
+        .unwrap_or_else(|| format!("0x{address:08x}"))
 }
 
 impl Subjects {
@@ -268,11 +287,7 @@ impl Subjects {
     ) -> usize {
         let address = field.read(payload);
         *self.by_interrupt.entry((address, exception)).or_insert_with(|| {
-            let handler = field
-                .pointee
-                .as_ref()
-                .and_then(|pointee| symbols.name(pointee, address))
-                .unwrap_or_else(|| format!("0x{address:08x}"));
+            let handler = handler_name(symbols, field, address);
             let name = match exception.map(|exception| interrupts.name(exception)) {
                 Some(interrupt) if interrupt != handler => format!("{handler} ({interrupt})"),
                 _ => handler,
@@ -303,6 +318,25 @@ impl Subjects {
         });
         self.by_address.insert(address, self.list.len() - 1);
         self.list.len() - 1
+    }
+
+    /// The handler the SWO traces for `exception`, by `name`: one subject per
+    /// exception, at address 0.
+    fn exception(&mut self, exception: u16, name: impl FnOnce() -> String) -> usize {
+        *self.by_exception.entry(exception).or_insert_with(|| {
+            self.list.push(Subject {
+                address: 0,
+                name: name(),
+                priority: None,
+                priorities: Vec::new(),
+            });
+            self.list.len() - 1
+        })
+    }
+
+    /// Whether `subject` is a handler the SWO traces.
+    pub fn is_hardware(&self, subject: usize) -> bool {
+        self.by_exception.values().any(|&hardware| hardware == subject)
     }
 
     /// A handler entered for `exception`, the first one seen.
@@ -504,8 +538,10 @@ pub(crate) enum Hook {
     IsrExitException {
         exception: Field,
     },
+    /// A kernel's handler, of that name, entered for that exception.
     KernelEnter {
         handler: &'static str,
+        exception: u16,
     },
     KernelExit {
         handler: &'static str,
@@ -656,6 +692,15 @@ pub struct Meaning<'a> {
     loss: Option<Edge>,
     /// The last event.
     last: Option<Edge>,
+    /// By exception: the first handler the adapter enters for it, and the
+    /// handler's name.
+    traced: BTreeMap<u16, (usize, String)>,
+    /// The adapter's handlers the SWO traces too, and the stretches of the
+    /// SWO's coverage: where their spans are the SWO's.
+    doubly: BTreeSet<usize>,
+    replaced: Vec<(i64, i64)>,
+    /// The exception packets that contradict the nesting, placed in the trace.
+    pub exception_contradictions: Vec<Edge>,
 }
 
 impl<'a> Meaning<'a> {
@@ -730,6 +775,10 @@ impl<'a> Meaning<'a> {
             known: BTreeSet::new(),
             loss: None,
             last: None,
+            traced: BTreeMap::new(),
+            doubly: BTreeSet::new(),
+            replaced: Vec::new(),
+            exception_contradictions: Vec::new(),
         })
     }
 
@@ -767,7 +816,122 @@ impl<'a> Meaning<'a> {
             return Err("the image has no kernel adapter events".into());
         }
         meaning.add(&trace.elements, 0);
+        if let Some(watched) = &trace.watched {
+            meaning.exceptions(watched, &trace.elements);
+        }
         Ok(meaning)
+    }
+
+    /// Takes in the exceptions the SWO traced, `watched`'s, once the trace's
+    /// `elements` are: each exception's handler is a subject of its own,
+    /// named by its interrupt, the handler following in parentheses: certain
+    /// when the adapter traces that exception, supposed, with a `?`, from
+    /// the image's vector table otherwise. An edge falls after the last event
+    /// at or before its cycles. A handler both channels trace keeps the
+    /// adapter's spans that touch no stretch of the SWO's coverage alone.
+    /// A trace without events takes in none.
+    pub fn exceptions(&mut self, watched: &Watched, elements: &[Element]) {
+        let events: Vec<(i64, usize)> = elements
+            .iter()
+            .enumerate()
+            .filter_map(|(element, item)| match item {
+                Element::Event { cycles, .. } => Some((*cycles, element)),
+                _ => None,
+            })
+            .collect();
+        if watched.exceptions.is_empty() || events.is_empty() {
+            return;
+        }
+        let coverage = exceptions::coverage(watched);
+        let nested = exceptions::nest(&watched.exceptions, &coverage);
+        let edge = |at: exceptions::At| {
+            let after = events.partition_point(|&(cycles, _)| cycles <= at.cycles);
+            Edge {
+                element: after.checked_sub(1).map_or(0, |before| events[before].1),
+                cycles: at.cycles,
+                lost: at.lost,
+            }
+        };
+        let addresses: BTreeSet<u64> = self
+            .traced
+            .values()
+            .filter(|&&(handler, _)| !self.handlers.is_named(handler))
+            .map(|&(handler, _)| self.handlers.list[handler].address)
+            .collect();
+        let shared = (0..self.handlers.list.len()).filter(|&handler| {
+            !self.handlers.is_named(handler) && addresses.contains(&self.handlers.list[handler].address)
+        });
+        self.doubly = self
+            .traced
+            .values()
+            .map(|&(handler, _)| handler)
+            .chain(shared)
+            .collect();
+        self.replaced = coverage;
+        let mut interrupts = std::mem::take(&mut self.closed.interrupts);
+        interrupts.retain(|interrupt| !self.replaces(interrupt.handler, interrupt.span));
+        for line in nested.lines {
+            let handler = self.hardware(line.exception);
+            interrupts.push(Interrupt {
+                handler,
+                depth: line.depth,
+                span: Span {
+                    from: edge(line.from),
+                    to: edge(line.to),
+                },
+            });
+        }
+        interrupts.sort_by_key(|interrupt| interrupt.span.to.at());
+        self.closed.interrupts = interrupts;
+        self.exception_contradictions = nested
+            .contradictions
+            .iter()
+            .map(|&cycles| edge(exceptions::At { cycles, lost: false }))
+            .collect();
+    }
+
+    /// The handler the SWO traces for `exception`.
+    fn hardware(&mut self, exception: u16) -> usize {
+        let interrupt = self.interrupts.name(exception);
+        let handler = match self.traced.get(&exception) {
+            Some((_, handler)) => Some((handler.clone(), "")),
+            None => self.symbols.vector(exception).map(|handler| (handler, "?")),
+        };
+        self.handlers.exception(exception, || match handler {
+            Some((handler, mark)) if handler != interrupt => format!("{interrupt} ({handler}{mark})"),
+            _ => interrupt,
+        })
+    }
+
+    /// Whether the SWO's span replaces the adapter's `span` of `handler`.
+    fn replaces(&self, handler: usize, span: Span) -> bool {
+        self.doubly.contains(&handler)
+            && self
+                .replaced
+                .iter()
+                .any(|&(from, to)| span.from.cycles <= to && span.to.cycles >= from)
+    }
+
+    /// The adapter's handlers the SWO traces too, by name.
+    pub fn doubly_traced(&self) -> Vec<String> {
+        let names: BTreeSet<&str> = self
+            .doubly
+            .iter()
+            .map(|&handler| self.handlers.list[handler].name.as_str())
+            .collect();
+        names.into_iter().map(str::to_owned).collect()
+    }
+
+    /// The warning that the adapter traces handlers the SWO traces too;
+    /// none when it traces none of them.
+    pub fn double_trace(&self) -> Option<String> {
+        let names = self.doubly_traced();
+        (!names.is_empty()).then(|| {
+            format!(
+                "the SWO traces the exceptions of handlers the adapter traces too, at a cost in slots and cycles: {}",
+                names.join(", ")
+            )
+        })
     }
 
     /// Whether the image has a kernel adapter's events.
@@ -1043,10 +1207,16 @@ impl<'a> Meaning<'a> {
             }
             Hook::IsrEnter { handler, exception } => {
                 let exception = exception_of(exception, payload);
-                let handler = self
+                let address = handler.read(payload);
+                let subject = self
                     .handlers
                     .interrupt(symbols, self.interrupts, handler, exception, payload);
-                self.enter(handler, exception, edge);
+                if let Some(exception) = exception {
+                    self.traced
+                        .entry(exception)
+                        .or_insert_with(|| (subject, handler_name(symbols, handler, address)));
+                }
+                self.enter(subject, exception, edge);
             }
             Hook::IsrExitException { exception } => {
                 let exception = exception_of(exception, payload);
@@ -1076,8 +1246,14 @@ impl<'a> Meaning<'a> {
                 };
                 self.exit(handler, edge);
             }
-            Hook::KernelEnter { handler } => {
-                let handler = self.handlers.named(handler);
+            Hook::KernelEnter {
+                handler: name,
+                exception,
+            } => {
+                let handler = self.handlers.named(name);
+                self.traced
+                    .entry(*exception)
+                    .or_insert_with(|| (handler, (*name).to_owned()));
                 self.enter(handler, None, edge);
             }
             Hook::KernelExit { handler } => {
@@ -1332,6 +1508,7 @@ impl<'a> Meaning<'a> {
                     depth,
                     span: Span { from, to },
                 })
+                .filter(|interrupt| !self.replaces(interrupt.handler, interrupt.span))
                 .collect(),
             holds: self
                 .held
@@ -1393,7 +1570,12 @@ impl<'a> Meaning<'a> {
             .iter()
             .filter(|run| run.task.is_some())
             .map(|run| span(&run.span));
-        let handler_open = self.entered.first().map(|&(_, from, ..)| from.cycles);
+        let handler_open = self
+            .open()
+            .interrupts
+            .iter()
+            .map(|interrupt| interrupt.span.from.cycles)
+            .min();
         let task_open = self.running.and_then(|(task, from)| task.map(|_| from.cycles));
         let known = self.known();
         let handlers_known = Covered::union(handlers.clone(), handler_open).within(&known);
@@ -1477,17 +1659,13 @@ const MUTEX_METRICS: [Metric; 2] = [HOLD, WAIT];
 
 /// The time `spans`, sorted and apart, take of `from..to`.
 fn overlap(spans: &[Span], from: Edge, to: Edge) -> i64 {
-    let first = spans.partition_point(|span| span.to.element <= from.element);
+    let first = spans.partition_point(|span| span.to.at() <= from.at());
     spans[first..]
         .iter()
-        .take_while(|span| span.from.element < to.element)
+        .take_while(|span| span.from.at() < to.at())
         .map(|span| {
-            let low = if span.from.element > from.element {
-                span.from
-            } else {
-                from
-            };
-            let high = if span.to.element < to.element { span.to } else { to };
+            let low = if span.from.at() > from.at() { span.from } else { from };
+            let high = if span.to.at() < to.at() { span.to } else { to };
             high.cycles - low.cycles
         })
         .sum()
@@ -1502,11 +1680,8 @@ fn parents(interrupts: &[(Interrupt, bool)]) -> Vec<Option<usize>> {
         .iter()
         .enumerate()
         .map(|(n, (interrupt, _))| {
-            let from = interrupt.span.from.element;
-            while held
-                .last()
-                .is_some_and(|&last| interrupts[last].0.span.to.element <= from)
-            {
+            let from = interrupt.span.from.at();
+            while held.last().is_some_and(|&last| interrupts[last].0.span.to.at() <= from) {
                 held.pop();
             }
             let parent = held.last().copied();
@@ -1520,7 +1695,7 @@ fn parents(interrupts: &[(Interrupt, bool)]) -> Vec<Option<usize>> {
 fn task_runs(meaning: &Meaning) -> HashMap<usize, Vec<Span>> {
     let open = meaning.open();
     let mut runs: Vec<Run> = meaning.closed.runs.iter().chain(&open.runs).copied().collect();
-    runs.sort_by_key(|run| run.span.from.element);
+    runs.sort_by_key(|run| run.span.from.at());
     let mut by_task: HashMap<usize, Vec<Span>> = HashMap::new();
     for run in runs {
         if let Some(task) = run.task {
@@ -1532,21 +1707,17 @@ fn task_runs(meaning: &Meaning) -> HashMap<usize, Vec<Span>> {
 
 /// The parts of `runs`, sorted and apart, within `span`, as edges.
 fn within(runs: &[Span], span: Span) -> Vec<(Edge, Edge)> {
-    let first = runs.partition_point(|run| run.to.element <= span.from.element);
+    let first = runs.partition_point(|run| run.to.at() <= span.from.at());
     runs[first..]
         .iter()
-        .take_while(|run| run.from.element <= span.to.element)
+        .take_while(|run| run.from.at() <= span.to.at())
         .map(|run| {
-            let low = if run.from.element > span.from.element {
+            let low = if run.from.at() > span.from.at() {
                 run.from
             } else {
                 span.from
             };
-            let high = if run.to.element < span.to.element {
-                run.to
-            } else {
-                span.to
-            };
+            let high = if run.to.at() < span.to.at() { run.to } else { span.to };
             (low, high)
         })
         .collect()
@@ -1572,7 +1743,7 @@ pub fn ready(meaning: &Meaning) -> Vec<Ready> {
                 .ok()
         });
         let mut push = |from: Edge, to: Edge, open| {
-            if to.element > from.element {
+            if to.at() > from.at() {
                 out.push(Ready {
                     task,
                     span: Span { from, to },
@@ -1618,12 +1789,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
         .map(|&interrupt| (interrupt, false))
         .collect();
     interrupts.extend(open.interrupts.iter().map(|&interrupt| (interrupt, true)));
-    interrupts.sort_by_key(|(interrupt, _)| {
-        (
-            interrupt.span.from.element,
-            std::cmp::Reverse(interrupt.span.to.element),
-        )
-    });
+    interrupts.sort_by_key(|(interrupt, _)| (interrupt.span.from.at(), std::cmp::Reverse(interrupt.span.to.at())));
     let parents = parents(&interrupts);
     let outermost: Vec<Span> = interrupts
         .iter()
@@ -1651,6 +1817,11 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
                     value: i64,
                     span: Span,
                     open: bool| {
+        // A period of the adapter's handler that spans the SWO's coverage
+        // misses the spans the SWO's replace.
+        if kind.0 == 1 && meaning.replaces(subject, span) {
+            return;
+        }
         let name = match kind.0 {
             0 => &meaning.tasks.list[subject].name,
             1 => &meaning.handlers.list[subject].name,
@@ -1668,6 +1839,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
                 from: span.from,
                 to: span.to,
                 open,
+                swo: kind.0 == 1 && meaning.handlers.is_hardware(subject),
             },
         ));
     };
@@ -1708,7 +1880,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
         task_push(GROSS, None, gross);
     }
     let mut wakes: Vec<&Wake> = meaning.wakes.iter().collect();
-    wakes.sort_by_key(|wake| (wake.task, wake.edge.element));
+    wakes.sort_by_key(|wake| (wake.task, wake.edge.at()));
     for pair in wakes.windows(2).filter(|pair| pair[0].task == pair[1].task) {
         let span = Span {
             from: pair[0].edge,
@@ -1763,7 +1935,7 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
         .filter(|(interrupt, _)| !interrupt.span.from.lost)
         .map(|(interrupt, _)| (interrupt.handler, interrupt.span.from))
         .collect();
-    entries.sort_by_key(|&(handler, edge)| (handler, edge.element));
+    entries.sort_by_key(|&(handler, edge)| (handler, edge.at()));
     for pair in entries.windows(2).filter(|pair| pair[0].0 == pair[1].0) {
         let span = Span {
             from: pair[0].1,
@@ -1806,20 +1978,28 @@ pub fn instances(meaning: &Meaning) -> Vec<Instance> {
     out.sort_by(|(a, x), (b, y)| {
         a.cmp(b)
             .then_with(|| x.detail.cmp(&y.detail))
-            .then(x.from.element.cmp(&y.from.element))
+            .then(x.from.at().cmp(&y.from.at()))
     });
     out.into_iter().map(|(_, instance)| instance).collect()
 }
 
 /// `kymo decode --meaning`'s output: the spans of a capture's trace, a line
 /// each, those still open at its end last with `to=open`; each task_ready
-/// and its cause; each time ready; each fault; then the contradictions. An edge is the
-/// index of its event, or `lost`.
+/// and its cause; each time ready; each fault; then the contradictions. An
+/// edge is the index of its event, or `lost`; an edge the SWO dates is
+/// `@<cycles>`, or `lost`.
 pub fn lines(trace: &Trace, meaning: &Meaning) -> Vec<String> {
     let mut lines = Vec::new();
     let edge = |edge: Edge| match &trace.elements[edge.element] {
         Element::Event { event, .. } if !edge.lost => event.index.to_string(),
         _ => "lost".to_owned(),
+    };
+    let swo_edge = |edge: Edge| {
+        if edge.lost {
+            "lost".to_owned()
+        } else {
+            format!("@{}", edge.cycles)
+        }
     };
     let task = |task: Option<usize>| task.map_or("idle", |task| &meaning.tasks.list[task].name);
     let open = meaning.open();
@@ -1834,10 +2014,14 @@ pub fn lines(trace: &Trace, meaning: &Meaning) -> Vec<String> {
             ));
         }
         for interrupt in &spans.interrupts {
+            let hardware = meaning.handlers.is_hardware(interrupt.handler);
+            let (from, to) = if hardware {
+                (swo_edge(interrupt.span.from), swo_edge(interrupt.span.to))
+            } else {
+                (edge(interrupt.span.from), to(interrupt.span))
+            };
             lines.push(format!(
-                "interrupt from={} to={} depth={} handler={}",
-                edge(interrupt.span.from),
-                to(interrupt.span),
+                "interrupt from={from} to={to} depth={} handler={}",
                 interrupt
                     .depth
                     .map_or_else(|| "unknown".to_owned(), |depth| depth.to_string()),
@@ -1887,6 +2071,9 @@ pub fn lines(trace: &Trace, meaning: &Meaning) -> Vec<String> {
         if let Element::Event { event, .. } = &trace.elements[element] {
             lines.push(format!("contradiction {}", event.index));
         }
+    }
+    for &edge in &meaning.exception_contradictions {
+        lines.push(format!("contradiction {}", swo_edge(edge)));
     }
     lines
 }
