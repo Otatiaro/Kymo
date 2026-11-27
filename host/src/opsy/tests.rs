@@ -1619,7 +1619,7 @@ fn the_swo_replaces_the_adapter_where_it_covers_the_handler() {
     assert_eq!(
         lines(&trace, &meaning),
         [
-            "interrupt from=0 to=1 depth=0 handler=0x08000401 (TIM2)",
+            "interrupt from=@0 to=@10 depth=0 handler=TIM2 (0x08000401)",
             "interrupt from=@121 to=@129 depth=0 handler=TIM2 (0x08000401)",
             "interrupt from=@141 to=lost depth=0 handler=TIM2 (0x08000401)",
         ]
@@ -1636,14 +1636,17 @@ fn the_swo_replaces_the_adapter_where_it_covers_the_handler() {
 }
 
 #[test]
-fn the_adapter_handler_has_no_period_across_the_swo_coverage() {
+fn the_adapter_spans_outside_the_swo_coverage_join_the_swo_handler() {
     // The adapter traces H at 0, 120 and 210; the SWO covers from 100 to
-    // 200, where it replaces the span at 120.
+    // 200, where it replaces the span at 120, and opens H at 240, the end:
+    // one handler, its four runs, the last one cut, and the periods
+    // between their entries.
     let mut steps: Vec<(&str, &[u32])> = vec![("isr_enter", &[H, 16 + 45]), ("isr_exit", &[H])];
     steps.extend([("tick", &[] as &[u32]); 10]);
     steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
     steps.extend([("tick", &[] as &[u32]); 7]);
     steps.extend([("isr_enter", &[H, 16 + 45] as &[u32]), ("isr_exit", &[H])]);
+    steps.extend([("tick", &[] as &[u32]), ("isr_enter", &[H, 16 + 45])]);
     let packets = [
         (0, RETURNED, 105),
         (61, ENTERED, 121),
@@ -1651,15 +1654,22 @@ fn the_adapter_handler_has_no_period_across_the_swo_coverage() {
         (0, RETURNED, 129),
     ];
     let catalogue = catalogue();
-    let (trace, _) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    let (trace, meaning) = with_exceptions(&catalogue, &steps, watched((100, 200), &packets));
+    let open = meaning.open().interrupts;
+    assert_eq!(open.len(), 1);
+    assert_eq!(meaning.handlers.list[open[0].handler].name, "TIM2 (0x08000401)");
     let report = stats::of_trace(&catalogue, &trace, stats::Range::default(), 100).unwrap();
     let names = names(&report);
     assert_eq!(
-        group(&report, "handler 0x08000401 (TIM2) gross"),
-        (2, 0, 0, 0, vec![10, 10])
+        group(&report, "handler TIM2 (0x08000401) gross"),
+        (3, 0, 0, 1, vec![8, 10, 10])
+    );
+    assert_eq!(
+        group(&report, "handler TIM2 (0x08000401) period"),
+        (3, 0, 0, 0, vec![30, 89, 121])
     );
     assert!(
-        !names.contains(&"handler 0x08000401 (TIM2) period".to_owned()),
+        !names.iter().any(|name| name.starts_with("handler 0x08000401 (TIM2)")),
         "{names:?}"
     );
 }
