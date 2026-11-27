@@ -15,7 +15,7 @@
  *     kymo::dwt::start(os, {8'000'000, 2'000'000}); // trace clock, baud rate
  *     kymo::dwt::watch(speed);
  *     kymo::dwt::exceptions();                      // optional: every exception
- *     kymo::dwt::ticks<16'384>();                   // optional: a tick every 16384 cycles
+ *     kymo::dwt::ticks();                           // optional: a tick every 16384 cycles
  *
  * **The anchor.** start() puts a comparator on the timestamp word of the
  * ring's slot 0: each event that starts at slot 0, at most once a lap, sends
@@ -103,6 +103,7 @@ constexpr unsigned dwt_postpreset_shift = 1;
 constexpr std::uint32_t dwt_post_mask = 0xF;
 constexpr std::uint32_t cyccnt_bit_6 = 1U << 6;   ///< POSTCNT's count, CYCTAP clear
 constexpr std::uint32_t cyccnt_bit_10 = 1U << 10; ///< POSTCNT's count, CYCTAP set
+constexpr std::uint32_t longest_tick = cyccnt_bit_10 * (dwt_post_mask + 1); ///< 16384 cycles
 constexpr std::uint32_t dwt_tick_fields =
 	dwt_cycevtena | dwt_cyctap | (dwt_post_mask << dwt_postinit_shift) | (dwt_post_mask << dwt_postpreset_shift);
 constexpr std::uint32_t dwt_notrcpkt = 1U << 27;
@@ -308,10 +309,12 @@ inline void exceptions()
  *
  * The local timestamps between two ticks add up to @p Cycles, which lets the
  * host date and check SWO with neither the anchor nor the debug port.
- * @p Cycles is 64 or 1024 times 1 to 16: at most 16384, 2 ms at 8 MHz. A tick
- * takes about 4 bytes with its timestamp: 2 KB/s at 8 MHz and 16384.
+ * @p Cycles is 64 or 1024 times 1 to 16. The default, 16384, the longest, keeps
+ * the load lowest: a tick takes about 4 bytes with its timestamp, so the load
+ * follows the core clock, 2 KB/s at 8 MHz and 60 KB/s at 250 MHz. A shorter
+ * period cuts less of the stream around a loss.
  */
-template<std::uint32_t Cycles>
+template<std::uint32_t Cycles = detail::longest_tick>
 void ticks()
 {
 	using namespace detail;
