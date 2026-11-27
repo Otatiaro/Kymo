@@ -247,14 +247,14 @@ pub fn date(bytes: &[u8], anchor: u8, watches: &[Watch], expected: &[Expected]) 
 
 /// What dating reads of the stream `bytes`, and the overflows it reports.
 fn read(bytes: &[u8]) -> (Vec<Item>, usize) {
-    let (packets, _) = itm::packets(bytes);
+    let (packets, _) = itm::placed(bytes);
     let mut stream = Vec::new();
     let mut waiting = Vec::new();
     let mut clock = 0u64;
     let mut overflows = 0;
     // The packets the next timestamp dates, those read past included.
     let mut since = 0usize;
-    for packet in packets {
+    for (byte, packet) in packets {
         let what = match packet {
             Packet::DataValue {
                 comparator,
@@ -263,7 +263,7 @@ fn read(bytes: &[u8]) -> (Vec<Item>, usize) {
                 ..
             } => Some(What::Value { comparator, value }),
             Packet::Exception { number, function } => Some(What::Exception { number, function }),
-            Packet::Counter { wrapped } if wrapped & itm::CYC != 0 => Some(What::Tick),
+            Packet::Counter { wrapped } if wrapped & itm::CYC != 0 => Some(What::Tick { byte }),
             _ => None,
         };
         if let Some(what) = what {
@@ -359,9 +359,11 @@ pub fn tick_period(ctrl: u32) -> Option<i64> {
 /// `TOLERANCE`, and no overflow or malformed packet lies between them.
 ///
 /// The stretches dated one after the other are a segment, its cycles counted
-/// from its first tick. A stretch not dated is a gap: the periods it lost
-/// are not known, and the segment after it has an origin of its own.
-pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
+/// from its first tick. A stretch not dated is a gap: the stream does not
+/// tell the periods it lost. The host time of the `reads` places the
+/// segments (`place`), and `clock`, when given, is the cycle counter's
+/// frequency in hertz.
+pub fn tick(bytes: &[u8], reads: &[Read], watches: &[Watch], ctrl: Option<u32>, clock: Option<u64>) -> Ticked {
     let (stream, overflows) = read(bytes);
     let mut ticked = Ticked {
         overflows,
@@ -376,13 +378,21 @@ pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
         .enumerate()
         .filter_map(|(at, item)| match *item {
             Item::Dated {
-                what: What::Tick,
+                what: What::Tick { .. },
                 itm: Some(_),
                 alone,
             } => Some((at, alone)),
             _ => None,
         })
         .collect();
+    // The host time of the read that brought the tick at `at`.
+    let host_of = |at: usize| match stream[at] {
+        Item::Dated {
+            what: What::Tick { byte },
+            ..
+        } => reads.iter().find(|read| read.end > byte).map(|read| read.host_ns),
+        _ => None,
+    };
     // Each tick kept: its rank among the ticks received, and its place.
     let kept: Vec<(usize, usize)> = received
         .iter()
@@ -432,8 +442,10 @@ pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
     let outside = || stream[..first].iter().chain(stream.get(last..).unwrap_or_default());
     ticked.undated = outside().filter(|item| sample(item, watches).is_some()).count();
     ticked.exceptions_undated = outside().filter(|item| exception(item).is_some()).count();
-    // The segment under way, and the rank of its first tick.
+    // The segment under way, and the rank of its first tick; for each
+    // segment, its ticks' cycles and host times.
     let mut segment: Option<(Segment, usize)> = None;
+    let mut points: Vec<Vec<(i64, u64)>> = Vec::new();
     for pair in kept.windows(2) {
         let [(n, start), (m, end)] = [pair[0], pair[1]];
         let between = &stream[start + 1..end];
@@ -446,8 +458,14 @@ pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
             ticked.exceptions_dropped += between.iter().filter(|item| exception(item).is_some()).count();
             continue;
         }
+        if segment.is_none() {
+            points.push(host_of(start).map(|host| (0, host)).into_iter().collect());
+        }
         let (segment, origin) = segment.get_or_insert_with(|| (Segment::default(), n));
         let from = (n - *origin) as i64 * period;
+        if let (Some(host), Some(points)) = (host_of(end), points.last_mut()) {
+            points.push(((m - *origin) as i64 * period, host));
+        }
         let at = |itm: u64| from + itm as i64 - itm_of(start);
         for (watch, value, itm) in between.iter().filter_map(|item| sample(item, watches)) {
             match itm {
@@ -468,16 +486,111 @@ pub fn tick(bytes: &[u8], watches: &[Watch], ctrl: Option<u32>) -> Ticked {
         segment.cycles = (m - *origin) as i64 * period;
     }
     ticked.segments.extend(segment.map(|(segment, _)| segment));
+    place(&mut ticked, period, &points, clock);
     ticked
 }
 
+/// A read of the SWO stream: the offset its bytes end at, and the host time
+/// it was made at, in nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Read {
+    pub end: usize,
+    pub host_ns: u64,
+}
+
+/// Places `ticked`'s segments from the host time of their ticks' reads,
+/// `points`, each segment's in cycles from its first tick (ADR-104 §3).
+///
+/// A line fits host time against cycles: its slope is shared by the
+/// segments, `clock`'s when given, and each segment has an intercept of its
+/// own. The uncertainty is the most a read's host time lies from the line.
+/// Under a quarter of a period, the periods a gap lost are counted and the
+/// time runs on across it; otherwise a segment starts where the line places
+/// it, approximately. A segment starts at least a period after the one
+/// before ends; there, without host times.
+fn place(ticked: &mut Ticked, period: i64, points: &[Vec<(i64, u64)>], clock: Option<u64>) {
+    let base = points.iter().flatten().map(|&(_, host)| host).min().unwrap_or(0);
+    let points: Vec<Vec<(f64, f64)>> = points
+        .iter()
+        .map(|points| {
+            points
+                .iter()
+                .map(|&(cycles, host)| (cycles as f64, (host - base) as f64))
+                .collect()
+        })
+        .collect();
+    let mean = |points: &[(f64, f64)]| {
+        let n = points.len() as f64;
+        let (x, y) = points.iter().fold((0.0, 0.0), |(x, y), &(px, py)| (x + px, y + py));
+        (x / n, y / n)
+    };
+    let fitted = || {
+        let (mut xy, mut xx) = (0.0, 0.0);
+        for points in points.iter().filter(|points| points.len() > 1) {
+            let (mx, my) = mean(points);
+            for &(x, y) in points {
+                xy += (x - mx) * (y - my);
+                xx += (x - mx) * (x - mx);
+            }
+        }
+        (xx > 0.0).then(|| xy / xx)
+    };
+    // Nanoseconds per cycle, then each segment's intercept.
+    let slope = clock.map(|clock| 1e9 / clock as f64).or_else(fitted);
+    let intercepts: Option<Vec<f64>> = slope.and_then(|slope| {
+        points
+            .iter()
+            .map(|points| {
+                (!points.is_empty()).then(|| {
+                    let (mx, my) = mean(points);
+                    my - slope * mx
+                })
+            })
+            .collect()
+    });
+    if let (Some(slope), Some(intercepts)) = (slope, &intercepts) {
+        let uncertainty = points
+            .iter()
+            .zip(intercepts)
+            .flat_map(|(points, &intercept)| points.iter().map(move |&(x, y)| (y - intercept - slope * x).abs()))
+            .fold(0.0, f64::max);
+        ticked.uncertainty = Some(uncertainty);
+        ticked.frequency = Some(1e9 / slope);
+        ticked.counted = uncertainty < period as f64 * slope / 4.0;
+    }
+    for n in 1..ticked.segments.len() {
+        let before = &ticked.segments[n - 1];
+        let least = before.origin + before.cycles + period;
+        let origin = match (slope, &intercepts) {
+            (Some(slope), Some(intercepts)) => {
+                let estimate = (intercepts[n] - intercepts[0]) / slope;
+                if ticked.counted {
+                    (estimate / period as f64).round() as i64 * period
+                } else {
+                    estimate.round() as i64
+                }
+            }
+            _ => least,
+        };
+        ticked.segments[n].origin = origin.max(least);
+    }
+}
+
 /// The samples and exception packets of a stream, dated by the DWT's tick.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Ticked {
     /// What made the stream's ticks unusable, when something did.
     pub refused: Option<String>,
     /// The tick's period, in cycles.
     pub period: Option<i64>,
+    /// The most a read's host time lies from the line the ticks draw, in
+    /// nanoseconds, and the cycle counter's frequency that line gives, in
+    /// hertz: none without two ticks of a segment brought by reads.
+    pub uncertainty: Option<f64>,
+    pub frequency: Option<f64>,
+    /// Whether the periods the gaps lost are counted: the time runs on across
+    /// them. Otherwise the segments after a gap are placed approximately.
+    pub counted: bool,
     /// The ticks kept, and those set aside: their timestamp delayed or
     /// shared.
     pub ticks: usize,
@@ -497,11 +610,12 @@ pub struct Ticked {
     pub exceptions_undated: usize,
 }
 
-/// Stretches between ticks dated one after the other: their cycles, from
-/// the first tick to the last, and what they hold, in cycles from the first
-/// tick.
+/// Stretches between ticks dated one after the other: the cycles of their
+/// first tick from the first segment's, their cycles from the first tick to
+/// the last, and what they hold, in cycles from the first tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Segment {
+    pub origin: i64,
     pub cycles: i64,
     /// The index of its watch, its value and its cycles.
     pub samples: Vec<(usize, u32, i64)>,
@@ -522,9 +636,18 @@ enum Item {
 /// DWT's periodic tick.
 #[derive(Clone, Copy, Debug)]
 enum What {
-    Value { comparator: u8, value: u32 },
-    Exception { number: u16, function: Function },
-    Tick,
+    Value {
+        comparator: u8,
+        value: u32,
+    },
+    Exception {
+        number: u16,
+        function: Function,
+    },
+    /// The tick, and the offset of its packet in the stream.
+    Tick {
+        byte: usize,
+    },
 }
 
 /// An exception packet, dated: the exception's number, what the core did with

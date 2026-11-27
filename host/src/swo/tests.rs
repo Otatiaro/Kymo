@@ -626,11 +626,12 @@ fn ticks_date_the_samples_between_them() {
         .tick()
         .stamp(524);
     assert_eq!(
-        tick(&stream.0, &[LEVEL], None),
+        tick(&stream.0, &[], &[LEVEL], None, None),
         Ticked {
             period: Some(1_024),
             ticks: 3,
             segments: vec![Segment {
+                origin: 0,
                 cycles: 2_048,
                 samples: vec![(0, 42, 100), (0, 7, 1_524)],
                 exceptions: Vec::new(),
@@ -649,7 +650,7 @@ fn ticks_date_the_exception_packets() {
         .stamp(40)
         .tick()
         .stamp(984);
-    let ticked = tick(&stream.0, &[], None);
+    let ticked = tick(&stream.0, &[], &[], None, None);
     assert_eq!(
         ticked.segments[0].exceptions,
         [Exception {
@@ -668,11 +669,11 @@ fn the_period_is_read_from_the_ticks() {
         (16_384, Some(16_384)),
         (1_000, None),
     ] {
-        let ticked = tick(&Stream::default().ticks(&[spacing; 3]).0, &[], None);
+        let ticked = tick(&Stream::default().ticks(&[spacing; 3]).0, &[], &[], None, None);
         assert_eq!(ticked.period, period, "ticks {spacing} cycles apart");
         assert_eq!(ticked.refused.is_some(), period.is_none());
     }
-    let ticked = tick(&Stream::default().ticks(&[]).0, &[], None);
+    let ticked = tick(&Stream::default().ticks(&[]).0, &[], &[], None, None);
     assert!(
         ticked
             .refused
@@ -687,6 +688,8 @@ fn the_period_is_the_spacing_most_seen() {
     let ticked = tick(
         &Stream::default().ticks(&[2_048, 1_024, 1_024, 1_024, 2_048]).0,
         &[],
+        &[],
+        None,
         None,
     );
     assert_eq!(ticked.period, Some(1_024));
@@ -697,7 +700,7 @@ fn the_period_is_the_spacing_most_seen() {
 fn a_stretch_off_its_period_is_a_gap() {
     for (spacing, gaps) in [(1_024 + 8, 0), (1_024 - 8, 0), (1_024 + 9, 1), (1_024 - 9, 1)] {
         let stream = Stream::default().ticks(&[1_024, 1_024, spacing, 1_024, 1_024]);
-        let ticked = tick(&stream.0, &[], None);
+        let ticked = tick(&stream.0, &[], &[], None, None);
         assert_eq!(ticked.gaps, gaps, "a stretch of {spacing} cycles");
         assert_eq!(ticked.segments.len(), 1 + gaps);
     }
@@ -705,7 +708,7 @@ fn a_stretch_off_its_period_is_a_gap() {
 
 #[test]
 fn a_tick_missing_is_a_gap() {
-    let ticked = tick(&Stream::default().ticks(&[1_024, 2_048, 1_024]).0, &[], None);
+    let ticked = tick(&Stream::default().ticks(&[1_024, 2_048, 1_024]).0, &[], &[], None, None);
     assert_eq!(ticked.gaps, 1);
     assert_eq!(
         ticked.segments.iter().map(|segment| segment.cycles).collect::<Vec<_>>(),
@@ -727,7 +730,7 @@ fn a_segment_after_a_gap_has_its_own_origin() {
         .stamp(924)
         .tick()
         .stamp(1_024);
-    let ticked = tick(&stream.0, &[LEVEL], None);
+    let ticked = tick(&stream.0, &[], &[LEVEL], None, None);
     assert_eq!(ticked.gaps, 1);
     assert_eq!(ticked.dropped, 1);
     let samples: Vec<_> = ticked.segments.iter().map(|segment| segment.samples.clone()).collect();
@@ -744,7 +747,7 @@ fn a_broken_stretch_is_a_gap() {
             .stamp(924)
             .tick()
             .stamp(1_024);
-        let ticked = tick(&stream.0, &[], None);
+        let ticked = tick(&stream.0, &[], &[], None, None);
         assert_eq!(ticked.gaps, 1);
         assert_eq!(ticked.exceptions_dropped, 1);
     }
@@ -774,7 +777,7 @@ fn a_tick_delayed_or_shared_dates_nothing() {
         .tick()
         .stamp(1_024);
     for stream in [delayed, shared] {
-        let ticked = tick(&stream.0, &[LEVEL], None);
+        let ticked = tick(&stream.0, &[], &[LEVEL], None, None);
         assert_eq!((ticked.ticks, ticked.set_aside, ticked.gaps), (4, 1, 0));
         // The stretch runs from the tick before to the one after.
         assert_eq!(ticked.segments.len(), 1);
@@ -793,7 +796,7 @@ fn samples_outside_the_ticks_are_undated() {
         .ticks(&[1_024])
         .value(1, 2, 2)
         .stamp(10);
-    let ticked = tick(&stream.0, &[LEVEL], None);
+    let ticked = tick(&stream.0, &[], &[LEVEL], None, None);
     assert_eq!((ticked.undated, ticked.exceptions_undated), (2, 1));
     assert_eq!(ticked.segments[0].samples, []);
 }
@@ -805,7 +808,7 @@ fn dwt_ctrl_checks_the_period() {
     assert_eq!(tick_period(1 << 22 | 4 << 1), Some(320));
     assert_eq!(tick_period(1 << 9 | 15 << 1), None);
     let stream = Stream::default().ticks(&[16_384; 2]);
-    assert_eq!(tick(&stream.0, &[], Some(SIXTEEN_K)).period, Some(16_384));
+    assert_eq!(tick(&stream.0, &[], &[], Some(SIXTEEN_K), None).period, Some(16_384));
     for (ctrl, refused) in [
         (
             1 << 22 | 1 << 9,
@@ -816,7 +819,7 @@ fn dwt_ctrl_checks_the_period() {
             "the ticks come every 16384 cycles, DWT_CTRL sets none",
         ),
     ] {
-        let ticked = tick(&stream.0, &[], Some(ctrl));
+        let ticked = tick(&stream.0, &[], &[], Some(ctrl), None);
         assert_eq!(ticked.refused.as_deref(), Some(refused));
         assert_eq!(ticked.segments, []);
     }
@@ -831,7 +834,62 @@ fn a_counter_packet_without_cyc_is_no_tick() {
         .stamp(500)
         .tick()
         .stamp(524);
-    let ticked = tick(&stream.0, &[], None);
+    let ticked = tick(&stream.0, &[], &[], None, None);
     assert_eq!((ticked.ticks, ticked.gaps), (3, 0));
     assert_eq!(ticked.segments[0].cycles, 2_048);
+}
+
+/// Ticks `spacings` cycles apart, the first one cycle in, each brought by a
+/// read of its own at the host time of its cycles, in nanoseconds, plus its
+/// `jitter`.
+fn read_ticks(spacings: &[u32], jitter: &[i64]) -> (Vec<u8>, Vec<Read>) {
+    let mut stream = Stream::default();
+    let mut reads = Vec::new();
+    let mut cycles = 1;
+    for (n, &spacing) in [1].iter().chain(spacings).enumerate() {
+        cycles += i64::from(spacing) - 1;
+        stream = stream.tick().stamp(spacing);
+        let host_ns = (1_000_000 + cycles + jitter[n]) as u64;
+        reads.push(Read {
+            end: stream.0.len(),
+            host_ns,
+        });
+        cycles += 1;
+    }
+    (stream.0, reads)
+}
+
+#[test]
+fn the_periods_a_gap_lost_are_counted() {
+    // 1 ns a cycle; two ticks lost; the reads off by a fifth of a period at most,
+    // the second segment's by 150 ns more on average.
+    let (bytes, reads) = read_ticks(&[1_024, 1_024, 3_072, 1_024, 1_024], &[100, -200, 100, 150, 150, 150]);
+    let ticked = tick(&bytes, &reads, &[], None, None);
+    assert!(ticked.counted);
+    assert!((ticked.frequency.unwrap() - 1e9).abs() < 1.0);
+    assert_eq!(ticked.uncertainty.map(f64::round), Some(200.0));
+    let origins: Vec<i64> = ticked.segments.iter().map(|segment| segment.origin).collect();
+    assert_eq!(origins, [0, 5_120]);
+}
+
+#[test]
+fn a_gap_past_a_quarter_of_a_period_is_placed_approximately() {
+    // Off by 400 ns, between a quarter and a half of the period.
+    let (bytes, reads) = read_ticks(&[1_024, 1_024, 3_072, 1_024, 1_024], &[0, 400, -400, 400, 400, 400]);
+    let ticked = tick(&bytes, &reads, &[], None, Some(1_000_000_000));
+    assert!(!ticked.counted);
+    assert_eq!(ticked.frequency, Some(1e9));
+    let origins: Vec<i64> = ticked.segments.iter().map(|segment| segment.origin).collect();
+    assert_eq!(origins, [0, 5_520]);
+}
+
+#[test]
+fn a_segment_starts_a_period_after_the_one_before_at_least() {
+    // Without reads, and with reads placing it too early.
+    let (bytes, _) = read_ticks(&[1_024, 2_048, 1_024], &[0; 4]);
+    let ticked = tick(&bytes, &[], &[], None, None);
+    assert_eq!((ticked.counted, ticked.uncertainty), (false, None));
+    assert_eq!(ticked.segments[1].origin, 2_048);
+    let (bytes, reads) = read_ticks(&[1_024, 2_048, 1_024], &[0, 0, -2_000, -2_000]);
+    assert_eq!(tick(&bytes, &reads, &[], None, None).segments[1].origin, 2_048);
 }
